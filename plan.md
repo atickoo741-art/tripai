@@ -62,3 +62,53 @@ Day 3: Collect metrics, run ablations and true‑quant check.
 Day 4: Draft a mini report: tables of perplexity, memory, and speed.
 
 By the end of four days you’ll have clear, quantitative evidence whether your W4A4‑LoRA‑QAT stack is worth scaling up to 1 B+ models. 
+
+## Detailed Plan for "Your Method" (W4A4 QAT) in `train_qat.py`
+
+1.  **Model Loading and LoRA Initialization (Already done in `train_qat.py`):**
+    *   Load `gpt2` model and tokenizer.
+    *   Apply zero-initialized LoRA adapters using `peft`.
+    *   The `peft_model` is now ready with trainable LoRA parameters.
+
+2.  **Define Core Quantization Components (Already partially defined):**
+    *   `FakeQuantize` `torch.autograd.Function`: This handles the core 4-bit quantization and dequantization with Straight-Through Estimator (STE). (Already defined)
+    *   `W4A4Linear` `nn.Module`: This custom module wraps `nn.Linear` layers to apply `FakeQuantize` to weights and activations. (Already defined)
+    *   `PACT` `nn.Module`: This module applies the parametric clipping to activations with a learnable threshold. (Already defined)
+
+3.  **Implement SmoothQuant Layer with Trainable Scalar α:**
+    *   **Concept:** SmoothQuant aims to balance the quantization difficulty between weights and activations by applying a learnable scaling factor (`α`).
+    *   **Implementation:**
+        *   We need a `SmoothQuantScaler` module that contains a trainable `alpha` (`nn.Parameter`).
+        *   This scaler will be applied to the input of certain layers (e.g., Q/K/V projections in attention, and the first linear layer in MLP).
+        *   The scaling also needs to be inversed on the corresponding weights.
+        *   Since `alpha` is per transformer block, we'll place an instance of this module within our custom `GPT2Block`.
+
+4.  **Create a Custom Quantization-Aware `GPT2Block`:**
+    *   **Rationale:** To precisely control where `W4A4Linear`, `SmoothQuant`, and `PACT` are inserted and to ensure `alpha` and PACT parameters are trainable, we will create a custom `QuantizedGPT2Block`. This block will inherit from the original `transformers.models.gpt2.modeling_gpt2.GPT2Block` and override its `forward` method.
+    *   **Modifications within `QuantizedGPT2Block`:**
+        *   **Attention Block:**
+            *   Apply `SmoothQuantScaler` to the input of `c_attn` (which handles Q, K, V).
+            *   Replace the original `c_attn` and `c_proj` `nn.Linear` layers with our `W4A4Linear` wrappers.
+            *   Insert `PACT` after the `c_proj` layer (attention output).
+        *   **MLP Block:**
+            *   Apply `SmoothQuantScaler` to the input of `c_fc` (the first linear layer in MLP).
+            *   Replace the original `c_fc` and `c_proj` `nn.Linear` layers with our `W4A4Linear` wrappers.
+            *   Insert `PACT` after the `c_proj` layer (MLP output).
+        *   Crucially, ensure that `alpha` and PACT parameters are registered as `nn.Parameter` so they are trained.
+
+5.  **Replace Original `GPT2Block`s with Custom Blocks:**
+    *   Iterate through `peft_model.transformer.h` (the list of transformer blocks) and replace each original `GPT2Block` with an instance of our `QuantizedGPT2Block`.
+
+6.  **Configure Trainable Parameters:**
+    *   After replacing blocks, iterate through all parameters in `peft_model`.
+    *   Freeze all parameters that are *not* LoRA adapters, SmoothQuant `alpha`s, or PACT clipping thresholds by setting `param.requires_grad = False`. This ensures "only LoRA adapters (α + PACT thresholds count as adapter params)" are trained.
+
+7.  **Setup and Run Training Loop:**
+    *   Load and preprocess WikiText-2 dataset using `data_preparation.py`.
+    *   Set up `transformers.Trainer` with `TrainingArguments` for one epoch.
+    *   Use `DataCollatorForLanguageModeling`.
+    *   Run `trainer.train()`.
+
+8.  **Validation Metrics:**
+    *   Measure perplexity on the held-out split after training.
+    *   Add placeholders/notes for logging peak GPU memory and measuring per-step training time (these will require running on a GPU). 

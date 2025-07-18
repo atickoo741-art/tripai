@@ -75,27 +75,10 @@ class PACT(nn.Module):
         x = torch.where(x < 0, torch.zeros_like(x), x) # Simple ReLU if not already ReLU
         return torch.min(x, self.clip_val.abs())
 
-# Define SmoothQuant Scaler
-class SmoothQuantScaler(nn.Module):
-    def __init__(self, init_alpha=0.5):
-        super().__init__()
-        # Alpha is a learnable parameter, initialized between 0 and 1
-        self.alpha = nn.Parameter(torch.tensor(init_alpha, dtype=torch.bfloat16))
-
-    def forward(self, x):
-        # This module itself doesn't transform x directly in isolation. 
-        # The actual smoothing logic (scaling weights and activations) will be handled in the QuantizedGPT2Block
-        # by combining this alpha with the linear layer's operations.
-        return x
-
 # Custom Quantization-Aware GPT2Block
 class QuantizedGPT2Block(GPT2Block):
     def __init__(self, config, layer_idx):
         super().__init__(config, layer_idx)
-        # Initialize SmoothQuantScaler for this block
-        self.smooth_quant_scaler_attn = SmoothQuantScaler()
-        self.smooth_quant_scaler_mlp = SmoothQuantScaler()
-
         # Replace original Linear layers with W4A4Linear
         self.attn.c_attn = W4A4Linear(self.attn.c_attn)
         self.attn.c_proj = W4A4Linear(self.attn.c_proj)
@@ -112,43 +95,25 @@ class QuantizedGPT2Block(GPT2Block):
         layer_past=None,
         attention_mask=None,
         head_mask=None,
-        encoder_hidden_states=None,
-        encoder_attention_mask=None,
-        use_cache=False,
-        output_attentions=False,
-        **kwargs, # Capture all other arguments
+        encoder_hidden_states=None,  # Uncommented - likely passed as positional
+        encoder_attention_mask=None,  # Uncommented - likely passed as positional
+        use_cache=False,  # Uncommented - likely passed as positional
+        output_attentions=False,  # Uncommented - likely passed as positional
+        **kwargs,  # Capture all other arguments
     ):
-        # Explicitly remove encoder_hidden_states and encoder_attention_mask from kwargs
-        # as they are passed by GPT2Model but are not used by a causal LM block and can cause TypeError.
-        encoder_hidden_states = kwargs.pop("encoder_hidden_states", None)
-        encoder_attention_mask = kwargs.pop("encoder_attention_mask", None)
-
-        # SmoothQuant application: Scale activations (hidden_states) before attention and MLP
-        # and inversely scale the weights inside W4A4Linear or here if it was done outside.
-        # For simplicity in this prototype, we'll apply the alpha to activations here.
-        # A more rigorous SmoothQuant would also adjust weights, but W4A4Linear already handles weight quantization.
-
-        # Attention part
-        # Apply SmoothQuant scaling to input of attention (Q, K, V are derived from hidden_states by c_attn)
-        # The `smooth_quant_scaler_attn.alpha` will be learned.
-        # This `smooth_quant_scaler_attn(hidden_states)` call is primarily for registering alpha as trainable.
-        # For a simple prototype, we'll train alpha as a parameter that directly scales the activation input to linear layers.
+        # No need to pop from kwargs since they're now explicit parameters
         
-        # Apply alpha for SmoothQuant to attention input (hidden_states)
-        attn_input_smoothed = hidden_states * self.smooth_quant_scaler_attn.alpha
-
-        # Original attention forward pass, but with our W4A4Linear and PACT applied inside the block.
-        # We need to call the parent's forward method to ensure all sub-modules are correctly used.
-        # The key is that `self.attn.c_attn` etc are now `W4A4Linear` instances.
-        # GPT2Attention expects `hidden_states`, `layer_past`, `attention_mask`, etc.
+        # Attention part
         attn_outputs = self.attn(
-            attn_input_smoothed, # Pass the smoothed input to attention
+            hidden_states,  # Pass the original hidden_states to attention
             layer_past=layer_past,
             attention_mask=attention_mask,
             head_mask=head_mask,
             use_cache=use_cache,
             output_attentions=output_attentions,
-            **kwargs, # Pass remaining kwargs to attention module
+            encoder_hidden_states=encoder_hidden_states,  # Pass explicitly to sub-module
+            encoder_attention_mask=encoder_attention_mask,  # Pass explicitly to sub-module
+            **kwargs,  # Pass remaining kwargs to attention module
         )
         attn_output = attn_outputs[0]  # output_attn: a, present, (attentions)
         outputs = attn_outputs[1:]
@@ -157,21 +122,23 @@ class QuantizedGPT2Block(GPT2Block):
         attn_output = self.pact_attn(attn_output)
 
         # Residual connection and LayerNorm
-        hidden_states = attn_output + hidden_states # Residual connection for attention
-        hidden_states = self.ln_1(hidden_states) # LayerNorm
+        hidden_states = attn_output + hidden_states  # Residual connection for attention
+        hidden_states = self.ln_1(hidden_states)  # LayerNorm
 
         # MLP part
-        # Apply SmoothQuant scaling to input of MLP
-        mlp_input_smoothed = self.smooth_quant_scaler_mlp(hidden_states)
-
-        mlp_output = self.mlp(mlp_input_smoothed) # MLP forward pass with W4A4Linear inside
+        mlp_output = self.mlp(
+            hidden_states,  # MLP forward pass with W4A4Linear inside
+            encoder_hidden_states=encoder_hidden_states,  # Pass explicitly to sub-module
+            encoder_attention_mask=encoder_attention_mask,  # Pass explicitly to sub-module
+            **kwargs,  # Pass remaining kwargs to MLP module
+        )
 
         # Apply PACT after MLP output
         mlp_output = self.pact_mlp(mlp_output)
 
         # Residual connection and LayerNorm
-        hidden_states = mlp_output + hidden_states # Residual connection for MLP
-        hidden_states = self.ln_2(hidden_states) # LayerNorm
+        hidden_states = mlp_output + hidden_states  # Residual connection for MLP
+        hidden_states = self.ln_2(hidden_states)  # LayerNorm
 
         if use_cache:
             outputs = (hidden_states,) + outputs
@@ -214,21 +181,20 @@ print("\n--- LoRA Adapters Applied ---")
 peft_model.print_trainable_parameters()
 
 # 4. Replace original GPT2Blocks with QuantizedGPT2Blocks
-print("\n--- Inserting W4A4 Fake-Quantization Hooks, PACT, and SmoothQuant into GPT2Blocks ---")
+print("\n--- Inserting W4A4 Fake-Quantization Hooks and PACT into GPT2Blocks ---")
 for i, block in enumerate(peft_model.transformer.h):
     peft_model.transformer.h[i] = QuantizedGPT2Block(peft_model.config, i)
 
 # 5. Configure Trainable Parameters
-# Ensure only LoRA adapters, SmoothQuant alphas, and PACT thresholds are trainable.
-print("\n--- Configuring Trainable Parameters (LoRA, SmoothQuant Alpha, PACT Clip_Val) ---")
+# Ensure only LoRA adapters and PACT thresholds are trainable.
+print("\n--- Configuring Trainable Parameters (LoRA, PACT Clip_Val) ---")
 for name, param in peft_model.named_parameters():
     # LoRA parameters are automatically set to requires_grad=True by peft.
-    # We only need to ensure the SmoothQuant alpha and PACT clip_val are trainable,
+    # We only need to ensure the PACT clip_val are trainable,
     # and other base model parameters are frozen.
 
-    # SmoothQuant alphas are parameters within QuantizedGPT2Block.smooth_quant_scaler_attn/mlp.alpha
     # PACT clip_vals are parameters within QuantizedGPT2Block.pact_attn/mlp.clip_val
-    if "lora" in name or "smooth_quant_scaler" in name or "pact" in name:
+    if "lora" in name or "pact" in name:
         param.requires_grad = True
     else:
         param.requires_grad = False
@@ -247,7 +213,7 @@ if __name__ == "__main__":
     print("\n--- Setting up Training Loop for W4A4 QAT --- ")
 
     # Load and preprocess the WikiText-2 dataset
-    datasets, _ = load_and_preprocess_wikitext2(model_name="gpt2") # Use _ for tokenizer as it's already loaded
+    datasets, _ = load_and_preprocess_wikitext2(model_name="gpt2") # Use _ for tokenizer as it\'s already loaded
     train_dataset = datasets["train"]
     eval_dataset = datasets["validation"]
 
@@ -294,6 +260,6 @@ if __name__ == "__main__":
     eval_results = trainer.evaluate()
     print(f"Perplexity: {torch.exp(torch.tensor(eval_results["eval_loss"]))}")
 
-    # Save the LoRA adapters (and implicitly, the SmoothQuant and PACT parameters as part of the PEFT model)
+    # Save the LoRA adapters (and implicitly, the PACT parameters as part of the PEFT model)
     peft_model.save_pretrained("./qat_lora_adapters")
     print("W4A4 QAT LoRA adapters saved to ./qat_lora_adapters") 

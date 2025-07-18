@@ -59,7 +59,10 @@ class W4A4Linear(nn.Module):
 
         # Perform the linear operation with quantized input and weights
         # Note: Bias is not quantized, it's usually kept in full precision.
-        output = F.linear(quant_input, quant_weight, self.original_linear.bias)
+        # IMPORTANT: GPT-2 uses Conv1D, where weights are (in_features, out_features).
+        # F.linear expects weights as (out_features, in_features) and applies transpose internally (input @ weight.T).
+        # So, we need to transpose quant_weight before passing it to F.linear to match Conv1D behavior.
+        output = F.linear(quant_input, quant_weight.T, self.original_linear.bias)
         return output
 
 # Define the PACT activation clamp
@@ -89,63 +92,71 @@ class QuantizedGPT2Block(GPT2Block):
         self.pact_attn = PACT()
         self.pact_mlp = PACT()
 
-    def forward(
-        self,
-        hidden_states,
-        layer_past=None,
-        attention_mask=None,
-        head_mask=None,
-        encoder_hidden_states=None,  # Uncommented - likely passed as positional
-        encoder_attention_mask=None,  # Uncommented - likely passed as positional
-        use_cache=False,  # Uncommented - likely passed as positional
-        output_attentions=False,  # Uncommented - likely passed as positional
-        **kwargs,  # Capture all other arguments
-    ):
-        # No need to pop from kwargs since they're now explicit parameters
+    def forward(self, *args, **kwargs):
+        """
+        Robust forward method that handles both positional and keyword arguments
+        to avoid conflicts with multiple argument passing styles.
+        """
+        # Extract arguments in order, with fallbacks to kwargs
+        hidden_states = args[0] if len(args) > 0 else kwargs.get('hidden_states')
+        layer_past = args[1] if len(args) > 1 else kwargs.get('layer_past', None)
+        attention_mask = args[2] if len(args) > 2 else kwargs.get('attention_mask', None)
+        head_mask = args[3] if len(args) > 3 else kwargs.get('head_mask', None)
+        encoder_hidden_states = args[4] if len(args) > 4 else kwargs.get('encoder_hidden_states', None)
+        encoder_attention_mask = args[5] if len(args) > 5 else kwargs.get('encoder_attention_mask', None)
+        use_cache = args[6] if len(args) > 6 else kwargs.get('use_cache', False)
+        output_attentions = args[7] if len(args) > 7 else kwargs.get('output_attentions', False)
+        
+        # Remove the extracted arguments from kwargs to avoid passing them twice
+        kwargs_clean = {k: v for k, v in kwargs.items() if k not in [
+            'hidden_states', 'layer_past', 'attention_mask', 'head_mask',
+            'encoder_hidden_states', 'encoder_attention_mask', 'use_cache', 'output_attentions'
+        ]}
         
         # Attention part
         attn_outputs = self.attn(
-            hidden_states,  # Pass the original hidden_states to attention
+            hidden_states,
             layer_past=layer_past,
             attention_mask=attention_mask,
             head_mask=head_mask,
             use_cache=use_cache,
             output_attentions=output_attentions,
-            encoder_hidden_states=encoder_hidden_states,  # Pass explicitly to sub-module
-            encoder_attention_mask=encoder_attention_mask,  # Pass explicitly to sub-module
-            **kwargs,  # Pass remaining kwargs to attention module
+            encoder_hidden_states=encoder_hidden_states,
+            encoder_attention_mask=encoder_attention_mask,
+            **kwargs_clean,
         )
-        attn_output = attn_outputs[0]  # output_attn: a, present, (attentions)
+        attn_output = attn_outputs[0]
         outputs = attn_outputs[1:]
 
         # Apply PACT after attention output
         attn_output = self.pact_attn(attn_output)
 
         # Residual connection and LayerNorm
-        hidden_states = attn_output + hidden_states  # Residual connection for attention
-        hidden_states = self.ln_1(hidden_states)  # LayerNorm
+        hidden_states = attn_output + hidden_states
+        hidden_states = self.ln_1(hidden_states)
 
         # MLP part
         mlp_output = self.mlp(
-            hidden_states,  # MLP forward pass with W4A4Linear inside
-            encoder_hidden_states=encoder_hidden_states,  # Pass explicitly to sub-module
-            encoder_attention_mask=encoder_attention_mask,  # Pass explicitly to sub-module
-            **kwargs,  # Pass remaining kwargs to MLP module
+            hidden_states,
+            encoder_hidden_states=encoder_hidden_states,
+            encoder_attention_mask=encoder_attention_mask,
+            **kwargs_clean,
         )
 
         # Apply PACT after MLP output
         mlp_output = self.pact_mlp(mlp_output)
 
         # Residual connection and LayerNorm
-        hidden_states = mlp_output + hidden_states  # Residual connection for MLP
-        hidden_states = self.ln_2(hidden_states)  # LayerNorm
+        hidden_states = mlp_output + hidden_states
+        hidden_states = self.ln_2(hidden_states)
 
         if use_cache:
             outputs = (hidden_states,) + outputs
         else:
             outputs = (hidden_states,) + outputs[1:]
 
-        return outputs  # hidden_states, present, (attentions, cross_attentions)
+        return outputs
+
 
 # 1. Load the GPT-2 small model and tokenizer
 model_name = "gpt2"

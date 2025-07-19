@@ -112,3 +112,24 @@ By the end of four days you’ll have clear, quantitative evidence whether your 
 8.  **Validation Metrics:**
     *   Measure perplexity on the held-out split after training.
     *   Add placeholders/notes for logging peak GPU memory and measuring per-step training time (these will require running on a GPU). 
+
+    # W4A4Linear Quantization Refactor Plan
+
+## Notes
+- User is dissatisfied with the current quantization logic in W4A4Linear ("it sounds as if there is no quantization even going on").
+- Current implementation uses fixed scale/zero_point values and does not properly quantize weights/activations.
+- User expects a more robust and correct quantization implementation (not just fake quantization with placeholder params).
+- The class should quantize and dequantize weights and activations using proper min/max or statistics-based scale/zero_point.
+
+## Task List
+- [ ] Refactor W4A4Linear to use proper quantization logic:
+  - [ ] Compute scale and zero_point from weight/activation min/max.
+  - [ ] Quantize weights and activations before linear operation.
+  - [ ] Dequantize after linear operation if needed.
+  - [ ] Ensure correct handling of quantization range for num_bits.
+  - [ ] Add comments and docstrings for clarity.
+- [ ] Test the new implementation for correctness.
+- [ ] Review with user and iterate if needed.
+
+## Current Goal
+Implement correct quantization logic in W4A4Linear.

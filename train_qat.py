@@ -12,8 +12,8 @@ class FakeQuantize(torch.autograd.Function):
     @staticmethod
     def forward(ctx, x, scale, zero_point, num_bits):
         # Clamp values to the quantization range
-        qmin = 0.
-        qmax = 2.**num_bits - 1.
+        qmin = 0
+        qmax = 2**num_bits - 1
         
         # Ensure scale and zero_point are broadcastable
         scale_b = scale.view(x.shape[0], *([1] * (x.ndim - 1))) if scale.ndim > 1 and x.ndim > 1 else scale
@@ -33,29 +33,103 @@ class FakeQuantize(torch.autograd.Function):
         return grad_output, None, None, None
 
 class W4A4Linear(nn.Module):
-    def __init__(self, original_linear_layer, num_bits=4):
+    def __init__(self, original_linear_layer, num_bits=4, init_clip_val=6.0):
         super().__init__()
         self.original_linear = original_linear_layer
         self.num_bits = num_bits
         self.fake_quantize = FakeQuantize.apply
+        
+        # For activations: use PACT-style learnable clipping (symmetric around zero)
+        self.activation_clip = nn.Parameter(torch.tensor(init_clip_val, dtype=torch.bfloat16))
+        
+        # Buffers for scale and zero point (computed in forward)
+        self.register_buffer('weight_scale', torch.ones(1, dtype=torch.bfloat16))
+        self.register_buffer('weight_zero_point', torch.zeros(1, dtype=torch.bfloat16))
+        self.register_buffer('act_scale', torch.ones(1, dtype=torch.bfloat16))
+        self.register_buffer('act_zero_point', torch.zeros(1, dtype=torch.bfloat16))
 
-        # For simplicity in this fast-fail prototype, we'll use simple per-tensor
-        # scale and zero_point, which will be estimated or set initially.
-        # In a full implementation, you'd calculate these based on min/max of weights/activations.
-        # These are placeholders and will need proper initialization or learning.
-        self.register_buffer('weight_scale', torch.tensor(0.1, dtype=torch.bfloat16))
-        self.register_buffer('weight_zero_point', torch.tensor(0., dtype=torch.bfloat16))
-        self.register_buffer('act_scale', torch.tensor(0.1, dtype=torch.bfloat16))
-        self.register_buffer('act_zero_point', torch.tensor(0., dtype=torch.bfloat16))
+    def _calculate_quant_params(self, min_val, max_val, num_bits):
+        """Calculate scale and zero-point for asymmetric quantization."""
+        qmin = 0
+        qmax = 2 ** num_bits - 1
+        
+        # Ensure min <= max and handle the case where they're too close
+        min_val = torch.min(min_val, max_val - 1e-5)
+        
+        # Calculate scale and zero point
+        scale = (max_val - min_val) / (qmax - qmin)
+        scale = torch.clamp(scale, min=1e-8)  # Avoid division by zero
+        zero_point = qmin - torch.round(min_val / scale)
+        
+        # Clamp zero point to valid range
+        zero_point = torch.clamp(zero_point, qmin, qmax)
+        
+        return scale, zero_point
 
+    def _get_merged_weights(self):
+        """Merge base weights with LoRA deltas if they exist."""
+        # Get base weights
+        base_weight = self.original_linear.weight
+        
+        # Check if this is a LoRA layer
+        if hasattr(self.original_linear, 'lora_A') and hasattr(self.original_linear, 'lora_B'):
+            # Calculate LoRA delta: lora_B @ lora_A * scaling
+            lora_A = self.original_linear.lora_A.default.weight
+            lora_B = self.original_linear.lora_B.default.weight
+            lora_scaling = self.original_linear.scaling['default']
+            
+            # Apply LoRA scaling and calculate delta
+            lora_delta = lora_B @ lora_A * lora_scaling
+            
+            # Ensure lora_delta has the same shape as base_weight
+            if lora_delta.shape != base_weight.shape:
+                # This handles the case where LoRA is applied to a subset of the weight matrix
+                # We assume the LoRA delta is applied to the first part of the weight matrix
+                delta = torch.zeros_like(base_weight)
+                delta[:lora_delta.shape[0], :lora_delta.shape[1]] = lora_delta
+                lora_delta = delta
+                
+            # Merge base weights with LoRA delta
+            return base_weight + lora_delta
+            
+        return base_weight
+        
     def forward(self, input):
-        # Apply fake quantization to input (activation)
-        quant_input = self.fake_quantize(input, self.act_scale, self.act_zero_point, self.num_bits)
-
-        # Apply fake quantization to weights (assuming original_linear.weight is the weight)
-        # For weights, the scale and zero_point would typically be determined once after training or during QAT initialization.
-        # Here, we're applying it in forward pass for simplicity, assuming they are fixed/pre-calculated.
-        quant_weight = self.fake_quantize(self.original_linear.weight, self.weight_scale, self.weight_zero_point, self.num_bits)
+        # Get merged weights (base + LoRA delta if applicable)
+        merged_weights = self._get_merged_weights()
+        
+        # Simple per-tensor quantization for weights
+        weight_min = merged_weights.min()
+        weight_max = merged_weights.max()
+        
+        # Calculate quantization parameters for weights
+        weight_scale, weight_zero_point = self._calculate_quant_params(
+            weight_min, weight_max, self.num_bits
+        )
+        
+        # PACT: symmetric clipping around zero for activations
+        clip_val = torch.abs(self.activation_clip)
+        clipped_input = torch.clamp(input, -clip_val, clip_val)
+        
+        # Calculate activation scale and zero point based on clipped input
+        act_scale, act_zero_point = self._calculate_quant_params(
+            -clip_val, clip_val, self.num_bits
+        )
+        
+        # Store scale and zero point for potential use in other methods
+        self.weight_scale.copy_(weight_scale.detach())
+        self.weight_zero_point.copy_(weight_zero_point.detach())
+        self.act_scale.copy_(act_scale.detach())
+        self.act_zero_point.copy_(act_zero_point.detach())
+        
+        # Apply fake quantization to activations and weights
+        quant_input = self.fake_quantize(clipped_input, act_scale, act_zero_point, self.num_bits)
+        quant_weight = self.fake_quantize(
+            merged_weights,
+            weight_scale, 
+            weight_zero_point, 
+            self.num_bits
+        )
 
         # Perform the linear operation with quantized input and weights
         # Note: Bias is not quantized, it's usually kept in full precision.
@@ -64,19 +138,6 @@ class W4A4Linear(nn.Module):
         # So, we need to transpose quant_weight before passing it to F.linear to match Conv1D behavior.
         output = F.linear(quant_input, quant_weight.T, self.original_linear.bias)
         return output
-
-# Define the PACT activation clamp
-class PACT(nn.Module):
-    def __init__(self, init_clip_val=1.0):
-        super().__init__()
-        # The clipping threshold is a learnable parameter
-        self.clip_val = nn.Parameter(torch.tensor(init_clip_val, dtype=torch.bfloat16))
-
-    def forward(self, x):
-        # Clamp x between 0 and clip_val, assuming ReLU-like activations, or symmetric otherwise.
-        # Let's assume non-negative for now for simplicity, as it's common for activations that follow a ReLU-like function.
-        x = torch.where(x < 0, torch.zeros_like(x), x) # Simple ReLU if not already ReLU
-        return torch.min(x, self.clip_val.abs())
 
 # Custom Quantization-Aware GPT2Block
 class QuantizedGPT2Block(GPT2Block):
@@ -88,9 +149,6 @@ class QuantizedGPT2Block(GPT2Block):
         self.mlp.c_fc = W4A4Linear(self.mlp.c_fc)
         self.mlp.c_proj = W4A4Linear(self.mlp.c_proj)
 
-        # Initialize PACT for attention and MLP outputs
-        self.pact_attn = PACT()
-        self.pact_mlp = PACT()
 
     def forward(self, *args, **kwargs):
         """
@@ -128,9 +186,6 @@ class QuantizedGPT2Block(GPT2Block):
         attn_output = attn_outputs[0]
         outputs = attn_outputs[1:]
 
-        # Apply PACT after attention output
-        attn_output = self.pact_attn(attn_output)
-
         # Residual connection and LayerNorm
         hidden_states = attn_output + hidden_states
         hidden_states = self.ln_1(hidden_states)
@@ -142,9 +197,6 @@ class QuantizedGPT2Block(GPT2Block):
             encoder_attention_mask=encoder_attention_mask,
             **kwargs_clean,
         )
-
-        # Apply PACT after MLP output
-        mlp_output = self.pact_mlp(mlp_output)
 
         # Residual connection and LayerNorm
         hidden_states = mlp_output + hidden_states
@@ -191,10 +243,22 @@ peft_model = get_peft_model(model, lora_config)
 print("\n--- LoRA Adapters Applied ---")
 peft_model.print_trainable_parameters()
 
-# 4. Replace original GPT2Blocks with QuantizedGPT2Blocks
-print("\n--- Inserting W4A4 Fake-Quantization Hooks and PACT into GPT2Blocks ---")
-for i, block in enumerate(peft_model.transformer.h):
-    peft_model.transformer.h[i] = QuantizedGPT2Block(peft_model.config, i)
+def apply_quantization_to_model(model):
+    """Apply W4A4Linear to all linear layers in the model"""
+    for name, module in model.named_modules():
+        if isinstance(module, (nn.Linear, torch.nn.modules.conv.Conv1D)):
+            # Get parent module and attribute name
+            parent = model
+            attrs = name.split('.')
+            for attr in attrs[:-1]:
+                parent = getattr(parent, attr)
+            
+            # Replace with quantized version
+            setattr(parent, attrs[-1], W4A4Linear(module))
+
+# Apply quantization to all linear layers in the model
+print("\n--- Applying W4A4 quantization to all linear layers ---")
+apply_quantization_to_model(peft_model)
 
 # 5. Configure Trainable Parameters
 # Ensure only LoRA adapters and PACT thresholds are trainable.
@@ -204,8 +268,8 @@ for name, param in peft_model.named_parameters():
     # We only need to ensure the PACT clip_val are trainable,
     # and other base model parameters are frozen.
 
-    # PACT clip_vals are parameters within QuantizedGPT2Block.pact_attn/mlp.clip_val
-    if "lora" in name or "pact" in name:
+    # Enable gradients for LoRA parameters and activation_clip parameters
+    if "lora" in name or "activation_clip" in name:
         param.requires_grad = True
     else:
         param.requires_grad = False

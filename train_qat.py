@@ -50,21 +50,21 @@ class W4A4Linear(nn.Module):
         self.out_features = original_linear_layer.out_features
         
         # PACT activation clipping
-        self.activation_clip = nn.Parameter(torch.tensor(init_clip_val, dtype=torch.bfloat16))
+        self.activation_clip = nn.Parameter(torch.tensor(init_clip_val, dtype=torch.float32))
         
         # SmoothQuant parameters
         self.raw_alpha = nn.Parameter(torch.tensor(0.5))  # Will be passed through sigmoid
         # Track per-channel input statistics
-        self.register_buffer('input_absmax', torch.ones(self.in_features, dtype=torch.bfloat16))
+        self.register_buffer('input_absmax', torch.ones(self.in_features, dtype=torch.float32))
         self.momentum = 0.1  # For EMA of input statistics
         
         # Buffers for quantization parameters
         # Per-channel for weights ([out_features])
-        self.register_buffer('weight_scale', torch.ones(self.out_features, dtype=torch.bfloat16))
-        self.register_buffer('weight_zero_point', torch.zeros(self.out_features, dtype=torch.bfloat16))
+        self.register_buffer('weight_scale', torch.ones(self.out_features, dtype=torch.float32))
+        self.register_buffer('weight_zero_point', torch.zeros(self.out_features, dtype=torch.float32))
         # Per-tensor for activations
-        self.register_buffer('act_scale', torch.ones(1, dtype=torch.bfloat16))
-        self.register_buffer('act_zero_point', torch.zeros(1, dtype=torch.bfloat16))
+        self.register_buffer('act_scale', torch.ones(1, dtype=torch.float32))
+        self.register_buffer('act_zero_point', torch.zeros(1, dtype=torch.float32))
 
     def _calculate_quant_params(self, min_vals, max_vals, num_bits):
         """Calculate scale and zero-point for quantization, supporting per-channel.

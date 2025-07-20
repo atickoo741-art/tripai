@@ -160,8 +160,8 @@ class W4A4Linear(nn.Module):
         # Calculate per-input-channel scaling factor using SmoothQuant formula:
         # s_j = (|X_j|^(1-alpha)) * (|W_j|^alpha)
         # where |X_j| is input_absmax[j] and |W_j| is weight_absmax_per_input_channel[j]
-        scaling_factor = (self.input_absmax.detach() ** (1 - self.alpha)) * \
-                        (weight_absmax_per_input_channel.detach() ** self.alpha)
+        scaling_factor = (self.input_absmax.detach() ** (self.alpha)) * \
+                        (weight_absmax_per_input_channel.detach() ** (1 - self.alpha))
         scaling_factor = scaling_factor.clamp(min=1e-8)  # [in_features]
         
         # Apply scaling:
@@ -189,10 +189,11 @@ class W4A4Linear(nn.Module):
         
         # Store scales for potential use
         # Ensure correct shapes: [out_features] for weights, [1] for activations
-        self.weight_scale = weight_scale.detach().flatten()
-        self.weight_zero_point = weight_zero_point.detach().flatten()
-        self.act_scale = act_scale.detach().flatten()
-        self.act_zero_point = act_zero_point.detach().flatten()
+        # Using copy_() to maintain buffer status and proper device placement
+        self.weight_scale.copy_(weight_scale.detach().flatten())
+        self.weight_zero_point.copy_(weight_zero_point.detach().flatten())
+        self.act_scale.copy_(act_scale.detach().flatten())
+        self.act_zero_point.copy_(act_zero_point.detach().flatten())
         
         # Quantize
         quant_input = self.fake_quantize(

@@ -1,4 +1,7 @@
-from transformers import AutoModelForCausalLM, AutoTokenizer
+import os
+import json
+from transformers import AutoModelForCausalLM, AutoTokenizer, TrainingArguments, Trainer, DataCollatorForLanguageModeling
+from datasets import load_dataset
 from peft import LoraConfig, get_peft_model, TaskType
 import torch
 import torch.nn as nn
@@ -49,22 +52,39 @@ class W4A4Linear(nn.Module):
         self.in_features = original_linear_layer.in_features
         self.out_features = original_linear_layer.out_features
         
+        # Get device from original linear layer
+        self.device = next(original_linear_layer.parameters()).device
+        
         # PACT activation clipping
-        self.activation_clip = nn.Parameter(torch.tensor(init_clip_val, dtype=torch.float32))
+        self.activation_clip = nn.Parameter(
+            torch.tensor(init_clip_val, dtype=torch.float32, device=self.device)
+        )
         
         # SmoothQuant parameters
-        self.raw_alpha = nn.Parameter(torch.tensor(0.5))  # Will be passed through sigmoid
+        self.raw_alpha = nn.Parameter(
+            torch.tensor(0.5, device=self.device)  # Will be passed through sigmoid
+        )
         # Track per-channel input statistics
-        self.register_buffer('input_absmax', torch.ones(self.in_features, dtype=torch.float32))
+        self.register_buffer('input_absmax', 
+            torch.ones(self.in_features, dtype=torch.float32, device=self.device)
+        )
         self.momentum = 0.1  # For EMA of input statistics
         
         # Buffers for quantization parameters
         # Per-channel for weights ([out_features])
-        self.register_buffer('weight_scale', torch.ones(self.out_features, dtype=torch.float32))
-        self.register_buffer('weight_zero_point', torch.zeros(self.out_features, dtype=torch.float32))
+        self.register_buffer('weight_scale', 
+            torch.ones(self.out_features, dtype=torch.float32, device=self.device)
+        )
+        self.register_buffer('weight_zero_point', 
+            torch.zeros(self.out_features, dtype=torch.float32, device=self.device)
+        )
         # Per-tensor for activations
-        self.register_buffer('act_scale', torch.ones(1, dtype=torch.float32))
-        self.register_buffer('act_zero_point', torch.zeros(1, dtype=torch.float32))
+        self.register_buffer('act_scale', 
+            torch.ones(1, dtype=torch.float32, device=self.device)
+        )
+        self.register_buffer('act_zero_point', 
+            torch.zeros(1, dtype=torch.float32, device=self.device)
+        )
 
     def _calculate_quant_params(self, min_vals, max_vals, num_bits):
         """Calculate scale and zero-point for quantization, supporting per-channel.
@@ -208,7 +228,7 @@ class W4A4Linear(nn.Module):
         # IMPORTANT: GPT-2 uses Conv1D, where weights are (in_features, out_features).
         # F.linear expects weights as (out_features, in_features) and applies transpose internally (input @ weight.T).
         # So, we need to transpose quant_weight before passing it to F.linear to match Conv1D behavior.
-        output = F.linear(quant_input, quant_weight.T, self.original_linear.bias)
+        output = F.linear(quant_input, quant_weight, self.original_linear.bias)
         return output
 
 # Custom Quantization-Aware GPT2Block
@@ -285,11 +305,27 @@ class QuantizedGPT2Block(GPT2Block):
 # 1. Load the GPT-2 small model and tokenizer
 model_name = "gpt2"
 tokenizer = AutoTokenizer.from_pretrained(model_name)
+
+# Set up device
+if torch.backends.mps.is_available():
+    device = torch.device("mps")
+    torch.set_default_dtype(torch.float32)  # MPS works best with float32
+    print("Using MPS device (Apple Silicon)")
+elif torch.cuda.is_available():
+    device = torch.device("cuda")
+    torch.set_default_dtype(torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float32)
+    print("Using CUDA device")
+else:
+    device = torch.device("cpu")
+    torch.set_default_dtype(torch.float32)
+    print("Using CPU")
+
+# Load model with appropriate settings
 model = AutoModelForCausalLM.from_pretrained(
     model_name,
-    torch_dtype=torch.bfloat16, # Use bfloat16 for better precision
-    device_map="auto"
-)
+    torch_dtype=torch.float32 if device.type == "mps" else torch.bfloat16,
+    device_map="auto" if device.type != "mps" else None,  # device_map not supported on MPS
+).to(device)
 
 # Add a pad token to the tokenizer if it doesn't have one
 if tokenizer.pad_token is None:
@@ -300,25 +336,14 @@ print(f"Model '{model_name}' loaded successfully for QAT.")
 print(f"Model device: {model.device}")
 print(f"Number of parameters: {model.num_parameters()}")
 
-# 2. Define LoRA configuration for QAT
-lora_config = LoraConfig(
-    r=8, # LoRA attention dimension
-    lora_alpha=16, # Alpha parameter for LoRA scaling
-    target_modules=["c_attn", "c_proj", "c_fc"], # Common target modules for GPT-2 LoRA
-    lora_dropout=0.1, # Dropout probability for LoRA layers
-    bias="none", # No bias in LoRA layers
-    task_type=TaskType.CAUSAL_LM, # Causal Language Modeling
-)
-
-# 3. Get the PEFT model with LoRA adapters
-peft_model = get_peft_model(model, lora_config)
-print("\n--- LoRA Adapters Applied ---")
-peft_model.print_trainable_parameters()
-
 def apply_quantization_to_model(model):
     """Apply W4A4Linear to all linear layers in the model"""
     for name, module in model.named_modules():
-        if isinstance(module, (nn.Linear, torch.nn.modules.conv.Conv1D)):
+        if isinstance(module, (nn.Linear, torch.nn.modules.conv.Conv1d)):
+            # Skip if already quantized
+            if hasattr(module, 'original_linear'):
+                continue
+                
             # Get parent module and attribute name
             parent = model
             attrs = name.split('.')
@@ -328,9 +353,25 @@ def apply_quantization_to_model(model):
             # Replace with quantized version
             setattr(parent, attrs[-1], W4A4Linear(module))
 
-# Apply quantization to all linear layers in the model
-print("\n--- Applying W4A4 quantization to all linear layers ---")
-apply_quantization_to_model(peft_model)
+# First apply quantization to the base model
+print("\n--- Applying W4A4 quantization to base model ---")
+apply_quantization_to_model(model)
+
+# 3. Prepare the model for LoRA fine-tuning
+lora_config = LoraConfig(
+    r=8,  # Rank of the update matrices (lower = less parameters)
+    lora_alpha=32,  # Alpha parameter for LoRA scaling
+    target_modules=["c_attn", "c_proj", "c_fc"],  # Target attention and feed-forward layers
+    lora_dropout=0.05,
+    bias="none",  # Don't train bias parameters
+    task_type=TaskType.CAUSAL_LM,
+)
+
+# 4. Apply LoRA adapters to the quantized model
+print("\n--- Applying LoRA Adapters to quantized model ---")
+peft_model = get_peft_model(model, lora_config)
+print("\n--- LoRA Adapters Applied ---")
+peft_model.print_trainable_parameters()
 
 # 5. Configure Trainable Parameters
 # Ensure only LoRA adapters and PACT thresholds are trainable.
@@ -365,30 +406,37 @@ if __name__ == "__main__":
     eval_dataset = datasets["validation"]
 
     # Set up Training Arguments
+    use_fp16 = torch.cuda.is_available() and not torch.backends.mps.is_available()
+    
     training_args = TrainingArguments(
         output_dir="./output_qat_lora", # Output directory for checkpoints and logs
         overwrite_output_dir=True,
         num_train_epochs=1, # Train for one epoch as per plan
-        per_device_train_batch_size=8, # Adjust batch size as per your GPU memory
-        per_device_eval_batch_size=8,
-        gradient_accumulation_steps=8, # Simulate larger batch size
+        per_device_train_batch_size=4 if torch.backends.mps.is_available() else 8, # Smaller batch for MPS
+        per_device_eval_batch_size=4 if torch.backends.mps.is_available() else 8,
+        gradient_accumulation_steps=16 if torch.backends.mps.is_available() else 8, # Increase for MPS
         save_strategy="epoch",
-        eval_strategy="epoch", # Corrected based on your input
+        eval_strategy="epoch",
         logging_dir="./logs_qat_lora",
-        logging_steps=50, # Log every 50 steps
-        learning_rate=2e-4, # Standard learning rate for LoRA fine-tuning
+        logging_steps=20, # More frequent logging for MPS
+        learning_rate=1e-4 if torch.backends.mps.is_available() else 2e-4, # Lower lr for MPS
         weight_decay=0.01,
-        fp16=torch.cuda.is_available(), # Use FP16 if CUDA is available, for faster training
+        fp16=use_fp16, # Only enable for CUDA
+        bf16=not use_fp16 and torch.cuda.is_bf16_supported(),
+        tf32=torch.cuda.is_available() and torch.cuda.get_device_capability()[0] >= 8, # For Ampere+
         report_to="none", # Disable reporting
         remove_unused_columns=False, # Important for DataCollatorForLanguageModeling
         load_best_model_at_end=True, # Load the best model based on evaluation loss
         metric_for_best_model="eval_loss",
+        # MPS-specific optimizations
+        dataloader_pin_memory=not torch.backends.mps.is_available(), # Disable pin_memory for MPS
+        dataloader_num_workers=0 if torch.backends.mps.is_available() else 4, # No workers for MPS
     )
 
     # Define Data Collator
     data_collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False)
 
-    # Initialize Trainer
+    # Initialize Trainer with MPS-specific optimizations
     trainer = Trainer(
         model=peft_model,
         args=training_args,
@@ -397,6 +445,13 @@ if __name__ == "__main__":
         tokenizer=tokenizer,
         data_collator=data_collator,
     )
+    
+    # For MPS, we need to ensure the model is on the correct device
+    if torch.backends.mps.is_available():
+        peft_model = peft_model.to(device)
+        # Add gradient checkpointing for MPS to save memory
+        peft_model.enable_input_require_grads()
+        peft_model.config.use_cache = False  # Gradient checkpointing requires this
 
     # 7. Train the model
     print("\n--- Starting W4A4 QAT with LoRA Fine-tuning ---")
@@ -405,8 +460,36 @@ if __name__ == "__main__":
     # 8. Evaluate and Save
     print("\n--- Evaluating W4A4 QAT LoRA Model ---")
     eval_results = trainer.evaluate()
-    print(f"Perplexity: {torch.exp(torch.tensor(eval_results["eval_loss"]))}")
+    print(f"Perplexity: {torch.exp(torch.tensor(eval_results['eval_loss']))}")
 
-    # Save the LoRA adapters (and implicitly, the PACT parameters as part of the PEFT model)
-    peft_model.save_pretrained("./qat_lora_adapters")
-    print("W4A4 QAT LoRA adapters saved to ./qat_lora_adapters") 
+    # Save directory
+    output_dir = "./qat_lora_model"
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # Save the LoRA adapters
+    peft_model.save_pretrained(output_dir)
+    print(f"\n--- Saving W4A4 QAT LoRA adapters to {output_dir} ---")
+    
+    # Save the tokenizer
+    tokenizer.save_pretrained(output_dir)
+    
+    # Save the model config
+    peft_model.config.to_json_file(os.path.join(output_dir, "config.json"))
+    
+    # Save quantization parameters
+    quant_config = {
+        "quantization_config": {
+            "bits": 4,
+            "smoothquant_alpha": 0.5,
+            "activation_clip_init": 6.0,
+            "momentum": 0.1
+        }
+    }
+    with open(os.path.join(output_dir, "quant_config.json"), 'w') as f:
+        json.dump(quant_config, f, indent=2)
+    
+    print(f"\n--- Model, tokenizer, and quantization config saved to {output_dir} ---")
+    print("To load this model for inference, use:")
+    print(f"model = AutoModelForCausalLM.from_pretrained('{model_name}').to('{device}')")
+    print(f"model = PeftModel.from_pretrained(model, '{output_dir}')")
+    print("# Make sure to apply the same quantization setup when loading") 

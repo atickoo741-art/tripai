@@ -46,13 +46,23 @@ class W4A4Linear(nn.Module):
         self.original_linear = original_linear_layer
         self.num_bits = num_bits
         self.fake_quantize = FakeQuantize.apply
+        self.in_features = original_linear_layer.in_features
+        self.out_features = original_linear_layer.out_features
         
-        # For activations: use PACT-style learnable clipping (symmetric around zero)
+        # PACT activation clipping
         self.activation_clip = nn.Parameter(torch.tensor(init_clip_val, dtype=torch.bfloat16))
         
-        # Buffers for scale and zero point (computed in forward)
-        self.register_buffer('weight_scale', torch.ones(1, dtype=torch.bfloat16))
-        self.register_buffer('weight_zero_point', torch.zeros(1, dtype=torch.bfloat16))
+        # SmoothQuant parameters
+        self.raw_alpha = nn.Parameter(torch.tensor(0.5))  # Will be passed through sigmoid
+        # Track per-channel input statistics
+        self.register_buffer('input_absmax', torch.ones(self.in_features, dtype=torch.bfloat16))
+        self.momentum = 0.1  # For EMA of input statistics
+        
+        # Buffers for quantization parameters
+        # Per-channel for weights ([out_features])
+        self.register_buffer('weight_scale', torch.ones(self.out_features, dtype=torch.bfloat16))
+        self.register_buffer('weight_zero_point', torch.zeros(self.out_features, dtype=torch.bfloat16))
+        # Per-tensor for activations
         self.register_buffer('act_scale', torch.ones(1, dtype=torch.bfloat16))
         self.register_buffer('act_zero_point', torch.zeros(1, dtype=torch.bfloat16))
 
@@ -111,42 +121,85 @@ class W4A4Linear(nn.Module):
             
         return base_weight
         
+    @property
+    def alpha(self):
+        # Constrain alpha between 0 and 1 using sigmoid
+        return torch.sigmoid(self.raw_alpha)
+
+    def update_input_stats(self, x):
+        # x shape: [batch_size, seq_len, in_features] or [batch_size, in_features]
+        # Calculate per-channel absmax
+        if x.dim() == 3:  # [batch, seq_len, in_features]
+            current_absmax = x.abs().amax(dim=(0, 1))  # [in_features]
+        else:  # [batch, in_features]
+            current_absmax = x.abs().amax(dim=0)  # [in_features]
+        
+        # Update running statistics with EMA
+        self.input_absmax.mul_(1 - self.momentum).add_(current_absmax * self.momentum)
+        return current_absmax
+
     def forward(self, input):
-        # Get merged weights (base + LoRA delta if applicable)
+        # input shape: [batch_size, seq_len, in_features] or [batch_size, in_features]
+        # Ensure input_absmax is the right shape [in_features]
+        if input.dim() == 3:
+            in_features = input.size(-1)
+            if self.input_absmax.dim() != 1 or self.input_absmax.size(0) != in_features:
+                self.input_absmax = torch.ones(in_features, device=input.device, dtype=torch.bfloat16)
+        
+        # Update input statistics during training
+        if self.training:
+            self.update_input_stats(input)
+        
+        # Get merged weights [out_features, in_features]
         merged_weights = self._get_merged_weights()
         
-        # Per-channel quantization for weights (per output channel)
-        # Calculate min/max for each output channel [out_features, 1]
-        weight_mins = merged_weights.min(dim=1, keepdim=True)[0]
-        weight_maxs = merged_weights.max(dim=1, keepdim=True)[0]
+        # Calculate max abs value for each input channel (column-wise max)
+        # Shape: [in_features]
+        weight_absmax_per_input_channel = merged_weights.abs().amax(dim=0, keepdim=False)
         
-        # Calculate per-channel quantization parameters
+        # Calculate per-input-channel scaling factor using SmoothQuant formula:
+        # s_j = (|X_j|^(1-alpha)) * (|W_j|^alpha)
+        # where |X_j| is input_absmax[j] and |W_j| is weight_absmax_per_input_channel[j]
+        scaling_factor = (self.input_absmax.detach() ** (1 - self.alpha)) * \
+                        (weight_absmax_per_input_channel.detach() ** self.alpha)
+        scaling_factor = scaling_factor.clamp(min=1e-8)  # [in_features]
+        
+        # Apply scaling:
+        # Input: x = x / s_j (broadcast over batch and sequence dims)
+        scaled_input = input / scaling_factor
+        
+        # Weights: W = W * s_j (broadcast over output features)
+        scaled_weights = merged_weights * scaling_factor.unsqueeze(0)  # [out_features, in_features]
+        
+        # PACT: symmetric clipping for activations
+        clip_val = torch.abs(self.activation_clip)
+        clipped_input = torch.clamp(scaled_input, -clip_val, clip_val)
+        
+        # Quantization parameters for weights (per-channel)
+        weight_mins = scaled_weights.min(dim=1, keepdim=True)[0]
+        weight_maxs = scaled_weights.max(dim=1, keepdim=True)[0]
         weight_scale, weight_zero_point = self._calculate_quant_params(
             weight_mins, weight_maxs, self.num_bits
         )
         
-        # PACT: symmetric clipping around zero for activations
-        clip_val = torch.abs(self.activation_clip)
-        clipped_input = torch.clamp(input, -clip_val, clip_val)
-        
-        # Calculate activation scale and zero point based on clipped input
+        # Quantization parameters for activations (per-tensor)
         act_scale, act_zero_point = self._calculate_quant_params(
             -clip_val, clip_val, self.num_bits
         )
         
-        # Store scale and zero point for potential use in other methods
-        self.weight_scale.copy_(weight_scale.detach())
-        self.weight_zero_point.copy_(weight_zero_point.detach())
-        self.act_scale.copy_(act_scale.detach())
-        self.act_zero_point.copy_(act_zero_point.detach())
+        # Store scales for potential use
+        # Ensure correct shapes: [out_features] for weights, [1] for activations
+        self.weight_scale = weight_scale.detach().flatten()
+        self.weight_zero_point = weight_zero_point.detach().flatten()
+        self.act_scale = act_scale.detach().flatten()
+        self.act_zero_point = act_zero_point.detach().flatten()
         
-        # Apply fake quantization to activations and weights
-        quant_input = self.fake_quantize(clipped_input, act_scale, act_zero_point, self.num_bits)
+        # Quantize
+        quant_input = self.fake_quantize(
+            clipped_input, act_scale, act_zero_point, self.num_bits
+        )
         quant_weight = self.fake_quantize(
-            merged_weights,
-            weight_scale, 
-            weight_zero_point, 
-            self.num_bits
+            scaled_weights, weight_scale, weight_zero_point, self.num_bits
         )
 
         # Perform the linear operation with quantized input and weights
@@ -286,8 +339,8 @@ for name, param in peft_model.named_parameters():
     # We only need to ensure the PACT clip_val are trainable,
     # and other base model parameters are frozen.
 
-    # Enable gradients for LoRA parameters and activation_clip parameters
-    if "lora" in name or "activation_clip" in name:
+    # Enable gradients for LoRA, PACT, and SmoothQuant parameters
+    if "lora" in name or "activation_clip" in name or "alpha" in name:
         param.requires_grad = True
     else:
         param.requires_grad = False

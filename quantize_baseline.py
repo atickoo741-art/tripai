@@ -18,27 +18,32 @@ class W4A4Linear(nn.Module):
         self.num_bits = num_bits
         self.original_linear = original_linear
         
+        # Store original weight shape for PEFT compatibility
+        self.in_features = original_linear.in_features
+        self.out_features = original_linear.out_features
+        
         # Quantize the weights during initialization
         weight = original_linear.weight.detach()
         
-        # Calculate scale and zero point for weights
-        qmin = 0.
-        qmax = 2. ** num_bits - 1.
-        min_val = torch.min(weight)
-        max_val = torch.max(weight)
+        # Calculate scale for weights (symmetric quantization for 4-bit)
+        qmin = -(2 ** (num_bits - 1))  # -8 for 4-bit
+        qmax = 2 ** (num_bits - 1) - 1  # 7 for 4-bit
         
-        if min_val == max_val:
+        # Use symmetric quantization for weights
+        max_abs = torch.max(torch.abs(weight))
+        if max_abs == 0:
             self.register_buffer('weight_scale', torch.tensor(1.0).to(weight.device))
-            self.register_buffer('weight_zero_point', torch.tensor(0).to(weight.device))
         else:
-            self.weight_scale = (max_val - min_val) / (qmax - qmin)
-            self.weight_zero_point = qmin - min_val / self.weight_scale
-            
-        # Quantize and store weights as integers
-        self.register_buffer('weight_q', torch.clamp(
-            torch.round(weight / self.weight_scale + self.weight_zero_point),
+            # Scale is range / (2^num_bits - 1)
+            self.weight_scale = (2 * max_abs) / (2 ** self.num_bits - 1)
+        
+        # Quantize weights to 4-bit range [-8, 7] and store as uint8 [0, 15]
+        weight_quantized = torch.clamp(
+            torch.round(weight / self.weight_scale),
             qmin, qmax
-        ).to(torch.uint8))
+        )
+        # Shift to unsigned range [0, 15] for storage
+        self.register_buffer('weight_q', (weight_quantized - qmin).to(torch.uint8))
         
         # Store bias if it exists
         if hasattr(original_linear, 'bias') and original_linear.bias is not None:
@@ -46,87 +51,99 @@ class W4A4Linear(nn.Module):
         else:
             self.register_parameter('bias', None)
             
-        # Initialize activation scale and zero point
+        # Initialize activation quantization parameters
         self.register_buffer('act_scale', torch.tensor(1.0))
-        self.register_buffer('act_zero_point', torch.tensor(0))
+        self.register_buffer('act_zero_point', torch.tensor(0.0))
         
-    def quantize_tensor(self, x, num_bits):
-        if num_bits == 32:
-            return x, torch.tensor(1.0).to(x.device), torch.tensor(0.0).to(x.device)
+    @property
+    def weight(self):
+        # Return dequantized weights for PEFT compatibility
+        return (self.weight_q.float() - self.weight_zero_point) * self.weight_scale
+        
+    def fake_quantize_activations(self, x):
+        """Apply fake quantization to activations (4-bit)"""
+        if not self.training and not hasattr(self, 'act_scale'):
+            return x
             
+        # For activations, we'll use asymmetric quantization (0 to 15 for 4-bit)
         qmin = 0.
-        qmax = 2. ** num_bits - 1.
+        qmax = 2. ** self.num_bits - 1.  # 15 for 4-bit
         
-        # Calculate scale and zero point
-        min_val = torch.min(x.detach())
-        max_val = torch.max(x.detach())
-        
-        # Avoid division by zero
-        if min_val == max_val:
-            return x, torch.tensor(1.0).to(x.device), torch.tensor(0.0).to(x.device)
-            
-        scale = (max_val - min_val) / (qmax - qmin)
-        zero_point = qmin - min_val / scale
-               
-        # Store quantized integers instead of dequantizing
-        x_quantized = torch.clamp(torch.round(x.detach() / scale + zero_point), qmin, qmax)
-        
-        return x_quantized, scale, zero_point
-    
-    def forward(self, x):
-        # Dequantize weights for computation
-        weight = (self.weight_q.float() - self.weight_zero_point) * self.weight_scale
-        
-        # Linear operation with dequantized weights
-        x = torch.nn.functional.linear(x, weight, self.bias)
-        
-        # Quantize activations
         if self.training:
-            # During training, calculate dynamic activation quantization
-            x_q, scale_a, zp_a = self.quantize_tensor(x, self.num_bits)
-            self.act_scale.copy_(scale_a)
-            self.act_zero_point.copy_(zp_a)
-            x = (x_q - zp_a) * scale_a
+            # During training, calculate scale and zero point from data
+            # Using a running min/max would be better, but this is simpler for now
+            min_val = torch.min(x.detach())
+            max_val = torch.max(x.detach())
+            
+            # Avoid division by zero
+            if min_val >= max_val:
+                return x
+                
+            scale = (max_val - min_val) / (qmax - qmin)
+            zero_point = torch.round(qmin - min_val / scale).clamp(qmin, qmax)
+            
+            # Store scale and zero point for inference
+            self.act_scale = scale.detach()
+            self.act_zero_point = zero_point.detach()
         else:
             # During inference, use stored scale and zero point
-            x_q = torch.clamp(
-                torch.round(x / self.act_scale + self.act_zero_point),
-                0, 2**self.num_bits - 1
-            )
-            x = (x_q - self.act_zero_point) * self.act_scale
+            scale = self.act_scale
+            zero_point = self.act_zero_point
         
-        return x
+        # Quantize and dequantize (fake quantization) - simulate 4-bit precision
+        x_q = torch.clamp(torch.round(x / scale + zero_point), qmin, qmax)
+        x_fake_quant = (x_q - zero_point) * scale
+        
+        return x_fake_quant
+    
+    def forward(self, x):
+        # Dequantize weights from 4-bit storage
+        # Convert from [0,15] to [-8,7] range and apply scale
+        qmin = -(2 ** (self.num_bits - 1))  # -8 for 4-bit
+        
+        # Correct dequantization: (q - zero_point) * scale
+        # Where zero_point is -qmin (to shift from [0,15] to [-8,7])
+        weight = (self.weight_q.float() - (-qmin)) * self.weight_scale
+        
+        # Apply fake quantization to input activations (4-bit)
+        x_quant = self.fake_quantize_activations(x)
+        
+        # Linear operation with quantized weights and activations
+        output = torch.nn.functional.linear(x_quant, weight, self.bias)
+        
+        # Apply fake quantization to output activations (4-bit)
+        output_quant = self.fake_quantize_activations(output)
+        
+        return output_quant
 
 def quantize_model(model, bits=4, depth=0):
     """Apply W4A4 quantization to the model with MPS support"""
     # Handle PEFT model case
     if hasattr(model, 'base_model') and hasattr(model, 'peft_config'):
         print("Warning: PEFT model detected. Quantizing base model only.")
-        # For PEFT models, quantize the base model and return the original PEFT wrapper
-        quantized_base = quantize_model(model.base_model, bits, depth+1)
-        model.base_model = quantized_base
+        # For PEFT models, quantize the base model in place
+        quantize_model(model.base_model, bits, depth+1)
         return model
     
     print(f"{'  ' * depth}Processing model of type: {type(model).__name__}")
     
-    # Create a copy of the model
-    quantized_model = copy.deepcopy(model)
-    quantized_model = quantized_model.to(device)
+    # Recursively replace all Linear layers in place
+    def replace_linear_recursive(module, name=""):
+        for child_name, child_module in module.named_children():
+            full_name = f"{name}.{child_name}" if name else child_name
+            
+            if isinstance(child_module, torch.nn.Linear):
+                print(f"{'  ' * depth}Quantizing Linear layer: {full_name}")
+                # Replace the linear layer with quantized version
+                quantized_layer = W4A4Linear(child_module, num_bits=bits)
+                setattr(module, child_name, quantized_layer)
+            else:
+                # Recursively process child modules
+                replace_linear_recursive(child_module, full_name)
     
-    # Handle base model case - quantize all Linear layers
-    for name, module in quantized_model.named_children():
-        if isinstance(module, torch.nn.Linear):
-            print(f"{'  ' * depth}Quantizing Linear layer: {name}")
-            setattr(quantized_model, name, W4A4Linear(module, num_bits=bits))
-        else:
-            # Recursively quantize child modules
-            setattr(
-                quantized_model, 
-                name, 
-                quantize_model(module, bits, depth + 1)
-            )
-    
-    return quantized_model
+    # Apply quantization in place
+    replace_linear_recursive(model)
+    return model
 
 def evaluate_model(model, eval_dataset, tokenizer, max_samples=100):
     """Evaluate the model and return perplexity"""
@@ -276,9 +293,13 @@ def main():
         print("\n--- Evaluating Original Model ---")
         eval_results = evaluate_model(model, eval_dataset, tokenizer)
         
-        # Quantize the model
-        print("\n--- Applying W4A4 quantization to the model on MPS ---")
-        quantized_model = quantize_model(model, bits=4)
+        # Create a copy for quantization to preserve original
+        print("\n--- Creating copy of model for quantization ---")
+        quantized_model = copy.deepcopy(model)
+        
+        # Quantize the copied model
+        print("\n--- Applying W4A4 quantization to the model ---")
+        quantize_model(quantized_model, bits=4)
         quantized_model = quantized_model.to(device)
         
         # Evaluate quantized model
@@ -289,6 +310,11 @@ def main():
         print("\n--- Results Comparison ---")
         print(f"Original Model - Loss: {eval_results['eval_loss']:.4f}, Perplexity: {eval_results['perplexity']:.2f}")
         print(f"Quantized Model - Loss: {quantized_eval_results['eval_loss']:.4f}, Perplexity: {quantized_eval_results['perplexity']:.2f}")
+        
+        # Calculate degradation
+        perplexity_increase = quantized_eval_results['perplexity'] - eval_results['perplexity']
+        perplexity_increase_pct = (perplexity_increase / eval_results['perplexity']) * 100
+        print(f"Perplexity increase: {perplexity_increase:.2f} ({perplexity_increase_pct:.1f}%)")
         
     except Exception as e:
         print(f"\nError: {str(e)}")

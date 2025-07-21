@@ -396,9 +396,28 @@ for name, param in peft_model.named_parameters():
 # The final step will be setting up the training loop.
 
 # --- Start of Training Loop and Evaluation (Step 6, 7, 8) ---
+def find_available_dir(base_dir):
+    """Find the next available directory with an index to prevent overwrites."""
+    index = 1
+    while True:
+        dir_name = f"{base_dir}_{index}" if index > 1 else base_dir
+        if not os.path.exists(dir_name):
+            return dir_name
+        index += 1
+
 if __name__ == "__main__":
     # 6. Setup and Run Training Loop
-    print("\n--- Setting up Training Loop for W4A4 QAT --- ")
+    print("\n--- Setting up Training Loop for W4A4 QAT ---")
+    
+    # Create unique output directories
+    base_output_dir = "./output_qat_lora"
+    base_model_dir = "./qat_lora_model"
+    
+    output_dir = find_available_dir(base_output_dir)
+    model_dir = find_available_dir(base_model_dir)
+    
+    print(f"Using output directory: {output_dir}")
+    print(f"Model will be saved to: {model_dir}")
 
     # Load and preprocess the WikiText-2 dataset
     datasets, _ = load_and_preprocess_wikitext2(model_name="gpt2") # Use _ for tokenizer as it\'s already loaded
@@ -409,12 +428,14 @@ if __name__ == "__main__":
     use_fp16 = torch.cuda.is_available() and not torch.backends.mps.is_available()
     
     training_args = TrainingArguments(
-        output_dir="./output_qat_lora", # Output directory for checkpoints and logs
-        overwrite_output_dir=True,
+        output_dir=output_dir, # Output directory for checkpoints and logs
+        overwrite_output_dir=False,  # Disable overwrite since we're using unique directories
         num_train_epochs=1, # Train for one epoch as per plan
         per_device_train_batch_size=4 if torch.backends.mps.is_available() else 8, # Smaller batch for MPS
         per_device_eval_batch_size=4 if torch.backends.mps.is_available() else 8,
         gradient_accumulation_steps=16 if torch.backends.mps.is_available() else 8, # Increase for MPS
+        max_grad_norm=1.0,  # Gradient clipping with max norm of 1.0
+        gradient_checkpointing=True,  # Enable gradient checkpointing to save memory
         save_strategy="epoch",
         eval_strategy="epoch",
         logging_dir="./logs_qat_lora",
@@ -462,19 +483,18 @@ if __name__ == "__main__":
     eval_results = trainer.evaluate()
     print(f"Perplexity: {torch.exp(torch.tensor(eval_results['eval_loss']))}")
 
-    # Save directory
-    output_dir = "./qat_lora_model"
-    os.makedirs(output_dir, exist_ok=True)
+    # Create model directory
+    os.makedirs(model_dir, exist_ok=True)
     
     # Save the LoRA adapters
-    peft_model.save_pretrained(output_dir)
-    print(f"\n--- Saving W4A4 QAT LoRA adapters to {output_dir} ---")
+    peft_model.save_pretrained(model_dir)
+    print(f"\n--- Saving W4A4 QAT LoRA adapters to {model_dir} ---")
     
     # Save the tokenizer
-    tokenizer.save_pretrained(output_dir)
+    tokenizer.save_pretrained(model_dir)
     
     # Save the model config
-    peft_model.config.to_json_file(os.path.join(output_dir, "config.json"))
+    peft_model.config.to_json_file(os.path.join(model_dir, "config.json"))
     
     # Save quantization parameters
     quant_config = {
@@ -485,11 +505,11 @@ if __name__ == "__main__":
             "momentum": 0.1
         }
     }
-    with open(os.path.join(output_dir, "quant_config.json"), 'w') as f:
+    with open(os.path.join(model_dir, "quant_config.json"), 'w') as f:
         json.dump(quant_config, f, indent=2)
     
-    print(f"\n--- Model, tokenizer, and quantization config saved to {output_dir} ---")
+    print(f"\n--- Model, tokenizer, and quantization config saved to {model_dir} ---")
     print("To load this model for inference, use:")
     print(f"model = AutoModelForCausalLM.from_pretrained('{model_name}').to('{device}')")
-    print(f"model = PeftModel.from_pretrained(model, '{output_dir}')")
-    print("# Make sure to apply the same quantization setup when loading") 
+    print(f"model = PeftModel.from_pretrained(model, '{model_dir}')")
+    print("# Make sure to apply the same quantization setup when loading")

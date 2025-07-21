@@ -6,7 +6,7 @@ import numpy as np
 import copy
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from peft import PeftModel
-from data_preparation import load_and_preprocess_wikitext2
+from datasets import load_dataset, DatasetDict
 
 # Set device to MPS if available, otherwise CPU
 device = 'mps' if torch.backends.mps.is_available() else 'cpu'
@@ -32,18 +32,21 @@ class W4A4Linear(nn.Module):
         # Use symmetric quantization for weights
         max_abs = torch.max(torch.abs(weight))
         if max_abs == 0:
-            self.register_buffer('weight_scale', torch.tensor(1.0).to(weight.device))
+            weight_scale = torch.tensor(1.0).to(weight.device)
         else:
-            # Scale is range / (2^num_bits - 1)
-            self.weight_scale = (2 * max_abs) / (2 ** self.num_bits - 1)
+            # Scale is max_abs / qmax (symmetric around 0)
+            weight_scale = max_abs / qmax
         
-        # Quantize weights to 4-bit range [-8, 7] and store as uint8 [0, 15]
+        self.register_buffer('weight_scale', weight_scale)
+        
+        # Quantize weights to 4-bit range [-8, 7]
         weight_quantized = torch.clamp(
             torch.round(weight / self.weight_scale),
             qmin, qmax
         )
-        # Shift to unsigned range [0, 15] for storage
-        self.register_buffer('weight_q', (weight_quantized - qmin).to(torch.uint8))
+        
+        # Store quantized weights directly as int8 (since we're using symmetric quantization)
+        self.register_buffer('weight_q', weight_quantized.to(torch.int8))
         
         # Store bias if it exists
         if hasattr(original_linear, 'bias') and original_linear.bias is not None:
@@ -51,67 +54,84 @@ class W4A4Linear(nn.Module):
         else:
             self.register_parameter('bias', None)
             
-        # Initialize activation quantization parameters
+        # Initialize activation quantization parameters with running statistics
         self.register_buffer('act_scale', torch.tensor(1.0))
         self.register_buffer('act_zero_point', torch.tensor(0.0))
+        self.register_buffer('act_min_val', torch.tensor(float('inf')))
+        self.register_buffer('act_max_val', torch.tensor(float('-inf')))
+        self.momentum = 0.1  # For running statistics
         
     @property
     def weight(self):
         # Return dequantized weights for PEFT compatibility
-        return (self.weight_q.float() - self.weight_zero_point) * self.weight_scale
+        return self.weight_q.float() * self.weight_scale
+        
+    def update_activation_stats(self, x):
+        """Update running min/max statistics for activations"""
+        if self.training:
+            with torch.no_grad():
+                batch_min = torch.min(x.detach())
+                batch_max = torch.max(x.detach())
+                
+                # Initialize or update running statistics
+                if torch.isinf(self.act_min_val):
+                    self.act_min_val = batch_min
+                    self.act_max_val = batch_max
+                else:
+                    self.act_min_val = (1 - self.momentum) * self.act_min_val + self.momentum * batch_min
+                    self.act_max_val = (1 - self.momentum) * self.act_max_val + self.momentum * batch_max
+                
+                # Update scale and zero point based on current statistics
+                min_val = self.act_min_val
+                max_val = self.act_max_val
+                
+                # Asymmetric quantization (0 to 15 for 4-bit unsigned)
+                qmin = 0.0
+                qmax = 2.0 ** self.num_bits - 1.0  # 15 for 4-bit
+                
+                if max_val > min_val:
+                    scale = (max_val - min_val) / (qmax - qmin)
+                    zero_point = torch.clamp(
+                        torch.round(qmin - min_val / scale), 
+                        qmin, qmax
+                    )
+                    
+                    self.act_scale = scale
+                    self.act_zero_point = zero_point
         
     def fake_quantize_activations(self, x):
         """Apply fake quantization to activations (4-bit)"""
-        if not self.training and not hasattr(self, 'act_scale'):
+        # Update statistics if in training mode
+        self.update_activation_stats(x)
+        
+        # Skip quantization if scale is not properly initialized
+        if self.act_scale <= 0 or torch.isinf(self.act_min_val):
             return x
             
-        # For activations, we'll use asymmetric quantization (0 to 15 for 4-bit)
-        qmin = 0.
-        qmax = 2. ** self.num_bits - 1.  # 15 for 4-bit
+        # Asymmetric quantization (0 to 15 for 4-bit unsigned)
+        qmin = 0.0
+        qmax = 2.0 ** self.num_bits - 1.0  # 15 for 4-bit
         
-        if self.training:
-            # During training, calculate scale and zero point from data
-            # Using a running min/max would be better, but this is simpler for now
-            min_val = torch.min(x.detach())
-            max_val = torch.max(x.detach())
-            
-            # Avoid division by zero
-            if min_val >= max_val:
-                return x
-                
-            scale = (max_val - min_val) / (qmax - qmin)
-            zero_point = torch.round(qmin - min_val / scale).clamp(qmin, qmax)
-            
-            # Store scale and zero point for inference
-            self.act_scale = scale.detach()
-            self.act_zero_point = zero_point.detach()
-        else:
-            # During inference, use stored scale and zero point
-            scale = self.act_scale
-            zero_point = self.act_zero_point
-        
-        # Quantize and dequantize (fake quantization) - simulate 4-bit precision
-        x_q = torch.clamp(torch.round(x / scale + zero_point), qmin, qmax)
-        x_fake_quant = (x_q - zero_point) * scale
+        # Quantize and dequantize (fake quantization)
+        x_q = torch.clamp(
+            torch.round(x / self.act_scale + self.act_zero_point), 
+            qmin, qmax
+        )
+        x_fake_quant = (x_q - self.act_zero_point) * self.act_scale
         
         return x_fake_quant
     
     def forward(self, x):
-        # Dequantize weights from 4-bit storage
-        # Convert from [0,15] to [-8,7] range and apply scale
-        qmin = -(2 ** (self.num_bits - 1))  # -8 for 4-bit
+        # Dequantize weights (symmetric quantization)
+        weight = self.weight_q.float() * self.weight_scale
         
-        # Correct dequantization: (q - zero_point) * scale
-        # Where zero_point is -qmin (to shift from [0,15] to [-8,7])
-        weight = (self.weight_q.float() - (-qmin)) * self.weight_scale
-        
-        # Apply fake quantization to input activations (4-bit)
+        # Apply fake quantization to input activations
         x_quant = self.fake_quantize_activations(x)
         
         # Linear operation with quantized weights and activations
         output = torch.nn.functional.linear(x_quant, weight, self.bias)
         
-        # Apply fake quantization to output activations (4-bit)
+        # Apply fake quantization to output activations
         output_quant = self.fake_quantize_activations(output)
         
         return output_quant
@@ -150,6 +170,7 @@ def evaluate_model(model, eval_dataset, tokenizer, max_samples=100):
     print("\n--- Evaluating Model ---")
     model.eval()
     total_loss = 0
+    total_tokens = 0
     device = next(model.parameters()).device
     
     # Use a small subset for evaluation
@@ -158,21 +179,39 @@ def evaluate_model(model, eval_dataset, tokenizer, max_samples=100):
     with torch.no_grad():
         for i, example in enumerate(eval_subset):
             # Convert to tensor and move to device
+            input_ids = torch.tensor(example['input_ids'], device=device).unsqueeze(0)
+            attention_mask = torch.tensor(example['attention_mask'], device=device).unsqueeze(0)
+            labels = torch.tensor(example['labels'], device=device).unsqueeze(0)
+            
+            # Only compute loss on actual tokens (not padding)
+            valid_tokens = (labels != tokenizer.pad_token_id).sum().item()
+            if valid_tokens == 0:
+                continue
+                
             inputs = {
-                'input_ids': torch.tensor([example['input_ids']], device=device),
-                'attention_mask': torch.tensor([example['attention_mask']], device=device),
-                'labels': torch.tensor([example['labels']], device=device)
+                'input_ids': input_ids,
+                'attention_mask': attention_mask,
+                'labels': labels
             }
             
-            # Forward pass
-            outputs = model(**inputs)
-            total_loss += outputs.loss.item()
+            try:
+                # Forward pass
+                outputs = model(**inputs)
+                total_loss += outputs.loss.item() * valid_tokens
+                total_tokens += valid_tokens
+            except Exception as e:
+                print(f"Error processing example {i}: {e}")
+                continue
             
             # Print progress
             if (i + 1) % 10 == 0:
                 print(f"Processed {i + 1}/{len(eval_subset)} examples...")
     
-    avg_loss = total_loss / len(eval_subset)
+    if total_tokens == 0:
+        print("No valid tokens found for evaluation!")
+        return {"eval_loss": float('inf'), "perplexity": float('inf')}
+        
+    avg_loss = total_loss / total_tokens
     perplexity = torch.exp(torch.tensor(avg_loss))
     print(f"Evaluation Loss: {avg_loss:.4f}")
     print(f"Perplexity: {perplexity:.2f}")
@@ -181,7 +220,6 @@ def evaluate_model(model, eval_dataset, tokenizer, max_samples=100):
 def load_model_and_tokenizer(model_name="gpt2", lora_adapters_path=None):
     """Load the base model, tokenizer, and optionally LoRA adapters."""
     print("Loading base model...")
-    from transformers import AutoModelForCausalLM, AutoTokenizer
     
     # Load tokenizer
     tokenizer = AutoTokenizer.from_pretrained(model_name)
@@ -191,26 +229,25 @@ def load_model_and_tokenizer(model_name="gpt2", lora_adapters_path=None):
     model = AutoModelForCausalLM.from_pretrained(
         model_name,
         torch_dtype=torch.float32,
-        device_map="auto"
+        device_map=None  # We'll handle device placement manually
     )
     
     # Load LoRA adapters if provided
-    if lora_adapters_path:
+    if lora_adapters_path and os.path.exists(lora_adapters_path):
         print("Loading LoRA adapters...")
-        from peft import PeftModel
         model = PeftModel.from_pretrained(
             model,
             lora_adapters_path,
-            torch_dtype=torch.float32,
-            device_map="auto"
+            torch_dtype=torch.float32
         )
+    elif lora_adapters_path:
+        print(f"Warning: LoRA adapters path '{lora_adapters_path}' not found. Using base model only.")
     
     return model, tokenizer
 
 def load_and_preprocess_wikitext2(model_name="gpt2"):
     """Load and preprocess the WikiText-2 dataset."""
     print("Loading and preprocessing data...")
-    from datasets import load_dataset, DatasetDict
     
     # Load the dataset
     dataset = load_dataset("wikitext", "wikitext-2-v1")
@@ -228,7 +265,6 @@ def load_and_preprocess_wikitext2(model_name="gpt2"):
     })
     
     # Load tokenizer
-    from transformers import AutoTokenizer
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     tokenizer.pad_token = tokenizer.eos_token
     
@@ -240,17 +276,18 @@ def load_and_preprocess_wikitext2(model_name="gpt2"):
             truncation=True,
             max_length=128,
             padding="max_length",
-            return_tensors="pt"
+            return_tensors=None  # Return lists instead of tensors
         )
         
         # Set labels same as input_ids for language modeling
-        tokenized["labels"] = tokenized["input_ids"].clone()
+        tokenized["labels"] = tokenized["input_ids"].copy()
         
         return tokenized
     
     # Apply tokenization to each split
     tokenized_datasets = {}
     for split in filtered_dataset:
+        print(f"Tokenizing {split} split...")
         tokenized_datasets[split] = filtered_dataset[split].map(
             tokenize_function,
             batched=True,
@@ -261,6 +298,28 @@ def load_and_preprocess_wikitext2(model_name="gpt2"):
     tokenized_dataset_dict = DatasetDict(tokenized_datasets)
     
     return tokenized_dataset_dict, tokenizer
+
+def calibrate_quantization(model, calibration_data, tokenizer, num_samples=50):
+    """Calibrate the quantization parameters using a few samples"""
+    print("\n--- Calibrating quantization parameters ---")
+    model.train()  # Set to train mode to update statistics
+    device = next(model.parameters()).device
+    
+    calibration_subset = calibration_data.select(range(min(num_samples, len(calibration_data))))
+    
+    with torch.no_grad():
+        for i, example in enumerate(calibration_subset):
+            input_ids = torch.tensor(example['input_ids'], device=device).unsqueeze(0)
+            attention_mask = torch.tensor(example['attention_mask'], device=device).unsqueeze(0)
+            
+            # Forward pass to update activation statistics
+            _ = model(input_ids=input_ids, attention_mask=attention_mask)
+            
+            if (i + 1) % 10 == 0:
+                print(f"Calibrated on {i + 1}/{len(calibration_subset)} samples...")
+    
+    model.eval()  # Set back to eval mode
+    print("Calibration complete!")
 
 def main():
     try:
@@ -277,12 +336,7 @@ def main():
         dataset, tokenizer = load_and_preprocess_wikitext2(model_name)
         
         # Get the validation dataset
-        if isinstance(dataset, (list, tuple)):
-            # If dataset is a tuple/list, take the second element as validation
-            eval_dataset = dataset[1]  # Assuming (train, validation, test) format
-        else:
-            # If it's a DatasetDict, access by key
-            eval_dataset = dataset["validation"]
+        eval_dataset = dataset["validation"]
         
         # Load model and tokenizer
         print("\nLoading model...")
@@ -291,7 +345,7 @@ def main():
         
         # Evaluate original model
         print("\n--- Evaluating Original Model ---")
-        eval_results = evaluate_model(model, eval_dataset, tokenizer)
+        eval_results = evaluate_model(model, eval_dataset, tokenizer, max_samples=200)
         
         # Create a copy for quantization to preserve original
         print("\n--- Creating copy of model for quantization ---")
@@ -302,19 +356,39 @@ def main():
         quantize_model(quantized_model, bits=4)
         quantized_model = quantized_model.to(device)
         
+        # Calibrate quantization parameters
+        print("\n--- Calibrating quantization parameters ---")
+        calibrate_quantization(quantized_model, eval_dataset, tokenizer, num_samples=50)
+        
         # Evaluate quantized model
         print("\n--- Evaluating Quantized Model ---")
-        quantized_eval_results = evaluate_model(quantized_model, eval_dataset, tokenizer)
+        quantized_eval_results = evaluate_model(quantized_model, eval_dataset, tokenizer, max_samples=200)
         
         # Print comparison
-        print("\n--- Results Comparison ---")
-        print(f"Original Model - Loss: {eval_results['eval_loss']:.4f}, Perplexity: {eval_results['perplexity']:.2f}")
-        print(f"Quantized Model - Loss: {quantized_eval_results['eval_loss']:.4f}, Perplexity: {quantized_eval_results['perplexity']:.2f}")
+        print("\n" + "="*60)
+        print("RESULTS COMPARISON")
+        print("="*60)
+        print(f"Original Model (Baseline + LoRA):")
+        print(f"  Loss: {eval_results['eval_loss']:.4f}")
+        print(f"  Perplexity: {eval_results['perplexity']:.2f}")
+        print(f"\nQuantized Model (W4A4):")
+        print(f"  Loss: {quantized_eval_results['eval_loss']:.4f}")
+        print(f"  Perplexity: {quantized_eval_results['perplexity']:.2f}")
         
         # Calculate degradation
         perplexity_increase = quantized_eval_results['perplexity'] - eval_results['perplexity']
         perplexity_increase_pct = (perplexity_increase / eval_results['perplexity']) * 100
-        print(f"Perplexity increase: {perplexity_increase:.2f} ({perplexity_increase_pct:.1f}%)")
+        print(f"\nPerplexity Degradation:")
+        print(f"  Absolute increase: {perplexity_increase:.2f}")
+        print(f"  Relative increase: {perplexity_increase_pct:.1f}%")
+        print("="*60)
+        
+        # Save quantized model if needed
+        save_quantized = False  # Set to True if you want to save
+        if save_quantized:
+            print("\nSaving quantized model...")
+            torch.save(quantized_model.state_dict(), "quantized_model_w4a4.pth")
+            print("Quantized model saved!")
         
     except Exception as e:
         print(f"\nError: {str(e)}")

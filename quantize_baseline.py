@@ -14,32 +14,32 @@ from train_qat import QATW4A4Linear
 # ============================================
 # FakeQuantize with STE (Straight-Through Estimator)
 # ============================================
-class FakeQuantize(torch.autograd.Function):
-    @staticmethod
-    def forward(ctx, x, scale, zero_point, qmin, qmax):
-        # Quantize
-        x_int = torch.round(x / scale + zero_point)
-        x_quant = torch.clamp(x_int, qmin, qmax)
-        # Dequantize
-        x_dequant = (x_quant - zero_point) * scale
-        return x_dequant
+# class FakeQuantize(torch.autograd.Function):
+#     @staticmethod
+#     def forward(ctx, x, scale, zero_point, qmin, qmax):
+#         # Quantize
+#         x_int = torch.round(x / scale + zero_point)
+#         x_quant = torch.clamp(x_int, qmin, qmax)
+#         # Dequantize
+#         x_dequant = (x_quant - zero_point) * scale
+#         return x_dequant
 
-    @staticmethod
-    def backward(ctx, grad_output):
-        # Straight-Through Estimator (STE)
-        return grad_output, None, None, None, None
+#     @staticmethod
+#     def backward(ctx, grad_output):
+#         # Straight-Through Estimator (STE)
+#         return grad_output, None, None, None, None
 
 # ============================================
 # PACT (PArameterized Clipping acTivation) for activation quantization
 # ============================================
-class PACT(torch.nn.Module):
-    def __init__(self, init_val=6.0):
-        super().__init__()
-        self.alpha = torch.nn.Parameter(torch.tensor(init_val, dtype=torch.float32))
-        self.relu = torch.nn.ReLU6()
+# class PACT(torch.nn.Module):
+#     def __init__(self, init_val=6.0):
+#         super().__init__()
+#         self.alpha = torch.nn.Parameter(torch.tensor(init_val, dtype=torch.float32))
+#         self.relu = torch.nn.ReLU6()
         
-    def forward(self, x):
-        return self.relu(x) - self.relu(x - self.alpha)
+#     def forward(self, x):
+#         return self.relu(x) - self.relu(x - self.alpha)
 
 # ============================================
 # Uniform W4A4 Linear (for base GPT-2 and baseline LoRA)
@@ -219,56 +219,56 @@ class W4A4Linear(nn.Module):
             
         return output
 
-class W4A4LinearQAT(nn.Module):
-    """
-    Advanced W4A4 Linear layer with SmoothQuant and PACT for QAT LoRA models.
-    Matches the implementation used during QAT training.
-    """
-    def __init__(self, original_linear, num_bits=4, init_clip_val=6.0):
-        super().__init__()
-        self.num_bits = num_bits
-        self.original_linear = original_linear
+# class W4A4LinearQAT(nn.Module):
+#     """
+#     Advanced W4A4 Linear layer with SmoothQuant and PACT for QAT LoRA models.
+#     Matches the implementation used during QAT training.
+#     """
+#     def __init__(self, original_linear, num_bits=4, init_clip_val=6.0):
+#         super().__init__()
+#         self.num_bits = num_bits
+#         self.original_linear = original_linear
         
-        # Store original weight shape for PEFT compatibility
-        self.in_features = original_linear.in_features
-        self.out_features = original_linear.out_features
+#         # Store original weight shape for PEFT compatibility
+#         self.in_features = original_linear.in_features
+#         self.out_features = original_linear.out_features
         
-        # PACT activation clipping
-        self.activation_clip = nn.Parameter(
-            torch.tensor(init_clip_val, dtype=torch.float32)
-        )
+#         # PACT activation clipping
+#         self.activation_clip = nn.Parameter(
+#             torch.tensor(init_clip_val, dtype=torch.float32)
+#         )
         
-        # Quantization parameters for weights
-        self.weight_scale = nn.Parameter(torch.tensor(1.0))
-        self.weight_zero_point = nn.Parameter(torch.tensor(0.0))
+#         # Quantization parameters for weights
+#         self.weight_scale = nn.Parameter(torch.tensor(1.0))
+#         self.weight_zero_point = nn.Parameter(torch.tensor(0.0))
         
-        # SmoothQuant parameters
-        self.smooth_quant_alpha = 0.5  # Can be tuned
+#         # SmoothQuant parameters
+#         self.smooth_quant_alpha = 0.5  # Can be tuned
         
-        # Initialize weights
-        self.register_buffer('weight', original_linear.weight.detach().clone())
-        if hasattr(original_linear, 'bias') and original_linear.bias is not None:
-            self.register_parameter('bias', nn.Parameter(original_linear.bias.detach().clone()))
-        else:
-            self.register_parameter('bias', None)
+#         # Initialize weights
+#         self.register_buffer('weight', original_linear.weight.detach().clone())
+#         if hasattr(original_linear, 'bias') and original_linear.bias is not None:
+#             self.register_parameter('bias', nn.Parameter(original_linear.bias.detach().clone()))
+#         else:
+#             self.register_parameter('bias', None)
     
-    def forward(self, x):
-        # PACT activation clipping
-        x = torch.clamp(x, 0.0, self.activation_clip.item())
+#     def forward(self, x):
+#         # PACT activation clipping
+#         x = torch.clamp(x, 0.0, self.activation_clip.item())
         
-        # Quantize weights
-        qmin = -(2 ** (self.num_bits - 1))
-        qmax = (2 ** (self.num_bits - 1)) - 1
+#         # Quantize weights
+#         qmin = -(2 ** (self.num_bits - 1))
+#         qmax = (2 ** (self.num_bits - 1)) - 1
         
-        # Apply SmoothQuant to weights
-        weight = self.weight
-        weight_scale = self.weight_scale.abs() + 1e-6
-        weight_int = torch.round(weight / weight_scale + self.weight_zero_point)
-        weight_quant = torch.clamp(weight_int, qmin, qmax)
-        weight_dequant = (weight_quant - self.weight_zero_point) * weight_scale
+#         # Apply SmoothQuant to weights
+#         weight = self.weight
+#         weight_scale = self.weight_scale.abs() + 1e-6
+#         weight_int = torch.round(weight / weight_scale + self.weight_zero_point)
+#         weight_quant = torch.clamp(weight_int, qmin, qmax)
+#         weight_dequant = (weight_quant - self.weight_zero_point) * weight_scale
         
-        # Linear operation with quantized weights and activations
-        return F.linear(x, weight_dequant, self.bias)
+#         # Linear operation with quantized weights and activations
+#         return F.linear(x, weight_dequant, self.bias)
 
 def quantize_model(model, bits=4, quantization_method='uniform', depth=0):
     """
@@ -284,7 +284,7 @@ def quantize_model(model, bits=4, quantization_method='uniform', depth=0):
         quantize_model(model.base_model, bits, quantization_method, depth+1)
         return model
     print(f"{'  ' * depth}Processing model of type: {type(model).__name__}")
-    linear_class = W4A4LinearQAT if quantization_method == 'qat' else W4A4Linear
+    linear_class = QATW4A4Linear if quantization_method == 'qat' else W4A4Linear
     def replace_linear_recursive(module, name=""):
         for child_name, child_module in module.named_children():
             full_name = f"{name}.{child_name}" if name else child_name
@@ -494,7 +494,7 @@ def calibrate_quantization(model, calibration_data, tokenizer, num_samples=50, d
     # Register hooks on all W4A4Linear layers
     handles = []
     for name, module in model.named_modules():
-        if isinstance(module, (W4A4Linear, W4A4LinearQAT)):
+        if isinstance(module, (W4A4Linear, QATW4A4Linear)):
             handles.append(module.register_forward_hook(forward_hook))
     
     # Run calibration on CPU
@@ -518,12 +518,12 @@ def calibrate_quantization(model, calibration_data, tokenizer, num_samples=50, d
     
     # Calculate and set scales based on collected ranges
     if input_ranges and output_ranges:
-        input_scale = max(input_ranges) / 127.0  # For int8 symmetric
-        output_scale = max(output_ranges) / 127.0
+        input_scale = max(input_ranges) / 7.0  # For int4 symmetric
+        output_scale = max(output_ranges) / 7.0
         
         # Set scales for all layers
         for module in model.modules():
-            if isinstance(module, (W4A4Linear, W4A4LinearQAT)):
+            if isinstance(module, (W4A4Linear, QATW4A4Linear)):
                 module.input_scale.fill_(input_scale)
                 module.output_scale.fill_(output_scale)
     

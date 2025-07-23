@@ -5,6 +5,8 @@ import torch
 from load_model import model, tokenizer # Import the pre-loaded model and tokenizer
 from data_preparation import load_and_preprocess_wikitext2
 
+
+
 # 1. Load and preprocess the WikiText-2 dataset
 datasets, tokenizer = load_and_preprocess_wikitext2(model_name="gpt2")
 

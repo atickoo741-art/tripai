@@ -43,7 +43,7 @@ class FakeQuantize(torch.autograd.Function):
         # STE: simply pass the gradients through
         return grad_output, None, None, None
 
-class W4A4Linear(nn.Module):
+class QATW4A4Linear(nn.Module):
     def __init__(self, original_linear_layer, num_bits=4, init_clip_val=6.0):
         super().__init__()
         self.original_linear = original_linear_layer
@@ -235,11 +235,11 @@ class W4A4Linear(nn.Module):
 class QuantizedGPT2Block(GPT2Block):
     def __init__(self, config, layer_idx):
         super().__init__(config, layer_idx)
-        # Replace original Linear layers with W4A4Linear
-        self.attn.c_attn = W4A4Linear(self.attn.c_attn)
-        self.attn.c_proj = W4A4Linear(self.attn.c_proj)
-        self.mlp.c_fc = W4A4Linear(self.mlp.c_fc)
-        self.mlp.c_proj = W4A4Linear(self.mlp.c_proj)
+        # Replace original Linear layers with QATW4A4Linear
+        self.attn.c_attn = QATW4A4Linear(self.attn.c_attn)
+        self.attn.c_proj = QATW4A4Linear(self.attn.c_proj)
+        self.mlp.c_fc = QATW4A4Linear(self.mlp.c_fc)
+        self.mlp.c_proj = QATW4A4Linear(self.mlp.c_proj)
 
 
     def forward(self, *args, **kwargs):
@@ -337,7 +337,7 @@ print(f"Model device: {model.device}")
 print(f"Number of parameters: {model.num_parameters()}")
 
 def apply_quantization_to_model(model):
-    """Apply W4A4Linear to all linear layers in the model"""
+    """Apply QATW4A4Linear to all linear layers in the model"""
     for name, module in model.named_modules():
         if isinstance(module, (nn.Linear, torch.nn.modules.conv.Conv1d)):
             # Skip if already quantized
@@ -351,7 +351,7 @@ def apply_quantization_to_model(model):
                 parent = getattr(parent, attr)
             
             # Replace with quantized version
-            setattr(parent, attrs[-1], W4A4Linear(module))
+            setattr(parent, attrs[-1], QATW4A4Linear(module))
 
 # First apply quantization to the base model
 print("\n--- Applying W4A4 quantization to base model ---")

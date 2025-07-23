@@ -10,7 +10,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer, AutoConfig
 from peft import PeftModel, PeftConfig
 from datasets import load_dataset, DatasetDict
 import copy
-
+from train_qat import QATW4A4Linear
 # ============================================
 # FakeQuantize with STE (Straight-Through Estimator)
 # ============================================

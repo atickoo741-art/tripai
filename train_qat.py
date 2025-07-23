@@ -431,9 +431,9 @@ if __name__ == "__main__":
         output_dir=output_dir, # Output directory for checkpoints and logs
         overwrite_output_dir=False,  # Disable overwrite since we're using unique directories
         num_train_epochs=1, # Train for one epoch as per plan
-        per_device_train_batch_size=4 if torch.backends.mps.is_available() else 8, # Smaller batch for MPS
-        per_device_eval_batch_size=4 if torch.backends.mps.is_available() else 8,
-        gradient_accumulation_steps=16 if torch.backends.mps.is_available() else 8, # Increase for MPS
+        per_device_train_batch_size=2 if torch.backends.mps.is_available() else 8, # Smaller batch for MPS
+        per_device_eval_batch_size=2 if torch.backends.mps.is_available() else 8,
+        gradient_accumulation_steps=32 if torch.backends.mps.is_available() else 8, # Increase for MPS
         max_grad_norm=1.0,  # Gradient clipping with max norm of 1.0
         gradient_checkpointing=True,  # Enable gradient checkpointing to save memory
         save_strategy="epoch",

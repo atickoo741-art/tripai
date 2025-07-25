@@ -68,156 +68,75 @@ else:
     print("Using device: CPU")
 
 class W4A4Linear(nn.Module):
-    """True 4-bit integer linear layer for inference.
-    Uses symmetric quantization for weights and asymmetric quantization for activations.
-    """
+    """Fixed 4-bit linear layer with proper fake quantization for inference"""
+    
     def __init__(self, original_linear, num_bits=4):
         super().__init__()
         self.num_bits = num_bits
-        
-        # Store shapes and original linear reference
         self.in_features = original_linear.in_features
         self.out_features = original_linear.out_features
         
-        # Quantize weights (symmetric)
-        weight = original_linear.weight.detach().float()
-        qmin, qmax = -(2 ** (num_bits - 1)), (2 ** (num_bits - 1)) - 1  # -8 to 7 for 4-bit
-        
-        # Calculate scale and quantize
-        max_val = torch.max(torch.abs(weight)).item()
-        if max_val == 0:
-            max_val = 1.0
-            
-        weight_scale = max_val / qmax
-        
-        # Quantize and store weights
-        weight_quantized = torch.clamp(
-            torch.round(weight / weight_scale),
-            qmin, qmax
-        ).to(torch.int8)
-        
-        self.register_buffer('weight_scale', torch.tensor(weight_scale))
-        self.register_buffer('weight_q', weight_quantized)
-        
-        # Store bias if exists
+        # Store original weights and bias
+        self.register_parameter('weight', nn.Parameter(original_linear.weight.detach().clone()))
         if hasattr(original_linear, 'bias') and original_linear.bias is not None:
             self.register_parameter('bias', nn.Parameter(original_linear.bias.detach().clone()))
         else:
             self.register_parameter('bias', None)
-            
-        # Activation scales (calibrated during calibration phase)
+        
+        # Quantization parameters (will be set during calibration)
+        self.register_buffer('weight_scale', torch.tensor(1.0))
+        self.register_buffer('weight_zero_point', torch.tensor(0.0))
         self.register_buffer('input_scale', torch.tensor(1.0))
-        self.register_buffer('output_scale', torch.tensor(1.0))
+        self.register_buffer('input_zero_point', torch.tensor(0.0))
+        # self.register_buffer('output_scale', torch.tensor(1.0))
+        # self.register_buffer('output_zero_point', torch.tensor(0.0))
         
-    @property
-    def weight(self):
-        # Return dequantized weights for PEFT compatibility
-        return self.weight_q.float() * self.weight_scale
+        # Initialize weight quantization parameters
+        self._init_weight_quantization()
+    
+    def _init_weight_quantization(self):
+        """Initialize weight quantization parameters"""
+        weight = self.weight.detach()
         
-    def update_activation_stats(self, x):
-        """Update running min/max statistics for activations"""
-        if self.training:
-            with torch.no_grad():
-                batch_min = torch.min(x.detach())
-                batch_max = torch.max(x.detach())
-                
-                # Initialize or update running statistics
-                if torch.isinf(self.act_min_val):
-                    self.act_min_val = batch_min
-                    self.act_max_val = batch_max
-                else:
-                    self.act_min_val = (1 - self.momentum) * self.act_min_val + self.momentum * batch_min
-                    self.act_max_val = (1 - self.momentum) * self.act_max_val + self.momentum * batch_max
-                
-                # Update scale and zero point based on current statistics
-                min_val = self.act_min_val
-                max_val = self.act_max_val
-                
-                # Asymmetric quantization (0 to 15 for 4-bit unsigned)
-                qmin = 0.0
-                qmax = 2.0 ** self.num_bits - 1.0  # 15 for 4-bit
-                
-                if max_val > min_val:
-                    scale = (max_val - min_val) / (qmax - qmin)
-                    zero_point = torch.clamp(
-                        torch.round(qmin - min_val / scale), 
-                        qmin, qmax
-                    )
-                    
-                    self.act_scale = scale
-                    self.act_zero_point = zero_point
+        # Symmetric quantization for weights
+        qmin, qmax = -(2 ** (self.num_bits - 1)), (2 ** (self.num_bits - 1)) - 1  # -8 to 7
         
-    def fake_quantize_activations(self, x):
-        """Apply fake quantization to activations (4-bit)"""
-        # Update statistics if in training mode
-        self.update_activation_stats(x)
+        max_val = torch.max(torch.abs(weight)).item()
+        if max_val == 0:
+            max_val = 1.0
         
-        # Skip quantization if scale is not properly initialized
-        if self.act_scale <= 0 or torch.isinf(self.act_min_val):
-            return x
-            
-        # Asymmetric quantization (0 to 15 for 4-bit unsigned)
-        qmin = 0.0
-        qmax = 2.0 ** self.num_bits - 1.0  # 15 for 4-bit
-        
-        # Quantize and dequantize (fake quantization)
-        x_q = torch.clamp(
-            torch.round(x / self.act_scale + self.act_zero_point), 
-            qmin, qmax
-        )
-        x_fake_quant = (x_q - self.act_zero_point) * self.act_scale
-        
+        scale = max_val / qmax
+        self.weight_scale.fill_(scale)
+        self.weight_zero_point.fill_(0.0)  # Symmetric
+    
+    def fake_quantize_tensor(self, x, scale, zero_point, qmin, qmax):
+        """Apply fake quantization with straight-through estimator"""
+        # Quantize
+        x_int = torch.round(x / scale + zero_point)
+        x_quant = torch.clamp(x_int, qmin, qmax)
+        # Dequantize (fake quantization)
+        x_fake_quant = (x_quant - zero_point) * scale
         return x_fake_quant
     
     def forward(self, x):
-        # Input is expected in FP32
+        # Quantize weights (symmetric, -8 to 7 for 4-bit)
+        qmin_w, qmax_w = -(2 ** (self.num_bits - 1)), (2 ** (self.num_bits - 1)) - 1
+        weight_quant = self.fake_quantize_tensor(
+            self.weight, self.weight_scale, self.weight_zero_point, qmin_w, qmax_w
+        )
         
-        # Move to CPU if needed for integer operations
-        # device = x.device
-        # if str(device).startswith('mps'):
-        #     x = x.cpu()
+        # Quantize activations (asymmetric, 0 to 15 for 4-bit)
+        qmin_a, qmax_a = 0, (2 ** self.num_bits) - 1
+        # qmin_a, qmax_a = -(2 ** (self.num_bits - 1)), (2 ** (self.num_bits - 1)) - 1
+        input_quant = self.fake_quantize_tensor(
+            x, self.input_scale, self.input_zero_point, qmin_a, qmax_a
+        )
         
-        # 1. Quantize input to int8 (asymmetric per-tensor quantization)
-        input_scale = self.input_scale
-        input_zero_point = 0  # Symmetric quantization for input
+        # Linear operation with quantized tensors
+        output = F.linear(input_quant, weight_quant, self.bias)
         
-        # Scale and quantize input
-        x_int8 = torch.clamp(
-            torch.round(x / input_scale) + input_zero_point,
-            0, 255
-        ).to(torch.uint8)
-        
-        # 2. Convert to int32 for the matmul
-        x_int32 = x_int8.to(torch.int32) - input_zero_point
-        
-        # 3. Perform integer matrix multiplication
-        # weight_q is int8, x_int32 is int32 -> result is int32
-        try:
-            # Try integer matmul first
-            output_int32 = F.linear(x_int32, self.weight_q.to(torch.int32), None)
-            # Apply bias and scale
-            output_scale = self.weight_scale * input_scale
-            output = output_int32.to(torch.float32) * output_scale
-        except RuntimeError as e:
-            if "does not support linear for non-float inputs" in str(e):
-                # Fallback to float32 if integer matmul not supported
-                weight_dequant = self.weight_q.to(torch.float32) * self.weight_scale
-                output = F.linear(x, weight_dequant, self.bias)
-            else:
-                raise
-        
-        if self.bias is not None and 'output' not in locals():
-            output = output + self.bias
-            
-        # 5. Apply output scale (if needed)
-        if 'output_scale' in locals():
-            output = output * self.output_scale
-        
-        # Move back to original device
-        if str(device).startswith('mps'):
-            output = output.to(device)
-            
         return output
+
 
 # class W4A4LinearQAT(nn.Module):
 #     """
@@ -269,32 +188,93 @@ class W4A4Linear(nn.Module):
         
 #         # Linear operation with quantized weights and activations
 #         return F.linear(x, weight_dequant, self.bias)
+def replace_layers_qat(model):
+    """Apply QATW4A4Linear to all linear layers in the model"""
+    for name, module in model.named_modules():
+        if isinstance(module, (nn.Linear, torch.nn.modules.conv.Conv1d)):
+            # Skip if already quantized
+            if hasattr(module, 'original_linear'):
+                continue
+                
+            # Get parent module and attribute name
+            parent = model
+            attrs = name.split('.')
+            for attr in attrs[:-1]:
+                parent = getattr(parent, attr)
+            
+            # Replace with quantized version
+            quantized_layer = QATW4A4Linear(module)
+            setattr(parent, attrs[-1], quantized_layer)
+            
+            # Print the parameters after conversion
+            print(f"Layer: {name}")
+            print(f"PACT clip: {quantized_layer.activation_clip.data}")
+            print(f"SmoothQuant alpha: {quantized_layer.alpha.data}")
+            print(f"Weight scale: {quantized_layer.weight_scale}")
+            print(f"Weight zero point: {quantized_layer.weight_zero_point}")
+            print(f"Activation scale: {quantized_layer.act_scale}")
+            print(f"Activation zero point: {quantized_layer.act_zero_point}")
+            print("-" * 50)
 
-def quantize_model(model, bits=4, quantization_method='uniform', depth=0):
+
+def quantize_model(model, bits=4, quantization_method='uniform', depth=0, source_model=None):
     """
     Apply quantization to the model.
+    
     Args:
         model: The model to quantize
         bits: Number of bits for quantization (default: 4)
-        quantization_method: 'uniform' for W4A4Linear, 'qat' for W4A4LinearQAT
-        depth: Current depth in model (for pretty printing)
+        quantization_method: 'qat' for quantization-aware training or 'uniform' for post-training quantization
+        depth: Current depth in the model (for pretty printing)
+        source_model: Optional pre-trained QAT model to copy parameters from
     """
     if hasattr(model, 'base_model') and hasattr(model, 'peft_config'):
         print("Warning: PEFT model detected. Quantizing base model only.")
-        quantize_model(model.base_model, bits, quantization_method, depth+1)
+        source_base = source_model.base_model if source_model and hasattr(source_model, 'base_model') else None
+        quantize_model(model.base_model, bits, quantization_method, depth+1, source_base)
         return model
+        
     print(f"{'  ' * depth}Processing model of type: {type(model).__name__}")
-    linear_class = QATW4A4Linear if quantization_method == 'qat' else W4A4Linear
-    def replace_linear_recursive(module, name=""):
+    
+    def replace_linear_recursive(module, name="", source_module=None):
         for child_name, child_module in module.named_children():
             full_name = f"{name}.{child_name}" if name else child_name
+            source_child = getattr(source_module, child_name, None) if source_module else None
+            
             if isinstance(child_module, torch.nn.Linear):
                 print(f"{'  ' * depth}Quantizing Linear layer: {full_name}")
-                quantized_layer = linear_class(child_module, num_bits=bits)
+                
+                if quantization_method == 'qat':
+                    # Use QATW4A4Linear which already has weight property implemented above
+                    quantized_layer = QATW4A4Linear(child_module, num_bits=bits)
+                    print(f"Layer: {name}")
+                    print(f"PACT clip: {quantized_layer.activation_clip.data}")
+                    print(f"SmoothQuant alpha: {quantized_layer.alpha.data}")  # sigmoid(raw_alpha)
+                    print(f"Weight scale: {quantized_layer.weight_scale}")
+                    print(f"Weight zero point: {quantized_layer.weight_zero_point}")
+                    print(f"Activation scale: {quantized_layer.act_scale}")
+                    print(f"Activation zero point: {quantized_layer.act_zero_point}")
+                    print("-" * 50)
+                    # If we have a source model, copy the learned parameters
+                    if source_child and hasattr(source_child, 'activation_clip'):
+                        with torch.no_grad():
+                            quantized_layer.activation_clip.copy_(source_child.activation_clip)
+                            quantized_layer.raw_alpha.copy_(source_child.raw_alpha)
+                            quantized_layer.input_absmax.copy_(source_child.input_absmax)
+                            quantized_layer.weight_scale.copy_(source_child.weight_scale)
+                            quantized_layer.weight_zero_point.copy_(source_child.weight_zero_point)
+                            quantized_layer.act_scale.copy_(source_child.act_scale)
+                            quantized_layer.act_zero_point.copy_(source_child.act_zero_point)
+                            
+                else:
+                    # Use regular W4A4Linear
+                    quantized_layer = W4A4Linear(child_module, num_bits=bits)
+                
                 setattr(module, child_name, quantized_layer)
             else:
-                replace_linear_recursive(child_module, full_name)
-    replace_linear_recursive(model)
+                replace_linear_recursive(child_module, full_name, source_child)
+    
+    replace_linear_recursive(model, source_module=source_model)
     return model
 
 def evaluate_model(model, eval_dataset, tokenizer, max_samples=100, description=""):
@@ -323,6 +303,7 @@ def evaluate_model(model, eval_dataset, tokenizer, max_samples=100, description=
                     failed_samples += 1
                     continue
                 # Forward pass on device
+                labels[input_ids == tokenizer.pad_token_id] = -100
                 outputs = model(
                     input_ids=input_ids,
                     attention_mask=attention_mask,
@@ -335,7 +316,7 @@ def evaluate_model(model, eval_dataset, tokenizer, max_samples=100, description=
                     failed_samples += 1
                     continue
                 # Update running loss
-                total_loss += loss.item()
+                # total_loss += loss.item()
                 processed_samples += 1
                 # Calculate number of non-padding tokens
                 num_tokens = attention_mask.sum().item()
@@ -346,7 +327,6 @@ def evaluate_model(model, eval_dataset, tokenizer, max_samples=100, description=
                 # Accumulate token count
                 total_loss += loss.item() * num_tokens
                 total_tokens += num_tokens
-                processed_samples += 1
             except Exception as e:
                 print(f"Error processing example {i}: {str(e)}")
                 failed_samples += 1
@@ -461,11 +441,10 @@ def calibrate_quantization(model, calibration_data, tokenizer, num_samples=50, d
     """Calibrate the quantization parameters using a separate calibration set"""
     print(f"\n--- Calibrating quantization parameters for {description} ---")
     
-    # Set model to eval mode for calibration and move to CPU
+    # Set model to eval mode for calibration
     was_training = model.training
     model.eval()
     original_device = next(model.parameters()).device
-    # model = model.cpu()
     
     # Ensure we don't exceed dataset size
     num_samples = min(num_samples, len(calibration_data))
@@ -473,37 +452,45 @@ def calibrate_quantization(model, calibration_data, tokenizer, num_samples=50, d
     
     print(f"Using {len(calibration_subset)} samples for calibration...")
     
-    # Collect activation ranges
+    # Collect activation ranges and minimum values for W4A4Linear only (QATW4A4Linear handles its own calibration)
     input_ranges = []
+    input_mins = []
     output_ranges = []
     
-    # Hook to collect activation ranges
+    # Hook to collect activation ranges for W4A4Linear only
     def forward_hook(module, input, output):
+        if not isinstance(module, W4A4Linear):
+            return
+            
         if isinstance(input, tuple):
             input = input[0]
         if isinstance(output, tuple):
             output = output[0]
             
-        # Get absolute max for input and output
-        input_max = input.detach().abs().max().item()
+        # Get min/max for input and max for output
+        input_tensor = input.detach()
+        input_min = input_tensor.min().item()
+        input_max = input_tensor.max().item()
         output_max = output.detach().abs().max().item()
         
+        # input_ranges.append(input_max-input_min)
         input_ranges.append(input_max)
+        input_mins.append(input_min)
         output_ranges.append(output_max)
     
-    # Register hooks on all W4A4Linear layers
+    # Register hooks only on W4A4Linear layers (not QATW4A4Linear)
     handles = []
     for name, module in model.named_modules():
-        if isinstance(module, (W4A4Linear, QATW4A4Linear)):
+        if isinstance(module, W4A4Linear):
             handles.append(module.register_forward_hook(forward_hook))
     
-    # Run calibration on CPU
+    # Run calibration
     with torch.no_grad():
         for i, example in enumerate(tqdm(calibration_subset, desc="Calibrating")):
             try:
-                # Convert to tensor and keep on CPU
-                input_ids = torch.tensor(example['input_ids'], device='mps').unsqueeze(0)
-                attention_mask = torch.tensor(example['attention_mask'], device='mps').unsqueeze(0)
+                # Convert to tensor and move to device
+                input_ids = torch.tensor(example['input_ids'], device=original_device).unsqueeze(0)
+                attention_mask = torch.tensor(example['attention_mask'], device=original_device).unsqueeze(0)
                 
                 # Skip empty examples
                 if input_ids.numel() == 0 or attention_mask.sum() == 0:
@@ -516,25 +503,28 @@ def calibrate_quantization(model, calibration_data, tokenizer, num_samples=50, d
                 print(f"Warning: Error during calibration on example {i}: {str(e)}")
                 continue
     
-    # Calculate and set scales based on collected ranges
+    # Calculate and set scales only for W4A4Linear layers
     if input_ranges and output_ranges:
-        input_scale = max(input_ranges) / 7.0  # For int4 symmetric
-        output_scale = max(output_ranges) / 7.0
+        input_scale = max(input_ranges)-min(input_mins) / 15 
+        input_zero_point = round(min(input_mins)/input_scale)
+        # input_zero_point = 0
+
+        # output_scale = max(output_ranges) / 15
         
-        # Set scales for all layers
+        # Set scales only for W4A4Linear layers
         for module in model.modules():
-            if isinstance(module, (W4A4Linear, QATW4A4Linear)):
+            if isinstance(module, W4A4Linear):
                 module.input_scale.fill_(input_scale)
-                module.output_scale.fill_(output_scale)
+                module.input_zero_point.fill_(input_zero_point)
+                
+                # module.output_scale.fill_(output_scale)
     
     # Remove hooks
     for handle in handles:
         handle.remove()
     
-    # Restore original training mode and device
+    # Restore original training mode
     model.train(was_training)
-    if str(original_device) != 'cpu':
-        model = model.to(original_device)
         
     print("Calibration complete!")
 
@@ -548,7 +538,8 @@ def main():
     args = parser.parse_args()
     set_seed(42)
     model_name = "gpt2"
-    baseline_lora_path = "baseline_lora_adapters"
+    # baseline_lora_path = "baseline_lora_adapters"
+    baseline_lora_path = "output_baseline_lora/checkpoint-292"
     qat_lora_path = "output_qat_lora_2/checkpoint-292"
     # Device selection (already handled above)
     print("\nLoading and preprocessing data...")
@@ -560,30 +551,30 @@ def main():
     print(f"Using {len(calibration_dataset)} samples for calibration")
     print(f"Using {len(eval_dataset)} samples for evaluation")
     def test_model(model_name, lora_path, model_type, quantization_method, require_lora=False):
+        model, _ = load_model_and_tokenizer(model_name, lora_path, require_lora=require_lora)
+        model = model.to(device)
+        if quantization_method == "qat":
+            print(f"\n--- Applying QAT quantization architecture ---")
+            replace_layers_qat(model)
+            quantized_model = model
+        else:
+            print(f"\n--- Creating new model instance for uniform quantization ---")
+            quantized_model, _ = load_model_and_tokenizer(model_name, lora_path, require_lora=require_lora)
+            quantized_model = quantized_model.to(device)
+            quantize_model(quantized_model, bits=4, quantization_method='uniform')
+            calibrate_quantization(quantized_model, calibration_dataset, tokenizer, 
+                             num_samples=args.calib_samples, description=model_type)
         print(f"\n{'='*80}")
         print(f"TESTING {model_type.upper()} MODEL")
         print(f"{'='*80}")
         print("\n--- Loading model ---")
-        model, _ = load_model_and_tokenizer(model_name, lora_path, require_lora=require_lora)
-        model = model.to(device)
+        
         eval_results = evaluate_model(
             model,
             eval_dataset,
             tokenizer,
             max_samples=args.eval_samples,
             description=f"Original {model_type}"
-        )
-        print("\n--- Creating new model instance for quantization ---")
-        quantized_model, _ = load_model_and_tokenizer(model_name, lora_path, require_lora=require_lora)
-        quantized_model = quantized_model.to(device)
-        print(f"\n--- Applying quantization ({quantization_method}) ---")
-        quantize_model(quantized_model, bits=4, quantization_method=quantization_method)
-        calibrate_quantization(
-            quantized_model,
-            calibration_dataset,
-            tokenizer,
-            num_samples=args.calib_samples,
-            description=model_type
         )
         quantized_eval_results = evaluate_model(
             quantized_model,

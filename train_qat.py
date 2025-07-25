@@ -86,6 +86,16 @@ class QATW4A4Linear(nn.Module):
             torch.zeros(1, dtype=torch.float32, device=self.device)
         )
 
+    @property
+    def weight(self):
+        """Return the merged weights for PEFT compatibility"""
+        return self._get_merged_weights()
+
+    @weight.setter  
+    def weight(self, value):
+        """Set the original linear weight for PEFT compatibility"""
+        self.original_linear.weight = nn.Parameter(value.detach().clone())
+        
     def _calculate_quant_params(self, min_vals, max_vals, num_bits):
         """Calculate scale and zero-point for quantization, supporting per-channel.
         
@@ -194,6 +204,7 @@ class QATW4A4Linear(nn.Module):
         # PACT: symmetric clipping for activations
         clip_val = torch.abs(self.activation_clip)
         clipped_input = torch.clamp(scaled_input, -clip_val, clip_val)
+        # clipped_input = torch.clamp(scaled_input, 0, clip_val)
         
         # Quantization parameters for weights (per-channel)
         weight_mins = scaled_weights.min(dim=1, keepdim=True)[0]

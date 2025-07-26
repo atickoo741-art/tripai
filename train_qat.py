@@ -313,6 +313,8 @@ class QuantizedGPT2Block(GPT2Block):
         return outputs
 
 
+
+
 # 1. Load the GPT-2 small model and tokenizer
 model_name = "gpt2"
 tokenizer = AutoTokenizer.from_pretrained(model_name)
@@ -488,6 +490,26 @@ if __name__ == "__main__":
     # 7. Train the model
     print("\n--- Starting W4A4 QAT with LoRA Fine-tuning ---")
     trainer.train()
+
+    def save_quantization_parameters(model, save_dir):
+        quant_params = {}
+        for name, module in model.named_modules():
+            if isinstance(module, QATW4A4Linear):
+                # Save all quantization parameters
+                param_prefix = f"{name}."
+                quant_params[f"{param_prefix}activation_clip"] = module.activation_clip.data
+                quant_params[f"{param_prefix}raw_alpha"] = module.raw_alpha.data
+                quant_params[f"{param_prefix}input_absmax"] = module.input_absmax.data
+                quant_params[f"{param_prefix}weight_scale"] = module.weight_scale.data
+                quant_params[f"{param_prefix}weight_zero_point"] = module.weight_zero_point.data
+                quant_params[f"{param_prefix}act_scale"] = module.act_scale.data
+                quant_params[f"{param_prefix}act_zero_point"] = module.act_zero_point.data
+        
+        # Save quantization parameters
+        torch.save(quant_params, os.path.join(save_dir, "quantization_params.pth"))
+        print(f"Saved {len(quant_params)} quantization parameters")
+    
+    save_quantization_parameters(peft_model, model_dir)
 
     # 8. Evaluate and Save
     print("\n--- Evaluating W4A4 QAT LoRA Model ---")

@@ -550,12 +550,45 @@ def main():
     eval_dataset = val_dataset.select(range(args.calib_samples, min(args.calib_samples + args.eval_samples, val_size)))
     print(f"Using {len(calibration_dataset)} samples for calibration")
     print(f"Using {len(eval_dataset)} samples for evaluation")
+
+    def load_quantization_parameters(model, checkpoint_dir):
+        """Load the saved quantization parameters"""
+        quant_params_path = os.path.join(checkpoint_dir, "quantization_params.pth")
+        
+        if not os.path.exists(quant_params_path):
+            print(f"Warning: No quantization parameters found at {quant_params_path}")
+            return False
+        
+        quant_params = torch.load(quant_params_path, map_location='mps')
+        
+        # Apply parameters to QATW4A4Linear layers
+        for name, module in model.named_modules():
+            if isinstance(module, QATW4A4Linear):
+                param_prefix = f"{name}."
+                
+                # Load each parameter if it exists
+                for param_name in ['activation_clip', 'raw_alpha', 'input_absmax', 
+                                'weight_scale', 'weight_zero_point', 'act_scale', 'act_zero_point']:
+                    full_key = f"{param_prefix}{param_name}"
+                    if full_key in quant_params:
+                        getattr(module, param_name).copy_(quant_params[full_key])
+                        
+        print(f"Loaded quantization parameters from {quant_params_path}")
+        return True
+
+
     def test_model(model_name, lora_path, model_type, quantization_method, require_lora=False):
         model, _ = load_model_and_tokenizer(model_name, lora_path, require_lora=require_lora)
         model = model.to(device)
         if quantization_method == "qat":
             print(f"\n--- Applying QAT quantization architecture ---")
-            replace_layers_qat(model)
+            apply_quantization_to_model(model)
+            
+            # Load the trained quantization parameters
+            if not load_quantization_parameters(model, lora_path):
+                print("ERROR: Failed to load quantization parameters!")
+                return None
+                
             quantized_model = model
         else:
             print(f"\n--- Creating new model instance for uniform quantization ---")

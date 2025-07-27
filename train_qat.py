@@ -86,6 +86,11 @@ class QATW4A4Linear(nn.Module):
             torch.zeros(1, dtype=torch.float32, device=self.device)
         )
 
+    @property 
+    def constrained_clip_val(self):
+        return torch.clamp(torch.abs(self.activation_clip), min=0.1, max=10.0)
+
+
     @property
     def weight(self):
         """Return the merged weights for PEFT compatibility"""
@@ -192,7 +197,7 @@ class QATW4A4Linear(nn.Module):
         # where |X_j| is input_absmax[j] and |W_j| is weight_absmax_per_input_channel[j]
         scaling_factor = (self.input_absmax.detach() ** (self.alpha)) * \
                         (weight_absmax_per_input_channel.detach() ** (1 - self.alpha))
-        scaling_factor = scaling_factor.clamp(min=1e-8)  # [in_features]
+        scaling_factor = scaling_factor.clamp(min=1e-8, max = 1e3)  # [in_features]
         
         # Apply scaling:
         # Input: x = x / s_j (broadcast over batch and sequence dims)
@@ -202,7 +207,8 @@ class QATW4A4Linear(nn.Module):
         scaled_weights = merged_weights * scaling_factor.unsqueeze(0)  # [out_features, in_features]
         
         # PACT: symmetric clipping for activations
-        clip_val = torch.abs(self.activation_clip)
+        # clip_val = torch.abs(self.activation_clip)
+        clip_val = self.constrained_clip_val
         clipped_input = torch.clamp(scaled_input, -clip_val, clip_val)
         # clipped_input = torch.clamp(scaled_input, 0, clip_val)
         
@@ -447,14 +453,15 @@ if __name__ == "__main__":
         per_device_train_batch_size=2 if torch.backends.mps.is_available() else 8, # Smaller batch for MPS
         per_device_eval_batch_size=2 if torch.backends.mps.is_available() else 8,
         gradient_accumulation_steps=32 if torch.backends.mps.is_available() else 8, # Increase for MPS
-        max_grad_norm=1.0,  # Gradient clipping with max norm of 1.0
+        max_grad_norm=0.5,  # Gradient clipping with max norm of 1.0
         gradient_checkpointing=True,  # Enable gradient checkpointing to save memory
         save_strategy="epoch",
         eval_strategy="epoch",
         logging_dir="./logs_qat_lora",
         logging_steps=20, # More frequent logging for MPS
-        learning_rate=1e-4 if torch.backends.mps.is_available() else 2e-4, # Lower lr for MPS
+        learning_rate=5e-5 if torch.backends.mps.is_available() else 2e-4, # Lower lr for MPS
         weight_decay=0.01,
+        warmup_ratio = 0.1,
         fp16=use_fp16, # Only enable for CUDA
         bf16=not use_fp16 and torch.cuda.is_bf16_supported(),
         tf32=torch.cuda.is_available() and torch.cuda.get_device_capability()[0] >= 8, # For Ampere+
@@ -491,6 +498,18 @@ if __name__ == "__main__":
     print("\n--- Starting W4A4 QAT with LoRA Fine-tuning ---")
     trainer.train()
 
+    # 8. Evaluate and Save
+    print("\n--- Evaluating W4A4 QAT LoRA Model ---")
+    eval_results = trainer.evaluate()
+    print(f"Perplexity: {torch.exp(torch.tensor(eval_results['eval_loss']))}")
+
+    # Create model directory if it doesn't exist
+    os.makedirs(model_dir, exist_ok=True)
+    
+    # Save the model, tokenizer, and quantization parameters
+    print(f"\n--- Saving W4A4 QAT LoRA model to {model_dir} ---")
+    
+    # Save quantization parameters
     def save_quantization_parameters(model, save_dir):
         quant_params = {}
         for name, module in model.named_modules():
@@ -509,19 +528,12 @@ if __name__ == "__main__":
         torch.save(quant_params, os.path.join(save_dir, "quantization_params.pth"))
         print(f"Saved {len(quant_params)} quantization parameters")
     
+    # Save quantization parameters after training
     save_quantization_parameters(peft_model, model_dir)
-
-    # 8. Evaluate and Save
-    print("\n--- Evaluating W4A4 QAT LoRA Model ---")
-    eval_results = trainer.evaluate()
-    print(f"Perplexity: {torch.exp(torch.tensor(eval_results['eval_loss']))}")
-
-    # Create model directory
-    os.makedirs(model_dir, exist_ok=True)
     
     # Save the LoRA adapters
     peft_model.save_pretrained(model_dir)
-    print(f"\n--- Saving W4A4 QAT LoRA adapters to {model_dir} ---")
+    print(f"--- Saving W4A4 QAT LoRA adapters to {model_dir} ---")
     
     # Save the tokenizer
     tokenizer.save_pretrained(model_dir)

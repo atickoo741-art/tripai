@@ -540,7 +540,7 @@ def main():
     model_name = "gpt2"
     # baseline_lora_path = "baseline_lora_adapters"
     baseline_lora_path = "output_baseline_lora/checkpoint-292"
-    qat_lora_path = "output_qat_lora_2/checkpoint-292"
+    qat_lora_path = "output_qat_lora_3/checkpoint-292"
     # Device selection (already handled above)
     print("\nLoading and preprocessing data...")
     dataset, tokenizer = load_and_preprocess_wikitext2(model_name)
@@ -582,7 +582,7 @@ def main():
         model = model.to(device)
         if quantization_method == "qat":
             print(f"\n--- Applying QAT quantization architecture ---")
-            apply_quantization_to_model(model)
+            replace_layers_qat(model)
             
             # Load the trained quantization parameters
             if not load_quantization_parameters(model, lora_path):
@@ -676,7 +676,7 @@ def main():
     print(f"{'Baseline LoRA':<20} | {baseline_results['original_ppl']:12.2f} | {baseline_results['quantized_ppl']:12.2f} | {baseline_results['quantized_ppl'] - baseline_results['original_ppl']:12.2f} | {baseline_results['quantization_method']:>15}")
     print(f"{'QAT LoRA':<20} | {qat_results['original_ppl']:12.2f} | {qat_results['quantized_ppl']:12.2f} | {qat_results['quantized_ppl'] - qat_results['original_ppl']:12.2f} | {qat_results['quantization_method']:>15}")
     print("="*80)
-    # Save quantized model if needed (optional)
+    # Save quantized model if needed (optional) 
     save_quantized = False  # Set to True if you want to save
     if save_quantized:
         print("\nSaving quantized model...")

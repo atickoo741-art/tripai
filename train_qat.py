@@ -423,9 +423,26 @@ def apply_quantization_to_model(model):
             # Replace with quantized version
             setattr(parent, attrs[-1], QATW4A4Linear(module))
 
-# First apply quantization to the base model
-print("\n--- Applying W4A4 quantization to base model ---")
-apply_quantization_to_model(model)
+
+def apply_quantization_to_peft_model(peft_model):
+    """Apply QATW4A4Linear to all linear layers within the peft_model's base_model."""
+    base_model_to_quantize = peft_model.base_model.model
+
+    for name, module in base_model_to_quantize.named_modules():
+        if isinstance(module, (nn.Linear, torch.nn.modules.conv.Conv1d)):
+            # This check is crucial to ensure we don't re-wrap if somehow already done
+            if hasattr(module, 'original_linear'): # This is how your QATW4A4Linear signals it's a wrapper
+                continue # Skip if it's already your custom QAT module
+
+            parent = base_model_to_quantize
+            attrs = name.split('.')
+            for attr in attrs[:-1]:
+                parent = getattr(parent, attr)
+            
+            # Replace the original (now LoRA-enabled) linear layer with your QATW4A4Linear wrapper
+            setattr(parent, attrs[-1], QATW4A4Linear(module))
+
+
 
 # 3. Prepare the model for LoRA fine-tuning
 lora_config = LoraConfig(
@@ -443,6 +460,18 @@ peft_model = get_peft_model(model, lora_config)
 print("\n--- LoRA Adapters Applied ---")
 peft_model.print_trainable_parameters()
 
+
+
+# First apply quantization to the base model
+# print("\n--- Applying W4A4 quantization to base model ---")
+# apply_quantization_to_model(model)
+apply_quantization_to_peft_model(peft_model)
+print("\n--- W4A4 Quantization Applied to LoRA-enabled model ---")
+
+
+
+
+
 # 5. Configure Trainable Parameters
 # Ensure only LoRA adapters and PACT thresholds are trainable.
 print("\n--- Configuring Trainable Parameters (LoRA, PACT Clip_Val) ---")
@@ -452,8 +481,10 @@ for name, param in peft_model.named_parameters():
     # and other base model parameters are frozen.
 
     # Enable gradients for LoRA, PACT, and SmoothQuant parameters
-    if "lora" in name or "activation_clip" in name or "alpha" in name:
+    if "activation_clip" in name or "raw_alpha" in name:
         param.requires_grad = True
+    elif "lora" in name: # LoRA parameters
+        param.requires_grad = True # PEFT sets this, but explicit for clarity
     else:
         param.requires_grad = False
 

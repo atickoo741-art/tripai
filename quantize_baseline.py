@@ -207,14 +207,14 @@ def replace_layers_qat(model):
             setattr(parent, attrs[-1], quantized_layer)
             
             # Print the parameters after conversion
-            print(f"Layer: {name}")
-            print(f"PACT clip: {quantized_layer.activation_clip.data}")
-            print(f"SmoothQuant alpha: {quantized_layer.alpha.data}")
-            print(f"Weight scale: {quantized_layer.weight_scale}")
-            print(f"Weight zero point: {quantized_layer.weight_zero_point}")
-            print(f"Activation scale: {quantized_layer.act_scale}")
-            print(f"Activation zero point: {quantized_layer.act_zero_point}")
-            print("-" * 50)
+            # print(f"Layer: {name}")
+            # print(f"PACT clip: {quantized_layer.activation_clip.data}")
+            # print(f"SmoothQuant alpha: {quantized_layer.alpha.data}")
+            # print(f"Weight scale: {quantized_layer.weight_scale}")
+            # print(f"Weight zero point: {quantized_layer.weight_zero_point}")
+            # print(f"Activation scale: {quantized_layer.act_scale}")
+            # print(f"Activation zero point: {quantized_layer.act_zero_point}")
+            # print("-" * 50)
 
 
 def quantize_model(model, bits=4, quantization_method='uniform', depth=0, source_model=None):
@@ -554,7 +554,7 @@ def main():
     def load_quantization_parameters(model, checkpoint_dir):
         """Load the saved quantization parameters"""
         quant_params_path = os.path.join(checkpoint_dir, "quantization_params.pth")
-        
+
         if not os.path.exists(quant_params_path):
             print(f"Warning: No quantization parameters found at {quant_params_path}")
             # Try to find quantization params in the checkpoint directory itself
@@ -566,40 +566,61 @@ def main():
             print("Initializing with default quantization parameters...")
             for name, module in model.named_modules():
                 if isinstance(module, QATW4A4Linear):
-                    # Set reasonable defaults
+                    # Set reasonable defaults using torch.no_grad() context
                     with torch.no_grad():
-                        module.activation_clip.fill_(6.0)
-                        module.raw_alpha.fill_(0.5)
-                        module.input_absmax.fill_(1.0)
-                        module.weight_scale.fill_(0.1)
-                        module.weight_zero_point.fill_(0.0)
-                        module.act_scale.fill_(0.4)
-                        module.act_zero_point.fill_(8.0)
+                        module.activation_clip.data.fill_(6.0)
+                        module.raw_alpha.data.fill_(0.5)
+                        module.input_absmax.data.fill_(1.0)
+                        module.weight_scale.data.fill_(0.1)
+                        module.weight_zero_point.data.fill_(0.0)
+                        module.act_scale.data.fill_(0.4)
+                        module.act_zero_point.data.fill_(8.0)
             
             print("Default quantization parameters initialized")
             return True  # Return True to continue execution
         
         try:
             quant_params = torch.load(quant_params_path, map_location=device)
-            
+            print("FAT MONKEY")
+            print(quant_params)
+            print("BIG MONKEY BLOO BLOO")
+            print(len(quant_params))
             # Apply parameters to QATW4A4Linear layers
             for name, module in model.named_modules():
                 if isinstance(module, QATW4A4Linear):
+                    print("SMALL MONKEY BLANGOOONJIII")
                     param_prefix = f"{name}."
                     
-                    # Load each parameter if it exists
-                    for param_name in ['activation_clip', 'raw_alpha', 'input_absmax', 
-                                    'weight_scale', 'weight_zero_point', 'act_scale', 'act_zero_point']:
-                        full_key = f"{param_prefix}{param_name}"
-                        if full_key in quant_params:
-                            getattr(module, param_name).copy_(quant_params[full_key])
-                            
+                    # Load each parameter if it exists using torch.no_grad()
+                    with torch.no_grad():
+                        for param_name in ['activation_clip', 'raw_alpha', 'input_absmax', 
+                                        'weight_scale', 'weight_zero_point', 'act_scale', 'act_zero_point']:
+                            full_key = f"{param_prefix}{param_name}"
+                            if full_key in quant_params:
+                                # Use .data.copy_() instead of .copy_() to avoid gradient tracking
+                                saved_param = quant_params[full_key].to(device)
+                                getattr(module, param_name).data.copy_(saved_param)
+                            # else:
+                                # print(f"Warning: Parameter {full_key} not found in saved parameters")
+
+            # for name, module in model.named_modules():
+            #     if isinstance(module, QATW4A4Linear):
+                    # Print the parameters after conversion
+                    # print(f"Layer: {name}")
+                    # print(f"PACT clip: {module.activation_clip.data}")
+                    # print(f"SmoothQuant alpha: {module.alpha.data}")
+                    # print(f"Weight scale: {module.weight_scale}")
+                    # print(f"Weight zero point: {module.weight_zero_point}")
+                    # print(f"Activation scale: {module.act_scale}")
+                    # print(f"Activation zero point: {module.act_zero_point}")
+                    # print("-" * 50)
             print(f"Loaded quantization parameters from {quant_params_path}")
             return True
         except Exception as e:
             print(f"Error loading quantization parameters: {e}")
             print("Continuing with default parameters...")
-            return True
+            return True  # Return True to continue execution
+
 
 
     def test_model(model_name, lora_path, model_type, quantization_method, require_lora=False):
@@ -610,10 +631,8 @@ def main():
             if quantization_method == "qat":
                 print(f"\n--- Applying QAT quantization architecture ---")
                 replace_layers_qat(model)
-                
-                # Load the trained quantization parameters (now always returns True)
                 load_quantization_parameters(model, lora_path)
-                    
+                model = model.to(device)
                 quantized_model = model
             else:
                 print(f"\n--- Creating new model instance for uniform quantization ---")
@@ -684,30 +703,30 @@ def main():
                 'quantization_method': quantization_method
             }
     # Test base GPT-2 model (no LoRA)
-    print("\n" + "="*60)
-    print("TESTING BASE GPT-2 (NO FINE-TUNING)")
-    print("="*60)
-    base_model = AutoModelForCausalLM.from_pretrained(model_name).to(device)
-    base_model.eval()
-    print("\n--- Evaluating Base GPT-2 Model ---")
-    base_eval_results = evaluate_model(base_model, eval_dataset, tokenizer, max_samples=args.eval_samples)
-    print("\n--- Creating copy of base model for quantization ---")
-    quantized_base = copy.deepcopy(base_model)
-    print("\n--- Applying quantization (uniform) ---")
-    quantize_model(quantized_base, bits=4, quantization_method='uniform')
-    quantized_base = quantized_base.to(device)
-    print("\n--- Calibrating quantization parameters for base model ---")
-    calibrate_quantization(quantized_base, calibration_dataset, tokenizer, num_samples=args.calib_samples)
-    print("\n--- Evaluating Quantized Base Model ---")
-    quantized_base_results = evaluate_model(quantized_base, eval_dataset, tokenizer, max_samples=args.eval_samples)
-    base_results = {
-        'original_loss': base_eval_results['eval_loss'],
-        'original_ppl': base_eval_results['perplexity'],
-        'quantized_loss': quantized_base_results['eval_loss'],
-        'quantized_ppl': quantized_base_results['perplexity'],
-        'quantization_method': 'uniform'
-    }
-    baseline_results = test_model(model_name, baseline_lora_path, "Baseline LoRA", quantization_method='uniform', require_lora=True)
+    # print("\n" + "="*60)
+    # print("TESTING BASE GPT-2 (NO FINE-TUNING)")
+    # print("="*60)
+    # base_model = AutoModelForCausalLM.from_pretrained(model_name).to(device)
+    # base_model.eval()
+    # print("\n--- Evaluating Base GPT-2 Model ---")
+    # base_eval_results = evaluate_model(base_model, eval_dataset, tokenizer, max_samples=args.eval_samples)
+    # print("\n--- Creating copy of base model for quantization ---")
+    # quantized_base = copy.deepcopy(base_model)
+    # print("\n--- Applying quantization (uniform) ---")
+    # quantize_model(quantized_base, bits=4, quantization_method='uniform')
+    # quantized_base = quantized_base.to(device)
+    # print("\n--- Calibrating quantization parameters for base model ---")
+    # calibrate_quantization(quantized_base, calibration_dataset, tokenizer, num_samples=args.calib_samples)
+    # print("\n--- Evaluating Quantized Base Model ---")
+    # quantized_base_results = evaluate_model(quantized_base, eval_dataset, tokenizer, max_samples=args.eval_samples)
+    # base_results = {
+    #     'original_loss': base_eval_results['eval_loss'],
+    #     'original_ppl': base_eval_results['perplexity'],
+    #     'quantized_loss': quantized_base_results['eval_loss'],
+    #     'quantized_ppl': quantized_base_results['perplexity'],
+    #     'quantization_method': 'uniform'
+    # }
+    # baseline_results = test_model(model_name, baseline_lora_path, "Baseline LoRA", quantization_method='uniform', require_lora=True)
     qat_results = test_model(model_name, qat_lora_path, "QAT LoRA", quantization_method='qat', require_lora=True)
     
     # Ensure we have valid results

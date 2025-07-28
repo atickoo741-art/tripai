@@ -130,31 +130,33 @@ class QATW4A4Linear(nn.Module):
 
     def _get_merged_weights(self):
         """Merge base weights with LoRA deltas if they exist."""
-        # Get base weights
+        # Cache during eval mode
+        if not self.training and hasattr(self, '_cached_merged_weights'):
+            return self._cached_merged_weights
+            
         base_weight = self.original_linear.weight
         
-        # Check if this is a LoRA layer
         if hasattr(self.original_linear, 'lora_A') and hasattr(self.original_linear, 'lora_B'):
-            # Calculate LoRA delta: lora_B @ lora_A * scaling
             lora_A = self.original_linear.lora_A.default.weight
             lora_B = self.original_linear.lora_B.default.weight
             lora_scaling = self.original_linear.scaling['default']
             
-            # Apply LoRA scaling and calculate delta
             lora_delta = lora_B @ lora_A * lora_scaling
             
-            # Ensure lora_delta has the same shape as base_weight
             if lora_delta.shape != base_weight.shape:
-                # This handles the case where LoRA is applied to a subset of the weight matrix
-                # We assume the LoRA delta is applied to the first part of the weight matrix
                 delta = torch.zeros_like(base_weight)
                 delta[:lora_delta.shape[0], :lora_delta.shape[1]] = lora_delta
                 lora_delta = delta
                 
-            # Merge base weights with LoRA delta
-            return base_weight + lora_delta
+            merged = base_weight + lora_delta
+        else:
+            merged = base_weight
+        
+        # Cache for eval mode
+        if not self.training:
+            self._cached_merged_weights = merged
             
-        return base_weight
+        return merged
         
     @property
     def alpha(self):
@@ -174,6 +176,20 @@ class QATW4A4Linear(nn.Module):
         return current_absmax
 
     def forward(self, input):
+        
+        if not self.training and hasattr(self, '_cached_scaling_factor'):
+            scaling_factor = self._cached_scaling_factor
+        else:
+            merged_weights = self._get_merged_weights()
+            weight_absmax_per_input_channel = merged_weights.abs().amax(dim=0, keepdim=False)
+            scaling_factor = (self.input_absmax.detach() ** (self.alpha)) * \
+                            (weight_absmax_per_input_channel.detach() ** (1 - self.alpha))
+            scaling_factor = scaling_factor.clamp(min=1e-8, max = 1e3)
+        
+        # Cache for eval mode
+        if not self.training:
+            self._cached_scaling_factor = scaling_factor
+
         # input shape: [batch_size, seq_len, in_features] or [batch_size, in_features]
         # Ensure input_absmax is the right shape [in_features]
         if input.dim() == 3:
@@ -212,17 +228,25 @@ class QATW4A4Linear(nn.Module):
         clipped_input = torch.clamp(scaled_input, -clip_val, clip_val)
         # clipped_input = torch.clamp(scaled_input, 0, clip_val)
         
-        # Quantization parameters for weights (per-channel)
-        weight_mins = scaled_weights.min(dim=1, keepdim=True)[0]
-        weight_maxs = scaled_weights.max(dim=1, keepdim=True)[0]
-        weight_scale, weight_zero_point = self._calculate_quant_params(
-            weight_mins, weight_maxs, self.num_bits
-        )
-        
-        # Quantization parameters for activations (per-tensor)
-        act_scale, act_zero_point = self._calculate_quant_params(
-            -clip_val, clip_val, self.num_bits
-        )
+        if not self.training and hasattr(self, '_cached_quant_params'):
+            weight_scale, weight_zero_point, act_scale, act_zero_point = self._cached_quant_params
+        else:
+            # Quantization parameters for weights (per-channel)
+            weight_mins = scaled_weights.min(dim=1, keepdim=True)[0]
+            weight_maxs = scaled_weights.max(dim=1, keepdim=True)[0]
+            weight_scale, weight_zero_point = self._calculate_quant_params(
+                weight_mins, weight_maxs, self.num_bits
+            )
+            
+            # Quantization parameters for activations (per-tensor)
+            clip_val = self.constrained_clip_val
+            act_scale, act_zero_point = self._calculate_quant_params(
+                -clip_val, clip_val, self.num_bits
+            )
+            
+            # Cache for eval mode
+            if not self.training:
+                self._cached_quant_params = (weight_scale, weight_zero_point, act_scale, act_zero_point)
         
         # Store scales for potential use
         # Ensure correct shapes: [out_features] for weights, [1] for activations
@@ -247,6 +271,33 @@ class QATW4A4Linear(nn.Module):
         # So, we need to transpose quant_weight before passing it to F.linear to match Conv1D behavior.
         output = F.linear(quant_input, quant_weight, self.original_linear.bias)
         return output
+    def eval(self):
+        """Override eval to pre-compute cached values"""
+        super().eval()
+        if hasattr(self, '_cached_scaling_factor'):
+            del self._cached_scaling_factor
+        if hasattr(self, '_cached_merged_weights'):
+            del self._cached_merged_weights  
+        if hasattr(self, '_cached_quant_params'):
+            del self._cached_quant_params
+        
+        # Pre-compute all cached values with a dummy forward pass
+        with torch.no_grad():
+            dummy_input = torch.randn(1, self.in_features, device=next(self.parameters()).device)
+            _ = self.forward(dummy_input)
+        
+        return self
+
+    def train(self, mode=True):
+        """Override train to clear caches"""
+        super().train(mode)
+        if hasattr(self, '_cached_scaling_factor'):
+            del self._cached_scaling_factor
+        if hasattr(self, '_cached_merged_weights'):
+            del self._cached_merged_weights
+        if hasattr(self, '_cached_quant_params'):
+            del self._cached_quant_params
+        return self
 
 # Custom Quantization-Aware GPT2Block
 class QuantizedGPT2Block(GPT2Block):

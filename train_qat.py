@@ -44,7 +44,7 @@ class FakeQuantize(torch.autograd.Function):
         return grad_output, None, None, None
 
 class QATW4A4Linear(nn.Module):
-    def __init__(self, original_linear_layer, num_bits=4, init_clip_val=6.0):
+    def __init__(self, original_linear_layer, num_bits=4, init_clip_val=2.0):
         super().__init__()
         self.original_linear = original_linear_layer
         self.num_bits = num_bits
@@ -62,7 +62,7 @@ class QATW4A4Linear(nn.Module):
         
         # SmoothQuant parameters
         self.raw_alpha = nn.Parameter(
-            torch.tensor(0.5, device=self.device)  # Will be passed through sigmoid
+            torch.tensor(-1.0, device=self.device)  # Will be passed through sigmoid
         )
         # Track per-channel input statistics
         self.register_buffer('input_absmax', 
@@ -88,7 +88,7 @@ class QATW4A4Linear(nn.Module):
 
     @property 
     def constrained_clip_val(self):
-        return torch.clamp(torch.abs(self.activation_clip), min=0.1, max=10.0)
+        return torch.clamp(torch.abs(self.activation_clip), min=0.5, max=6.0)
 
 
     @property
@@ -450,18 +450,19 @@ if __name__ == "__main__":
         output_dir=output_dir, # Output directory for checkpoints and logs
         overwrite_output_dir=False,  # Disable overwrite since we're using unique directories
         num_train_epochs=1, # Train for one epoch as per plan
-        per_device_train_batch_size=2 if torch.backends.mps.is_available() else 8, # Smaller batch for MPS
+        per_device_train_batch_size=1 if torch.backends.mps.is_available() else 4, # Smaller batch for MPS
         per_device_eval_batch_size=2 if torch.backends.mps.is_available() else 8,
-        gradient_accumulation_steps=32 if torch.backends.mps.is_available() else 8, # Increase for MPS
+        gradient_accumulation_steps=64 if torch.backends.mps.is_available() else 16, # Increase for MPS
         max_grad_norm=0.5,  # Gradient clipping with max norm of 1.0
         gradient_checkpointing=True,  # Enable gradient checkpointing to save memory
         save_strategy="epoch",
         eval_strategy="epoch",
         logging_dir="./logs_qat_lora",
         logging_steps=20, # More frequent logging for MPS
-        learning_rate=5e-5 if torch.backends.mps.is_available() else 2e-4, # Lower lr for MPS
+        learning_rate=1e-5 if torch.backends.mps.is_available() else 5e-5, # Lower lr for MPS
         weight_decay=0.01,
-        warmup_ratio = 0.1,
+        warmup_ratio = 0.3,
+        lr_scheduler_type="cosine",
         fp16=use_fp16, # Only enable for CUDA
         bf16=not use_fp16 and torch.cuda.is_bf16_supported(),
         tf32=torch.cuda.is_available() and torch.cuda.get_device_capability()[0] >= 8, # For Ampere+
@@ -511,6 +512,8 @@ if __name__ == "__main__":
     
     # Save quantization parameters
     def save_quantization_parameters(model, save_dir):
+        os.makedirs(save_dir, exist_ok=True)
+
         quant_params = {}
         for name, module in model.named_modules():
             if isinstance(module, QATW4A4Linear):

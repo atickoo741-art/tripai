@@ -434,6 +434,8 @@ def apply_quantization_to_peft_model(peft_model):
             if hasattr(module, 'original_linear'): # This is how your QATW4A4Linear signals it's a wrapper
                 continue # Skip if it's already your custom QAT module
 
+            print(f"Applying quantization to {name}")
+
             parent = base_model_to_quantize
             attrs = name.split('.')
             for attr in attrs[:-1]:
@@ -443,8 +445,8 @@ def apply_quantization_to_peft_model(peft_model):
             setattr(parent, attrs[-1], QATW4A4Linear(module))
 
 # print("\n--- Applying quantization to model ---")
-# apply_quantization_to_model(model)
 
+# apply_quantization_to_model(model)
 # 3. Prepare the model for LoRA fine-tuning
 print("\n--- Applying LoRA Adapters to quantized model ---")
 lora_config = LoraConfig(
@@ -461,12 +463,12 @@ lora_config = LoraConfig(
 peft_model = get_peft_model(model, lora_config)
 # print("\n--- LoRA Adapters Applied ---")
 # peft_model.print_trainable_parameters()
-
+apply_quantization_to_peft_model(peft_model)
 
 # First apply quantization to the base model
 # print("\n--- Applying W4A4 quantization to base model ---")
 
-apply_quantization_to_peft_model(peft_model)
+# apply_quantization_to_peft_model(peft_model)
 # print("\n--- W4A4 Quantization Applied to LoRA-enabled model ---")
 
 
@@ -598,7 +600,10 @@ if __name__ == "__main__":
         os.makedirs(save_dir, exist_ok=True)
 
         quant_params = {}
+        i = 0
         for name, module in model.named_modules():
+            i += 1
+            print(i)
             if isinstance(module, QATW4A4Linear):
                 # Save all quantization parameters
                 param_prefix = f"{name}."

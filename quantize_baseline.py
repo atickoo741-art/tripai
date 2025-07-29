@@ -540,7 +540,7 @@ def main():
     model_name = "gpt2"
     # baseline_lora_path = "baseline_lora_adapters"
     baseline_lora_path = "output_baseline_lora/checkpoint-292"
-    qat_lora_path = "qat_lora_model_4"
+    qat_lora_path = "qat_lora_model_3"
     # Device selection (already handled above)
     print("\nLoading and preprocessing data...")
     dataset, tokenizer = load_and_preprocess_wikitext2(model_name)
@@ -587,8 +587,10 @@ def main():
             print(len(quant_params))
             # Apply parameters to QATW4A4Linear layers
             for name, module in model.named_modules():
+                print("type: --->   " + str(type(module)))
                 if isinstance(module, QATW4A4Linear):
-                    print("SMALL MONKEY BLANGOOONJIII")
+                    print("name: --->   " + name)
+                    # print("SMALL MONKEY BLANGOOONJIII")
                     param_prefix = f"{name}."
                     
                     # Load each parameter if it exists using torch.no_grad()
@@ -703,30 +705,30 @@ def main():
                 'quantization_method': quantization_method
             }
     # Test base GPT-2 model (no LoRA)
-    # print("\n" + "="*60)
-    # print("TESTING BASE GPT-2 (NO FINE-TUNING)")
-    # print("="*60)
-    # base_model = AutoModelForCausalLM.from_pretrained(model_name).to(device)
-    # base_model.eval()
-    # print("\n--- Evaluating Base GPT-2 Model ---")
-    # base_eval_results = evaluate_model(base_model, eval_dataset, tokenizer, max_samples=args.eval_samples)
-    # print("\n--- Creating copy of base model for quantization ---")
-    # quantized_base = copy.deepcopy(base_model)
-    # print("\n--- Applying quantization (uniform) ---")
-    # quantize_model(quantized_base, bits=4, quantization_method='uniform')
-    # quantized_base = quantized_base.to(device)
-    # print("\n--- Calibrating quantization parameters for base model ---")
-    # calibrate_quantization(quantized_base, calibration_dataset, tokenizer, num_samples=args.calib_samples)
-    # print("\n--- Evaluating Quantized Base Model ---")
-    # quantized_base_results = evaluate_model(quantized_base, eval_dataset, tokenizer, max_samples=args.eval_samples)
-    # base_results = {
-    #     'original_loss': base_eval_results['eval_loss'],
-    #     'original_ppl': base_eval_results['perplexity'],
-    #     'quantized_loss': quantized_base_results['eval_loss'],
-    #     'quantized_ppl': quantized_base_results['perplexity'],
-    #     'quantization_method': 'uniform'
-    # }
-    # baseline_results = test_model(model_name, baseline_lora_path, "Baseline LoRA", quantization_method='uniform', require_lora=True)
+    print("\n" + "="*60)
+    print("TESTING BASE GPT-2 (NO FINE-TUNING)")
+    print("="*60)
+    base_model = AutoModelForCausalLM.from_pretrained(model_name).to(device)
+    base_model.eval()
+    print("\n--- Evaluating Base GPT-2 Model ---")
+    base_eval_results = evaluate_model(base_model, eval_dataset, tokenizer, max_samples=args.eval_samples)
+    print("\n--- Creating copy of base model for quantization ---")
+    quantized_base = copy.deepcopy(base_model)
+    print("\n--- Applying quantization (uniform) ---")
+    quantize_model(quantized_base, bits=4, quantization_method='uniform')
+    quantized_base = quantized_base.to(device)
+    print("\n--- Calibrating quantization parameters for base model ---")
+    calibrate_quantization(quantized_base, calibration_dataset, tokenizer, num_samples=args.calib_samples)
+    print("\n--- Evaluating Quantized Base Model ---")
+    quantized_base_results = evaluate_model(quantized_base, eval_dataset, tokenizer, max_samples=args.eval_samples)
+    base_results = {
+        'original_loss': base_eval_results['eval_loss'],
+        'original_ppl': base_eval_results['perplexity'],
+        'quantized_loss': quantized_base_results['eval_loss'],
+        'quantized_ppl': quantized_base_results['perplexity'],
+        'quantization_method': 'uniform'
+    }
+    baseline_results = test_model(model_name, baseline_lora_path, "Baseline LoRA", quantization_method='uniform', require_lora=True)
     qat_results = test_model(model_name, qat_lora_path, "QAT LoRA", quantization_method='qat', require_lora=True)
     
     # Ensure we have valid results

@@ -442,9 +442,11 @@ def apply_quantization_to_peft_model(peft_model):
             # Replace the original (now LoRA-enabled) linear layer with your QATW4A4Linear wrapper
             setattr(parent, attrs[-1], QATW4A4Linear(module))
 
-
+# print("\n--- Applying quantization to model ---")
+# apply_quantization_to_model(model)
 
 # 3. Prepare the model for LoRA fine-tuning
+print("\n--- Applying LoRA Adapters to quantized model ---")
 lora_config = LoraConfig(
     r=8,  # Rank of the update matrices (lower = less parameters)
     lora_alpha=32,  # Alpha parameter for LoRA scaling
@@ -455,18 +457,17 @@ lora_config = LoraConfig(
 )
 
 # 4. Apply LoRA adapters to the quantized model
-print("\n--- Applying LoRA Adapters to quantized model ---")
+# print("\n--- Applying LoRA Adapters to quantized model ---")
 peft_model = get_peft_model(model, lora_config)
-print("\n--- LoRA Adapters Applied ---")
-peft_model.print_trainable_parameters()
-
+# print("\n--- LoRA Adapters Applied ---")
+# peft_model.print_trainable_parameters()
 
 
 # First apply quantization to the base model
 # print("\n--- Applying W4A4 quantization to base model ---")
-# apply_quantization_to_model(model)
+
 apply_quantization_to_peft_model(peft_model)
-print("\n--- W4A4 Quantization Applied to LoRA-enabled model ---")
+# print("\n--- W4A4 Quantization Applied to LoRA-enabled model ---")
 
 
 

@@ -63,5 +63,5 @@ if __name__ == "__main__":
 
     print("\nFirst example of processed training data:")
     print(tokenizer.decode(train_dataset[0]["input_ids"]))
-    print(f"Length of first example: {len(train_dataset[0]["input_ids"])}")
+    print(f"Length of first example: {len(train_dataset[0]['input_ids'])}")
     print(f"Number of training examples: {len(train_dataset)}") 

@@ -39,8 +39,8 @@ setuptools==80.9.0
 six==1.17.0
 sympy==1.14.0
 tokenizers==0.21.2
-torch==2.9.0.dev20250715
-torchaudio==2.8.0.dev20250715
+# torch==2.9.0.dev20250715
+# torchaudio==2.8.0.dev20250715
 torchvision==0.24.0.dev20250715
 tqdm==4.67.1
 transformers==4.53.2

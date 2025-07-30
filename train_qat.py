@@ -10,6 +10,9 @@ from transformers.models.gpt2.modeling_gpt2 import GPT2Block
 from transformers import Trainer, TrainingArguments, DataCollatorForLanguageModeling
 from data_preparation import load_and_preprocess_wikitext2
 
+
+print("train_qat.py script has started execution!", flush=True) # <--- Add this line
+
 # Define the FakeQuantize module with STE
 class FakeQuantize(torch.autograd.Function):
     @staticmethod

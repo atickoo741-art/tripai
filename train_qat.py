@@ -195,7 +195,7 @@ class QATW4A4Linear(nn.Module):
         if input.dim() == 3:
             in_features = input.size(-1)
             if self.input_absmax.dim() != 1 or self.input_absmax.size(0) != in_features:
-                self.input_absmax = torch.ones(in_features, device=input.device, dtype=torch.bfloat16)
+                self.input_absmax = torch.ones(in_features, device=input.device, dtype=torch.float32)
         
         # Update input statistics during training
         if self.training:
@@ -393,9 +393,11 @@ else:
 # Load model with appropriate settings
 model = AutoModelForCausalLM.from_pretrained(
     model_name,
-    torch_dtype=torch.float32 if device.type == "mps" else torch.bfloat16,
-    device_map="auto" if device.type != "mps" else None,  # device_map not supported on MPS
-).to(device)
+    torch_dtype=torch.float32 if device.type == "mps" else (torch.bfloat16 if torch.cuda.is_available() else torch.float32),
+    device_map="auto" if device.type == "cuda" else None,
+)
+if device.type != "cuda":  # For MPS and CPU, explicitly move to device
+    model = model.to(device)
 
 # Add a pad token to the tokenizer if it doesn't have one
 if tokenizer.pad_token is None:
@@ -534,17 +536,17 @@ if __name__ == "__main__":
     training_args = TrainingArguments(
         output_dir=output_dir, # Output directory for checkpoints and logs
         overwrite_output_dir=False,  # Disable overwrite since we're using unique directories
-        num_train_epochs=1, # Train for one epoch as per plan
-        per_device_train_batch_size=1 if torch.backends.mps.is_available() else 4, # Smaller batch for MPS
-        per_device_eval_batch_size=2 if torch.backends.mps.is_available() else 8,
-        gradient_accumulation_steps=64 if torch.backends.mps.is_available() else 16, # Increase for MPS
+        num_train_epochs=3, # Train for one epoch as per plan
+        per_device_train_batch_size=16,  # A100 can handle much larger batches
+        per_device_eval_batch_size=32,
+        gradient_accumulation_steps=4,  # Reduce since we're using larger batches
         max_grad_norm=0.5,  # Gradient clipping with max norm of 1.0
         gradient_checkpointing=True,  # Enable gradient checkpointing to save memory
         save_strategy="epoch",
         eval_strategy="epoch",
         logging_dir="./logs_qat_lora",
         logging_steps=20, # More frequent logging for MPS
-        learning_rate=1e-5 if torch.backends.mps.is_available() else 5e-5, # Lower lr for MPS
+        learning_rate=5e-5,
         weight_decay=0.01,
         warmup_ratio = 0.3,
         lr_scheduler_type="cosine",
@@ -556,8 +558,8 @@ if __name__ == "__main__":
         load_best_model_at_end=True, # Load the best model based on evaluation loss
         metric_for_best_model="eval_loss",
         # MPS-specific optimizations
-        dataloader_pin_memory=not torch.backends.mps.is_available(), # Disable pin_memory for MPS
-        dataloader_num_workers=0 if torch.backends.mps.is_available() else 4, # No workers for MPS
+        dataloader_pin_memory=True,
+        dataloader_num_workers=8,
     )
 
     # Define Data Collator

@@ -125,9 +125,8 @@ class W4A4Linear(nn.Module):
             self.weight, self.weight_scale, self.weight_zero_point, qmin_w, qmax_w
         )
         
-        # Quantize activations (asymmetric, 0 to 15 for 4-bit)
-        qmin_a, qmax_a = 0, (2 ** self.num_bits) - 1
-        # qmin_a, qmax_a = -(2 ** (self.num_bits - 1)), (2 ** (self.num_bits - 1)) - 1
+        # Quantize activations (symmetric, -8 to 7 for 4-bit)
+        qmin_a, qmax_a = -(2 ** (self.num_bits - 1)), (2 ** (self.num_bits - 1)) - 1
         input_quant = self.fake_quantize_tensor(
             x, self.input_scale, self.input_zero_point, qmin_a, qmax_a
         )
@@ -540,7 +539,7 @@ def main():
     model_name = "gpt2"
     # baseline_lora_path = "baseline_lora_adapters"
     baseline_lora_path = "output_baseline_lora/checkpoint-292"
-    qat_lora_path = "qat_lora_model_3"
+    qat_lora_path = "qat_lora_model_4"
     # Device selection (already handled above)
     print("\nLoading and preprocessing data...")
     dataset, tokenizer = load_and_preprocess_wikitext2(model_name)
@@ -634,6 +633,16 @@ def main():
                 print(f"\n--- Applying QAT quantization architecture ---")
                 replace_layers_qat(model)
                 load_quantization_parameters(model, lora_path)
+                for name, module in model.named_modules():
+                    if isinstance(module, QATW4A4Linear):
+                        print(f"Layer: {name}")
+                        print(f"PACT clip: {module.activation_clip.data}")
+                        print(f"SmoothQuant alpha: {module.alpha.data}")
+                        print(f"Weight scale: {module.weight_scale}")
+                        print(f"Weight zero point: {module.weight_zero_point}")
+                        print(f"Activation scale: {module.act_scale}")
+                        print(f"Activation zero point: {module.act_zero_point}")
+                        print("-" * 50)
                 model = model.to(device)
                 quantized_model = model
             else:

@@ -383,7 +383,7 @@ if torch.backends.mps.is_available():
     print("Using MPS device (Apple Silicon)")
 elif torch.cuda.is_available():
     device = torch.device("cuda")
-    torch.set_default_dtype(torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float32)
+    torch.set_default_dtype(torch.float32)  # Change from bfloat16 to float32
     print("Using CUDA device")
 else:
     device = torch.device("cpu")
@@ -393,7 +393,7 @@ else:
 # Load model with appropriate settings
 model = AutoModelForCausalLM.from_pretrained(
     model_name,
-    torch_dtype=torch.float32 if device.type == "mps" else (torch.bfloat16 if torch.cuda.is_available() else torch.float32),
+    torch_dtype=torch.float32,  # Change from bfloat16 to float32
     device_map="auto" if device.type == "cuda" else None,
 )
 if device.type != "cuda":  # For MPS and CPU, explicitly move to device
@@ -550,9 +550,9 @@ if __name__ == "__main__":
         weight_decay=0.01,
         warmup_ratio = 0.3,
         lr_scheduler_type="cosine",
-        fp16=use_fp16, # Only enable for CUDA
-        bf16=not use_fp16 and torch.cuda.is_bf16_supported(),
-        tf32=torch.cuda.is_available() and torch.cuda.get_device_capability()[0] >= 8, # For Ampere+
+        fp16=False, # Only enable for CUDA
+        bf16=False,
+        tf32=False,
         report_to="none", # Disable reporting
         remove_unused_columns=False, # Important for DataCollatorForLanguageModeling
         load_best_model_at_end=True, # Load the best model based on evaluation loss

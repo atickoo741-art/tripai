@@ -27,11 +27,13 @@ class FakeQuantize(torch.autograd.Function):
             num_bits: Number of bits for quantization
             symmetric: If 1, use symmetric quantization (range will be [-2^(n-1), 2^(n-1)-1])
         """
-        symmetric = bool(symmetric)  # Convert to bool since we can't pass bool directly
+        ctx.save_for_backward(x, scale, zero_point)
+        ctx.num_bits = num_bits
+        ctx.symmetric = bool(symmetric)
         
-        if symmetric:
+        if ctx.symmetric:
             qmin = -2 ** (num_bits - 1)
-            qmax = 2 ** (num_bits - 1) - 1  # Fixed: was missing -1
+            qmax = 2 ** (num_bits - 1) - 1
         else:
             qmin = 0
             qmax = 2 ** num_bits - 1
@@ -42,17 +44,38 @@ class FakeQuantize(torch.autograd.Function):
             for _ in range(x.dim() - scale.dim()):
                 scale = scale.unsqueeze(-1)
                 zero_point = zero_point.unsqueeze(-1)
-            
+        
+        # Save these for backward
+        ctx.scale = scale
+        ctx.zero_point = zero_point
+        
         x_quant = torch.round(x / scale + zero_point)
         x_quant = torch.clamp(x_quant, qmin, qmax)
         x_dequant = (x_quant - zero_point) * scale
         
         return x_dequant
-
+    
     @staticmethod
     def backward(ctx, grad_output):
-        # STE: simply pass the gradients through
-        return grad_output, None, None, None
+        """Straight-through estimator for the backward pass.
+        
+        We use the straight-through estimator, which means we pass the gradient through
+        the quantization operation as if it was the identity function.
+        """
+        x, scale, zero_point = ctx.saved_tensors
+        
+        # For the input gradient, we use the straight-through estimator
+        grad_input = grad_output.clone()
+        
+        # For scale and zero_point, we don't compute gradients as they are learned separately
+        # in the QATW4A4Linear class through the _calculate_quant_params method
+        grad_scale = None
+        grad_zero_point = None
+        grad_num_bits = None
+        grad_symmetric = None
+        
+        return grad_input, grad_scale, grad_zero_point, grad_num_bits, grad_symmetric
+
 
 class QATW4A4Linear(nn.Module):
     def __init__(self, original_linear_layer, num_bits=4, init_clip_val=2.0):

@@ -266,7 +266,7 @@ class QATW4A4Linear(nn.Module):
         # PACT: symmetric clipping for activations
         # clip_val = torch.abs(self.activation_clip)
         clip_val = self.constrained_clip_val
-        clipped_input = torch.clamp(scaled_input, 0, clip_val)
+        clipped_input = torch.clamp(scaled_input, torch.tensor(0, device=scaled_input.device), clip_val)
         # clipped_input = torch.clamp(scaled_input, 0, clip_val)
         
         if not self.training and hasattr(self, '_cached_quant_params'):

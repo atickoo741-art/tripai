@@ -17,7 +17,7 @@ print("train_qat.py script has started execution!", flush=True) # <--- Add this 
 # Define the FakeQuantize module with STE
 class FakeQuantize(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, x, scale, zero_point, num_bits, symmetric=False):
+    def forward(ctx, x, scale, zero_point, num_bits, symmetric=0):
         """Per-channel fake quantization with straight-through estimator.
         
         Args:
@@ -25,11 +25,13 @@ class FakeQuantize(torch.autograd.Function):
             scale: Scale tensor, shape [C] or [1] for per-tensor
             zero_point: Zero point tensor, shape [C] or [1] for per-tensor
             num_bits: Number of bits for quantization
-            symmetric: If True, use symmetric quantization (range will be [-2^(n-1), 2^(n-1)-1])
+            symmetric: If 1, use symmetric quantization (range will be [-2^(n-1), 2^(n-1)-1])
         """
+        symmetric = bool(symmetric)  # Convert to bool since we can't pass bool directly
+        
         if symmetric:
             qmin = -2 ** (num_bits - 1)
-            qmax = 2 ** (num_bits - 1)
+            qmax = 2 ** (num_bits - 1) - 1  # Fixed: was missing -1
         else:
             qmin = 0
             qmax = 2 ** num_bits - 1
@@ -296,11 +298,12 @@ class QATW4A4Linear(nn.Module):
         self.act_zero_point.copy_(act_zero_point.detach().flatten())
         
         # Quantize
+        # Using positional arguments (can't use keyword args with Function.apply)
         quant_input = self.fake_quantize(
-            clipped_input, act_scale, act_zero_point, self.num_bits, symmetric=False
+            clipped_input, act_scale, act_zero_point, self.num_bits, 0  # 0 for asymmetric
         )
         quant_weight = self.fake_quantize(
-            scaled_weights, weight_scale, weight_zero_point, self.num_bits, symmetric=True
+            scaled_weights, weight_scale, weight_zero_point, self.num_bits, 1  # 1 for symmetric
         )
 
         # Perform the linear operation with quantized input and weights

@@ -57,24 +57,25 @@ class FakeQuantize(torch.autograd.Function):
     
     @staticmethod
     def backward(ctx, grad_output):
-        """Straight-through estimator for the backward pass.
-        
-        We use the straight-through estimator, which means we pass the gradient through
-        the quantization operation as if it was the identity function.
-        """
+        """Straight-through estimator for the backward pass."""
         x, scale, zero_point = ctx.saved_tensors
         
-        # For the input gradient, we use the straight-through estimator
+        # STE: pass gradients through as-is for the input
         grad_input = grad_output.clone()
         
-        # For scale and zero_point, we don't compute gradients as they are learned separately
-        # in the QATW4A4Linear class through the _calculate_quant_params method
-        grad_scale = None
-        grad_zero_point = None
-        grad_num_bits = None
-        grad_symmetric = None
+        # Compute gradients for scale and zero_point (important for learning!)
+        if ctx.needs_input_grad[1]:  # scale gradient
+            grad_scale = ((grad_output * (x / scale - zero_point)).sum(dim=0, keepdim=True) 
+                        if x.dim() > 1 else (grad_output * (x / scale - zero_point)).sum())
+        else:
+            grad_scale = None
+            
+        if ctx.needs_input_grad[2]:  # zero_point gradient  
+            grad_zero_point = -grad_output.sum(dim=0, keepdim=True) if x.dim() > 1 else -grad_output.sum()
+        else:
+            grad_zero_point = None
         
-        return grad_input, grad_scale, grad_zero_point, grad_num_bits, grad_symmetric
+        return grad_input, grad_scale, grad_zero_point, None, None
 
 
 class QATW4A4Linear(nn.Module):
@@ -98,6 +99,10 @@ class QATW4A4Linear(nn.Module):
         self.raw_alpha = nn.Parameter(
             torch.tensor(-1.0, device=self.device)  # Will be passed through sigmoid
         )
+
+        self.activation_clip.requires_grad_(True)
+        self.raw_alpha.requires_grad_(True)
+        
         # Track per-channel input statistics
         self.register_buffer('input_absmax', 
             torch.ones(self.in_features, dtype=torch.float32, device=self.device)
@@ -363,6 +368,14 @@ class QATW4A4Linear(nn.Module):
         if hasattr(self, '_cached_quant_params'):
             del self._cached_quant_params
         return self
+
+    def check_gradients(self):
+        """Debug method to check gradient flow"""
+        print(f"activation_clip grad: {self.activation_clip.grad}")
+        print(f"raw_alpha grad: {self.raw_alpha.grad}")
+        if hasattr(self.original_linear, 'lora_A'):
+            print(f"lora_A grad: {self.original_linear.lora_A.default.weight.grad is not None}")
+            print(f"lora_B grad: {self.original_linear.lora_B.default.weight.grad is not None}")
 
 # Custom Quantization-Aware GPT2Block
 class QuantizedGPT2Block(GPT2Block):
@@ -715,7 +728,7 @@ if __name__ == "__main__":
         per_device_train_batch_size=64,
         per_device_eval_batch_size=32,
         gradient_accumulation_steps=2,
-        max_grad_norm=0.5,
+        max_grad_norm=1.0,
         gradient_checkpointing=True,
         save_strategy="epoch",
         eval_strategy="epoch",

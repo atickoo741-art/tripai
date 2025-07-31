@@ -143,6 +143,13 @@ class QATW4A4Linear(nn.Module):
             # Original asymmetric quantization
             qmin = 0
             qmax = 2 ** num_bits - 1
+
+            # Ensure min_vals and max_vals are tensors
+            if not isinstance(min_vals, torch.Tensor):
+                min_vals = torch.tensor(min_vals, device=self.device)
+            if not isinstance(max_vals, torch.Tensor):
+                max_vals = torch.tensor(max_vals, device=self.device)
+                
             min_vals = torch.min(min_vals, torch.zeros_like(min_vals))  # clip to <= 0
             max_vals = torch.max(max_vals, torch.zeros_like(max_vals))  # clip to >= 0
             
@@ -290,10 +297,10 @@ class QATW4A4Linear(nn.Module):
         
         # Quantize
         quant_input = self.fake_quantize(
-            clipped_input, act_scale, act_zero_point, self.num_bits
+            clipped_input, act_scale, act_zero_point, self.num_bits, symmetric=False
         )
         quant_weight = self.fake_quantize(
-            scaled_weights, weight_scale, weight_zero_point, self.num_bits
+            scaled_weights, weight_scale, weight_zero_point, self.num_bits, symmetric=True
         )
 
         # Perform the linear operation with quantized input and weights

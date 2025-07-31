@@ -17,7 +17,7 @@ print("train_qat.py script has started execution!", flush=True) # <--- Add this 
 # Define the FakeQuantize module with STE
 class FakeQuantize(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, x, scale, zero_point, num_bits):
+    def forward(ctx, x, scale, zero_point, num_bits, symmetric=False):
         """Per-channel fake quantization with straight-through estimator.
         
         Args:
@@ -25,17 +25,22 @@ class FakeQuantize(torch.autograd.Function):
             scale: Scale tensor, shape [C] or [1] for per-tensor
             zero_point: Zero point tensor, shape [C] or [1] for per-tensor
             num_bits: Number of bits for quantization
+            symmetric: If True, use symmetric quantization (range will be [-2^(n-1), 2^(n-1)-1])
         """
-        qmin = 0
-        qmax = 2 ** num_bits - 1
-        
+        if symmetric:
+            qmin = -2 ** (num_bits - 1)
+            qmax = 2 ** (num_bits - 1)
+        else:
+            qmin = 0
+            qmax = 2 ** num_bits - 1
+            
         # Ensure scale and zero_point have the right shape for broadcasting
         if scale.dim() < x.dim():
             # Add singleton dimensions to match x's dimensions starting from the last dimension
             for _ in range(x.dim() - scale.dim()):
                 scale = scale.unsqueeze(-1)
                 zero_point = zero_point.unsqueeze(-1)
-        
+            
         x_quant = torch.round(x / scale + zero_point)
         x_quant = torch.clamp(x_quant, qmin, qmax)
         x_dequant = (x_quant - zero_point) * scale
@@ -105,30 +110,53 @@ class QATW4A4Linear(nn.Module):
         """Set the original linear weight for PEFT compatibility"""
         self.original_linear.weight = nn.Parameter(value.detach().clone())
         
-    def _calculate_quant_params(self, min_vals, max_vals, num_bits):
+    def _calculate_quant_params(self, min_vals, max_vals, num_bits, symmetric=False):
         """Calculate scale and zero-point for quantization, supporting per-channel.
         
         Args:
             min_vals: Tensor of minimum values, shape [C] or [1] for per-tensor
             max_vals: Tensor of maximum values, shape [C] or [1] for per-tensor
             num_bits: Number of bits for quantization
+            symmetric: If True, use symmetric quantization (range will be [-2^(n-1), 2^(n-1)-1])
         """
-        qmin = 0
-        qmax = 2 ** num_bits - 1
-        min_vals = torch.min(min_vals, torch.zeros_like(min_vals))  # clip to <= 0
-        max_vals = torch.max(max_vals, torch.zeros_like(max_vals))  # clip to >= 0
-        
-        # Ensure min_vals and max_vals have at least 2 dimensions for broadcasting
-        if min_vals.dim() == 1:
-            min_vals = min_vals.unsqueeze(-1)
-        if max_vals.dim() == 1:
-            max_vals = max_vals.unsqueeze(-1)
-        
-        scale = (max_vals - min_vals) / (qmax - qmin)
-        scale = torch.max(scale, torch.tensor(1e-8, device=scale.device))  # avoid division by zero
-        
-        zero_point = qmin - min_vals / scale
-        zero_point = torch.clamp(zero_point, qmin, qmax).round()
+        if symmetric:
+            # For symmetric quantization, range is [-2^(n-1), 2^(n-1)-1]
+            qmin = -2 ** (num_bits - 1)
+            qmax = 2 ** (num_bits - 1) - 1
+            
+            # For symmetric quantization, we use the maximum absolute value
+            max_vals = torch.max(torch.abs(min_vals), torch.abs(max_vals))
+            min_vals = -max_vals
+            
+            # Ensure min_vals and max_vals have at least 2 dimensions for broadcasting
+            if min_vals.dim() == 1:
+                min_vals = min_vals.unsqueeze(-1)
+            if max_vals.dim() == 1:
+                max_vals = max_vals.unsqueeze(-1)
+                
+            scale = (max_vals - min_vals) / (qmax - qmin)
+            scale = torch.max(scale, torch.tensor(1e-8, device=scale.device))  # avoid division by zero
+            
+            # For symmetric quantization, zero point is always 0
+            zero_point = torch.zeros_like(scale, dtype=torch.int32)
+        else:
+            # Original asymmetric quantization
+            qmin = 0
+            qmax = 2 ** num_bits - 1
+            min_vals = torch.min(min_vals, torch.zeros_like(min_vals))  # clip to <= 0
+            max_vals = torch.max(max_vals, torch.zeros_like(max_vals))  # clip to >= 0
+            
+            # Ensure min_vals and max_vals have at least 2 dimensions for broadcasting
+            if min_vals.dim() == 1:
+                min_vals = min_vals.unsqueeze(-1)
+            if max_vals.dim() == 1:
+                max_vals = max_vals.unsqueeze(-1)
+            
+            scale = (max_vals - min_vals) / (qmax - qmin)
+            scale = torch.max(scale, torch.tensor(1e-8, device=scale.device))  # avoid division by zero
+            
+            zero_point = qmin - min_vals / scale
+            zero_point = torch.clamp(zero_point, qmin, qmax).round()
         
         return scale, zero_point
 
@@ -229,23 +257,23 @@ class QATW4A4Linear(nn.Module):
         # PACT: symmetric clipping for activations
         # clip_val = torch.abs(self.activation_clip)
         clip_val = self.constrained_clip_val
-        clipped_input = torch.clamp(scaled_input, -clip_val, clip_val)
+        clipped_input = torch.clamp(scaled_input, 0, clip_val)
         # clipped_input = torch.clamp(scaled_input, 0, clip_val)
         
         if not self.training and hasattr(self, '_cached_quant_params'):
             weight_scale, weight_zero_point, act_scale, act_zero_point = self._cached_quant_params
         else:
-            # Quantization parameters for weights (per-channel)
+            # Quantization parameters for weights (per-channel, symmetric)
             weight_mins = scaled_weights.min(dim=1, keepdim=True)[0]
             weight_maxs = scaled_weights.max(dim=1, keepdim=True)[0]
             weight_scale, weight_zero_point = self._calculate_quant_params(
-                weight_mins, weight_maxs, self.num_bits
+                weight_mins, weight_maxs, self.num_bits, symmetric=True
             )
             
             # Quantization parameters for activations (per-tensor)
             clip_val = self.constrained_clip_val
             act_scale, act_zero_point = self._calculate_quant_params(
-                -clip_val, clip_val, self.num_bits
+                0, clip_val, self.num_bits, symmetric=False
             )
             
             # Cache for eval mode

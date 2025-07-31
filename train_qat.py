@@ -60,22 +60,13 @@ class FakeQuantize(torch.autograd.Function):
         """Straight-through estimator for the backward pass."""
         x, scale, zero_point = ctx.saved_tensors
         
-        # STE: pass gradients through as-is for the input
+        # For STE, we only pass gradients through for the input (x)
+        # Scale and zero_point gradients are None because they're computed
+        # elsewhere in the QATW4A4Linear class
         grad_input = grad_output.clone()
         
-        # Compute gradients for scale and zero_point (important for learning!)
-        if ctx.needs_input_grad[1]:  # scale gradient
-            grad_scale = ((grad_output * (x / scale - zero_point)).sum(dim=0, keepdim=True) 
-                        if x.dim() > 1 else (grad_output * (x / scale - zero_point)).sum())
-        else:
-            grad_scale = None
-            
-        if ctx.needs_input_grad[2]:  # zero_point gradient  
-            grad_zero_point = -grad_output.sum(dim=0, keepdim=True) if x.dim() > 1 else -grad_output.sum()
-        else:
-            grad_zero_point = None
-        
-        return grad_input, grad_scale, grad_zero_point, None, None
+        # Return None for all other gradients (scale, zero_point, num_bits, symmetric)
+        return grad_input, None, None, None, None
 
 
 class QATW4A4Linear(nn.Module):

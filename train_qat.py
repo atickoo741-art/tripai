@@ -651,9 +651,9 @@ if __name__ == "__main__":
         output_dir=output_dir,
         overwrite_output_dir=False,
         num_train_epochs=10,
-        per_device_train_batch_size=16,
+        per_device_train_batch_size=64,
         per_device_eval_batch_size=32,
-        gradient_accumulation_steps=4,
+        gradient_accumulation_steps=2,
         max_grad_norm=0.5,
         gradient_checkpointing=True,
         save_strategy="epoch",
@@ -662,7 +662,7 @@ if __name__ == "__main__":
         logging_steps=20,
         learning_rate=1e-4,
         weight_decay=0.01,
-        warmup_ratio=0.3,
+        warmup_ratio=0.05,
         lr_scheduler_type="cosine",
         fp16=False,
         bf16=False,
@@ -672,7 +672,7 @@ if __name__ == "__main__":
         load_best_model_at_end=True,
         metric_for_best_model="eval_loss",
         dataloader_pin_memory=True,
-        dataloader_num_workers=8,
+        dataloader_num_workers=4,
     )
 
     # Define Data Collator

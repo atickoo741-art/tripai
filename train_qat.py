@@ -9,7 +9,8 @@ import torch.nn.functional as F
 from transformers.models.gpt2.modeling_gpt2 import GPT2Block
 from transformers import Trainer, TrainingArguments, DataCollatorForLanguageModeling
 from data_preparation import load_and_preprocess_wikitext2
-
+from torch.utils.tensorboard import SummaryWriter
+import time
 
 print("train_qat.py script has started execution!", flush=True) # <--- Add this line
 
@@ -514,6 +515,116 @@ def find_available_dir(base_dir):
             return dir_name
         index += 1
 
+def setup_tensorboard_logging(output_dir, model):
+    """Setup TensorBoard logging with model architecture and quantization info"""
+    log_dir = os.path.join(output_dir, "tensorboard_logs")
+    writer = SummaryWriter(log_dir=log_dir)
+    
+    # Log model architecture
+    dummy_input = torch.randint(0, 1000, (1, 512), device=next(model.parameters()).device)
+    try:
+        writer.add_graph(model, dummy_input)
+    except Exception as e:
+        print(f"Could not log model graph: {e}")
+    
+    # Count quantized layers
+    qat_layers = 0
+    lora_params = 0
+    total_params = 0
+    
+    for name, module in model.named_modules():
+        if isinstance(module, QATW4A4Linear):
+            qat_layers += 1
+    
+    for name, param in model.named_parameters():
+        total_params += param.numel()
+        if 'lora' in name.lower():
+            lora_params += param.numel()
+    
+    # Log model info as text
+    model_info = f"""
+    Model Configuration:
+    - Base Model: GPT-2
+    - Quantized Layers: {qat_layers}
+    - Total Parameters: {total_params:,}
+    - LoRA Parameters: {lora_params:,}
+    - Quantization: W4A4 (4-bit weights, 4-bit activations)
+    - LoRA Rank: 8
+    - LoRA Alpha: 32
+    """
+    writer.add_text("Model/Configuration", model_info, 0)
+    
+    return writer
+
+
+class TensorBoardLoggingCallback:
+    """Custom callback for detailed TensorBoard logging during training"""
+    
+    def __init__(self, writer, model):
+        self.writer = writer
+        self.model = model
+        self.step = 0
+        
+    def on_log(self, logs):
+        """Called when trainer logs metrics"""
+        for key, value in logs.items():
+            if isinstance(value, (int, float)):
+                self.writer.add_scalar(f"Training/{key}", value, self.step)
+        self.step += 1
+    
+    def on_evaluate(self, eval_logs):
+        """Called after evaluation"""
+        for key, value in eval_logs.items():
+            if isinstance(value, (int, float)):
+                self.writer.add_scalar(f"Evaluation/{key}", value, self.step)
+        
+        # Calculate and log perplexity
+        if 'eval_loss' in eval_logs:
+            perplexity = torch.exp(torch.tensor(eval_logs['eval_loss']))
+            self.writer.add_scalar("Evaluation/perplexity", perplexity, self.step)
+    
+    # REPLACE the log_quantization_params method in TensorBoardLoggingCallback with:
+    def log_quantization_params(self, epoch):
+        """Log ALL quantization parameters that are saved in quantization_params.pth"""
+        for name, module in self.model.named_modules():
+            if isinstance(module, QATW4A4Linear):
+                # Log PACT activation clipping values
+                clip_val = module.constrained_clip_val.item()
+                self.writer.add_scalar(f"Quantization/{name}/activation_clip", clip_val, epoch)
+                
+                # Log SmoothQuant raw_alpha and computed alpha values
+                raw_alpha = module.raw_alpha.item()
+                alpha = module.alpha.item()
+                self.writer.add_scalar(f"Quantization/{name}/raw_alpha", raw_alpha, epoch)
+                self.writer.add_scalar(f"Quantization/{name}/smoothquant_alpha", alpha, epoch)
+                
+                # Log input statistics (SmoothQuant component)
+                if hasattr(module, 'input_absmax') and module.input_absmax.numel() > 0:
+                    self.writer.add_histogram(f"Quantization/{name}/input_absmax", 
+                                            module.input_absmax, epoch)
+                    self.writer.add_scalar(f"Quantization/{name}/input_absmax_mean", 
+                                        module.input_absmax.mean().item(), epoch)
+                
+                # Log quantization scales and zero points
+                if hasattr(module, 'weight_scale') and module.weight_scale.numel() > 0:
+                    self.writer.add_histogram(f"Quantization/{name}/weight_scales", 
+                                            module.weight_scale, epoch)
+                    self.writer.add_scalar(f"Quantization/{name}/weight_scale_mean", 
+                                        module.weight_scale.mean().item(), epoch)
+                    
+                if hasattr(module, 'weight_zero_point') and module.weight_zero_point.numel() > 0:
+                    self.writer.add_histogram(f"Quantization/{name}/weight_zero_points", 
+                                            module.weight_zero_point, epoch)
+                    
+                if hasattr(module, 'act_scale') and module.act_scale.numel() > 0:
+                    self.writer.add_scalar(f"Quantization/{name}/act_scale", 
+                                        module.act_scale.item(), epoch)
+                    
+                if hasattr(module, 'act_zero_point') and module.act_zero_point.numel() > 0:
+                    self.writer.add_scalar(f"Quantization/{name}/act_zero_point", 
+                                        module.act_zero_point.item(), epoch)
+
+
 if __name__ == "__main__":
     # 6. Setup and Run Training Loop
     print("\n--- Setting up Training Loop for W4A4 QAT ---")
@@ -537,30 +648,29 @@ if __name__ == "__main__":
     use_fp16 = torch.cuda.is_available() and not torch.backends.mps.is_available()
     
     training_args = TrainingArguments(
-        output_dir=output_dir, # Output directory for checkpoints and logs
-        overwrite_output_dir=False,  # Disable overwrite since we're using unique directories
-        num_train_epochs=3, # Train for one epoch as per plan
-        per_device_train_batch_size=16,  # A100 can handle much larger batches
+        output_dir=output_dir,
+        overwrite_output_dir=False,
+        num_train_epochs=10,
+        per_device_train_batch_size=16,
         per_device_eval_batch_size=32,
-        gradient_accumulation_steps=4,  # Reduce since we're using larger batches
-        max_grad_norm=0.5,  # Gradient clipping with max norm of 1.0
-        gradient_checkpointing=True,  # Enable gradient checkpointing to save memory
+        gradient_accumulation_steps=4,
+        max_grad_norm=0.5,
+        gradient_checkpointing=True,
         save_strategy="epoch",
         eval_strategy="epoch",
-        logging_dir="./logs_qat_lora",
-        logging_steps=20, # More frequent logging for MPS
-        learning_rate=5e-5,
+        logging_dir=os.path.join(output_dir, "tensorboard_logs"),  # Updated this line
+        logging_steps=20,
+        learning_rate=1e-4,
         weight_decay=0.01,
-        warmup_ratio = 0.3,
+        warmup_ratio=0.3,
         lr_scheduler_type="cosine",
-        fp16=False, # Only enable for CUDA
+        fp16=False,
         bf16=False,
         tf32=False,
-        report_to="none", # Disable reporting
-        remove_unused_columns=False, # Important for DataCollatorForLanguageModeling
-        load_best_model_at_end=True, # Load the best model based on evaluation loss
+        report_to="tensorboard",  # Changed from "none" to "tensorboard"
+        remove_unused_columns=False,
+        load_best_model_at_end=True,
         metric_for_best_model="eval_loss",
-        # MPS-specific optimizations
         dataloader_pin_memory=True,
         dataloader_num_workers=8,
     )

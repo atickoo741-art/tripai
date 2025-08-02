@@ -91,6 +91,8 @@ class QATW4A4Linear(nn.Module):
             torch.tensor(-1.0, device=self.device)  # Will be passed through sigmoid
         )
 
+        if hasattr(self.original_linear, 'weight'):
+            self.original_linear.weight.requires_grad_(True)
         self.activation_clip.requires_grad_(True)
         self.raw_alpha.requires_grad_(True)
         
@@ -242,8 +244,8 @@ class QATW4A4Linear(nn.Module):
         else:
             merged_weights = self._get_merged_weights()
             weight_absmax_per_input_channel = merged_weights.abs().amax(dim=0, keepdim=False)
-            scaling_factor = (self.input_absmax.detach() ** (self.alpha)) * \
-                            (weight_absmax_per_input_channel.detach() ** (1 - self.alpha))
+            scaling_factor = (self.input_absmax ** (self.alpha)) * \
+                            (weight_absmax_per_input_channel ** (1 - self.alpha))
             scaling_factor = scaling_factor.clamp(min=1e-8, max = 1e3)
         
         # Cache for eval mode
@@ -532,7 +534,11 @@ lora_config = LoraConfig(
 # 4. Apply LoRA adapters to the quantized model
 # print("\n--- Applying LoRA Adapters to quantized model ---")
 peft_model = get_peft_model(model, lora_config)
-# print("\n--- LoRA Adapters Applied ---")
+
+for param in peft_model.base_model.parameters():
+    if hasattr(param, 'requires_grad'):
+        param.requires_grad = True
+# print("\n--- LoRA Adapters Applied ---") 
 # peft_model.print_trainable_parameters()
 apply_quantization_to_peft_model(peft_model)
 
@@ -720,7 +726,7 @@ if __name__ == "__main__":
         per_device_eval_batch_size=32,
         gradient_accumulation_steps=2,
         max_grad_norm=1.0,
-        gradient_checkpointing=True,
+        # gradient_checkpointing=True,
         save_strategy="epoch",
         eval_strategy="epoch",
         logging_dir=os.path.join(output_dir, "tensorboard_logs"),  # Updated this line

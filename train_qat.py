@@ -270,7 +270,7 @@ class QATW4A4Linear(nn.Module):
         
         # PACT: symmetric clipping for activations
         clip_val = self.constrained_clip_val
-        clipped_input = torch.clamp(scaled_input, 0.0, clip_val)
+        clipped_input = torch.clamp(scaled_input, 0.0, clip_val.item())
         
         if not self.training and hasattr(self, '_cached_quant_params'):
             weight_scale, weight_zero_point, act_scale, act_zero_point = self._cached_quant_params

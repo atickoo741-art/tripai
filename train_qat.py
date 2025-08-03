@@ -718,7 +718,7 @@ if __name__ == "__main__":
         per_device_eval_batch_size=32,
         gradient_accumulation_steps=4,
         max_grad_norm=1.0,
-        # gradient_checkpointing=True,
+        gradient_checkpointing=True,
         save_strategy="epoch",
         eval_strategy="epoch",
         logging_dir=os.path.join(output_dir, "tensorboard_logs"),  # Updated this line

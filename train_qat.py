@@ -142,51 +142,43 @@ class QATW4A4Linear(nn.Module):
             num_bits: Number of bits for quantization
             symmetric: If True, use symmetric quantization (range will be [-2^(n-1), 2^(n-1)-1])
         """
+        # Ensure min_vals and max_vals are tensors and have proper device
+        if not isinstance(min_vals, torch.Tensor):
+            min_vals = torch.tensor(min_vals, device=self.device, dtype=torch.float32)
+        if not isinstance(max_vals, torch.Tensor):
+            max_vals = torch.tensor(max_vals, device=self.device, dtype=torch.float32)
+            
+        # Ensure both are on the same device and dtype
+        min_vals = min_vals.to(device=self.device, dtype=torch.float32)
+        max_vals = max_vals.to(device=self.device, dtype=torch.float32)
+        
         if symmetric:
             # For symmetric quantization, range is [-2^(n-1), 2^(n-1)-1]
             qmin = -2 ** (num_bits - 1)
             qmax = 2 ** (num_bits - 1) - 1
             
             # For symmetric quantization, we use the maximum absolute value
-            max_vals = torch.max(torch.abs(min_vals), torch.abs(max_vals))
-            min_vals = -max_vals
+            abs_max = torch.max(torch.abs(min_vals), torch.abs(max_vals))
+            # Add small epsilon to avoid zero scale
+            abs_max = torch.clamp(abs_max, min=1e-8)
             
-            # Ensure min_vals and max_vals have at least 2 dimensions for broadcasting
-            if min_vals.dim() == 1:
-                min_vals = min_vals.unsqueeze(-1)
-            if max_vals.dim() == 1:
-                max_vals = max_vals.unsqueeze(-1)
-                
-            scale = (max_vals - min_vals) / (qmax - qmin)
-            scale = torch.max(scale, torch.tensor(1e-8, device=scale.device))  # avoid division by zero
-            
-            # For symmetric quantization, zero point is always 0
-            zero_point = torch.zeros_like(scale, dtype=torch.int32)
+            scale = abs_max / (qmax)  # qmax for symmetric since range is -qmax to qmax
+            zero_point = torch.zeros_like(scale, dtype=torch.float32)
         else:
-            # Original asymmetric quantization
+            # Asymmetric quantization
             qmin = 0
             qmax = 2 ** num_bits - 1
-
-            # Ensure min_vals and max_vals are tensors
-            if not isinstance(min_vals, torch.Tensor):
-                min_vals = torch.tensor(min_vals, device=self.device)
-            if not isinstance(max_vals, torch.Tensor):
-                max_vals = torch.tensor(max_vals, device=self.device)
                 
             min_vals = torch.min(min_vals, torch.zeros_like(min_vals))  # clip to <= 0
             max_vals = torch.max(max_vals, torch.zeros_like(max_vals))  # clip to >= 0
             
-            # Ensure min_vals and max_vals have at least 2 dimensions for broadcasting
-            if min_vals.dim() == 1:
-                min_vals = min_vals.unsqueeze(-1)
-            if max_vals.dim() == 1:
-                max_vals = max_vals.unsqueeze(-1)
+            # Ensure we have a non-zero range
+            range_vals = max_vals - min_vals
+            range_vals = torch.clamp(range_vals, min=1e-8)
             
-            scale = (max_vals - min_vals) / (qmax - qmin)
-            scale = torch.max(scale, torch.tensor(1e-8, device=scale.device))  # avoid division by zero
-            
+            scale = range_vals / (qmax - qmin)
             zero_point = qmin - min_vals / scale
-            zero_point = torch.clamp(zero_point, qmin, qmax).round()
+            zero_point = torch.clamp(zero_point, qmin, qmax)
         
         return scale, zero_point
 
@@ -277,10 +269,8 @@ class QATW4A4Linear(nn.Module):
         scaled_weights = merged_weights * scaling_factor.unsqueeze(0)  # [out_features, in_features]
         
         # PACT: symmetric clipping for activations
-        # clip_val = torch.abs(self.activation_clip)
         clip_val = self.constrained_clip_val
-        clipped_input = torch.clamp(scaled_input, torch.tensor(0, device=scaled_input.device), clip_val)
-        # clipped_input = torch.clamp(scaled_input, 0, clip_val)
+        clipped_input = torch.clamp(scaled_input, 0.0, clip_val)
         
         if not self.training and hasattr(self, '_cached_quant_params'):
             weight_scale, weight_zero_point, act_scale, act_zero_point = self._cached_quant_params
@@ -304,11 +294,24 @@ class QATW4A4Linear(nn.Module):
         
         # Store scales for potential use
         # Ensure correct shapes: [out_features] for weights, [1] for activations
+        # Ensure no NaN or zero values in scales before storing
+        weight_scale_safe = torch.clamp(weight_scale.detach().flatten(), min=1e-8)
+        weight_zero_point_safe = weight_zero_point.detach().flatten()
+        act_scale_safe = torch.clamp(act_scale.detach().flatten(), min=1e-8)
+        act_zero_point_safe = act_zero_point.detach().flatten()
+        
+        # Check for NaN values and replace with safe defaults
+        if torch.isnan(weight_scale_safe).any():
+            print(f"Warning: NaN detected in weight_scale, replacing with safe values")
+            weight_scale_safe = torch.where(torch.isnan(weight_scale_safe), 
+                                           torch.tensor(1e-4, device=self.device), 
+                                           weight_scale_safe)
+        
         # Using copy_() to maintain buffer status and proper device placement
-        self.weight_scale.copy_(weight_scale.detach().flatten())
-        self.weight_zero_point.copy_(weight_zero_point.detach().flatten())
-        self.act_scale.copy_(act_scale.detach().flatten())
-        self.act_zero_point.copy_(act_zero_point.detach().flatten())
+        self.weight_scale.copy_(weight_scale_safe)
+        self.weight_zero_point.copy_(weight_zero_point_safe)
+        self.act_scale.copy_(act_scale_safe)
+        self.act_zero_point.copy_(act_zero_point_safe)
         
         # Quantize
         # Using positional arguments (can't use keyword args with Function.apply)

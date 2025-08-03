@@ -273,8 +273,9 @@ class QATW4A4Linear(nn.Module):
         # Calculate per-input-channel scaling factor using SmoothQuant formula:
         # s_j = (|X_j|^(1-alpha)) * (|W_j|^alpha)
         # where |X_j| is input_absmax[j] and |W_j| is weight_absmax_per_input_channel[j]
-        scaling_factor = (self.input_absmax.detach() ** (self.alpha)) * \
-                        (weight_absmax_per_input_channel.detach() ** (1 - self.alpha))
+        # CRITICAL: No .detach() here to allow gradients to flow through alpha
+        scaling_factor = (self.input_absmax ** (self.alpha)) * \
+                        (weight_absmax_per_input_channel ** (1 - self.alpha))
         scaling_factor = scaling_factor.clamp(min=1e-8, max = 1e3)  # [in_features]
         
         # Apply scaling:

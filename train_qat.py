@@ -233,25 +233,12 @@ class QATW4A4Linear(nn.Module):
         else:  # [batch, in_features]
             current_absmax = x.abs().amax(dim=0)  # [in_features]
         
-        # Update running statistics with EMA
-        self.input_absmax.mul_(1 - self.momentum).add_(current_absmax * self.momentum)
+        # Update running statistics with EMA - avoid in-place operations during training
+        with torch.no_grad():
+            self.input_absmax.mul_(1 - self.momentum).add_(current_absmax * self.momentum)
         return current_absmax
 
     def forward(self, input):
-        
-        if not self.training and hasattr(self, '_cached_scaling_factor'):
-            scaling_factor = self._cached_scaling_factor
-        else:
-            merged_weights = self._get_merged_weights()
-            weight_absmax_per_input_channel = merged_weights.abs().amax(dim=0, keepdim=False)
-            scaling_factor = (self.input_absmax ** (self.alpha)) * \
-                            (weight_absmax_per_input_channel ** (1 - self.alpha))
-            scaling_factor = scaling_factor.clamp(min=1e-8, max = 1e3)
-        
-        # Cache for eval mode
-        if not self.training:
-            self._cached_scaling_factor = scaling_factor
-
         # input shape: [batch_size, seq_len, in_features] or [batch_size, in_features]
         # Ensure input_absmax is the right shape [in_features]
         if input.dim() == 3:
@@ -263,20 +250,24 @@ class QATW4A4Linear(nn.Module):
         if self.training:
             self.update_input_stats(input)
         
-        # Get merged weights [out_features, in_features]
+        # Get merged weights [out_features, in_features] - COMPUTE ONLY ONCE
         merged_weights = self._get_merged_weights()
         
-        # Calculate max abs value for each input channel (column-wise max)
-        # Shape: [in_features]
-        weight_absmax_per_input_channel = merged_weights.abs().amax(dim=0, keepdim=False)
+        # Calculate scaling factor using SmoothQuant formula - COMPUTE ONLY ONCE
+        if not self.training and hasattr(self, '_cached_scaling_factor'):
+            scaling_factor = self._cached_scaling_factor
+        else:
+            # Calculate max abs value for each input channel (column-wise max)
+            weight_absmax_per_input_channel = merged_weights.abs().amax(dim=0, keepdim=False)
+            
+            # s_j = (|X_j|^alpha) * (|W_j|^(1-alpha))
+            scaling_factor = (self.input_absmax ** self.alpha) * \
+                            (weight_absmax_per_input_channel ** (1 - self.alpha))
+            scaling_factor = scaling_factor.clamp(min=1e-8, max=1e3)
         
-        # Calculate per-input-channel scaling factor using SmoothQuant formula:
-        # s_j = (|X_j|^(1-alpha)) * (|W_j|^alpha)
-        # where |X_j| is input_absmax[j] and |W_j| is weight_absmax_per_input_channel[j]
-        # CRITICAL: No .detach() here to allow gradients to flow through alpha
-        scaling_factor = (self.input_absmax ** (self.alpha)) * \
-                        (weight_absmax_per_input_channel ** (1 - self.alpha))
-        scaling_factor = scaling_factor.clamp(min=1e-8, max = 1e3)  # [in_features]
+            # Cache for eval mode
+            if not self.training:
+                self._cached_scaling_factor = scaling_factor
         
         # Apply scaling:
         # Input: x = x / s_j (broadcast over batch and sequence dims)

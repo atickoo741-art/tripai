@@ -248,7 +248,8 @@ def quantize_model(model, bits=4, quantization_method='uniform', depth=0, source
                     quantized_layer = QATW4A4Linear(child_module, num_bits=bits)
                     print(f"Layer: {name}")
                     print(f"PACT clip: {quantized_layer.activation_clip.data}")
-                    print(f"SmoothQuant alpha: {quantized_layer.alpha.data}")  # sigmoid(raw_alpha)
+                    if hasattr(quantized_layer, 'smooth_factor'):
+                        print(f"SmoothQuant factor mean: {quantized_layer.smooth_factor.detach().mean()}")
                     print(f"Weight scale: {quantized_layer.weight_scale}")
                     print(f"Weight zero point: {quantized_layer.weight_zero_point}")
                     print(f"Activation scale: {quantized_layer.act_scale}")
@@ -258,8 +259,11 @@ def quantize_model(model, bits=4, quantization_method='uniform', depth=0, source
                     if source_child and hasattr(source_child, 'activation_clip'):
                         with torch.no_grad():
                             quantized_layer.activation_clip.copy_(source_child.activation_clip)
-                            quantized_layer.raw_alpha.copy_(source_child.raw_alpha)
-                            quantized_layer.input_absmax.copy_(source_child.input_absmax)
+                            if hasattr(source_child, 'smooth_factor') and hasattr(quantized_layer, 'smooth_factor'):
+                                quantized_layer.smooth_factor.copy_(source_child.smooth_factor)
+                            if hasattr(source_child, 'input_min') and hasattr(source_child, 'input_max'):
+                                quantized_layer.input_min.copy_(source_child.input_min)
+                                quantized_layer.input_max.copy_(source_child.input_max)
                             quantized_layer.weight_scale.copy_(source_child.weight_scale)
                             quantized_layer.weight_zero_point.copy_(source_child.weight_zero_point)
                             quantized_layer.act_scale.copy_(source_child.act_scale)
@@ -568,12 +572,15 @@ def main():
                     # Set reasonable defaults using torch.no_grad() context
                     with torch.no_grad():
                         module.activation_clip.data.fill_(6.0)
-                        module.raw_alpha.data.fill_(0.5)
-                        module.input_absmax.data.fill_(1.0)
+                        if hasattr(module, 'smooth_factor'):
+                            module.smooth_factor.data.fill_(1.0)
+                        if hasattr(module, 'input_min') and hasattr(module, 'input_max'):
+                            module.input_min.data.fill_(0.0)
+                            module.input_max.data.fill_(1.0)
                         module.weight_scale.data.fill_(0.1)
                         module.weight_zero_point.data.fill_(0.0)
-                        module.act_scale.data.fill_(0.4)
-                        module.act_zero_point.data.fill_(8.0)
+                        module.act_scale.data.fill_(0.25)
+                        module.act_zero_point.data.fill_(0.0)
             
             print("Default quantization parameters initialized")
             return True  # Return True to continue execution
@@ -594,7 +601,7 @@ def main():
                     
                     # Load each parameter if it exists using torch.no_grad()
                     with torch.no_grad():
-                        for param_name in ['activation_clip', 'raw_alpha', 'input_absmax', 
+                        for param_name in ['activation_clip', 'smooth_factor', 'input_min', 'input_max', 
                                         'weight_scale', 'weight_zero_point', 'act_scale', 'act_zero_point']:
                             full_key = f"{param_prefix}{param_name}"
                             if full_key in quant_params:
@@ -770,8 +777,17 @@ def main():
     save_quantized = False  # Set to True if you want to save
     if save_quantized:
         print("\nSaving quantized model...")
-        torch.save(quantized_model.state_dict(), "quantized_model_w4a4.pth")
-        print("Quantized model saved!")
+        # Choose which model to save based on availability
+        model_to_save = None
+        if 'quantized_model' in locals():
+            model_to_save = quantized_model
+        elif 'model' in locals():
+            model_to_save = model
+        if model_to_save is not None:
+            torch.save(model_to_save.state_dict(), "quantized_model_w4a4.pth")
+            print("Quantized model saved!")
+        else:
+            print("No model available to save.")
 
 if __name__ == "__main__":
     main()

@@ -6,11 +6,12 @@ from peft import LoraConfig, get_peft_model, TaskType
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from transformers.models.gpt2.modeling_gpt2 import GPT2Block
+from transformers.models.gpt2.modeling_gpt2 import GPT2Block, Conv1D
 from transformers import Trainer, TrainingArguments, DataCollatorForLanguageModeling
 from data_preparation import load_and_preprocess_wikitext2
 from torch.utils.tensorboard import SummaryWriter
 import time
+from typing import List
 
 print("train_qat.py script has started execution!", flush=True) # <--- Add this line
 
@@ -75,30 +76,52 @@ class QATW4A4Linear(nn.Module):
         self.original_linear = original_linear_layer
         self.num_bits = num_bits
         self.fake_quantize = FakeQuantize.apply
-        self.in_features = original_linear_layer.in_features
-        self.out_features = original_linear_layer.out_features
+        # Support both nn.Linear (weight shape [out, in]) and GPT-2 Conv1D (weight shape [in, out])
+        if hasattr(original_linear_layer, 'in_features') and hasattr(original_linear_layer, 'out_features'):
+            # nn.Linear-like
+            self.in_features = original_linear_layer.in_features
+            self.out_features = original_linear_layer.out_features
+            self.weight_is_out_in = True
+        else:
+            # Conv1D-like (GPT-2)
+            weight_shape = original_linear_layer.weight.shape
+            # Conv1D stores weight as [in_features, out_features]
+            self.in_features = weight_shape[0]
+            self.out_features = weight_shape[1]
+            self.weight_is_out_in = False
         
         # Get device from original linear layer
         self.device = next(original_linear_layer.parameters()).device
         
         # PACT activation clipping
+        # self.activation_clip = nn.Parameter(
+        #     torch.tensor(init_clip_val, dtype=torch.float32, device=self.device)
+        # )
+
         self.activation_clip = nn.Parameter(
-            torch.tensor(init_clip_val, dtype=torch.float32, device=self.device)
+            torch.ones(self.in_features, device=self.device) * init_clip_val
         )
         
         # SmoothQuant parameters
-        self.raw_alpha = nn.Parameter(
-            torch.tensor(-1.0, device=self.device)  # Will be passed through sigmoid
-        )
+        # self.raw_alpha = nn.Parameter(
+        #     torch.tensor(-1.0, device=self.device)  # Will be passed through sigmoid
+        # )
+
+        # Initialize per-channel smooth factors to 1.0
+        self.smooth_factor = nn.Parameter(torch.ones(self.in_features, device=self.device))
 
         if hasattr(self.original_linear, 'weight'):
             self.original_linear.weight.requires_grad_(True)
         self.activation_clip.requires_grad_(True)
-        self.raw_alpha.requires_grad_(True)
+        # self.raw_alpha.requires_grad_(True)
+        self.smooth_factor.requires_grad_(True)
         
-        # Track per-channel input statistics
-        self.register_buffer('input_absmax', 
-            torch.ones(self.in_features, dtype=torch.float32, device=self.device)
+        # Track per-channel input statistics (min/max for asymmetric quantization)
+        self.register_buffer('input_min', 
+            torch.zeros(self.in_features, dtype=torch.float32, device=self.device)
+        )
+        self.register_buffer('input_max', 
+            torch.zeros(self.in_features, dtype=torch.float32, device=self.device)
         )
         self.momentum = 0.1  # For EMA of input statistics
         
@@ -110,13 +133,24 @@ class QATW4A4Linear(nn.Module):
         self.register_buffer('weight_zero_point', 
             torch.zeros(self.out_features, dtype=torch.float32, device=self.device)
         )
-        # Per-tensor for activations
+        # Per-channel for activations ([in_features])
         self.register_buffer('act_scale', 
-            torch.ones(1, dtype=torch.float32, device=self.device)
+            torch.ones(self.in_features, dtype=torch.float32, device=self.device)
         )
         self.register_buffer('act_zero_point', 
-            torch.zeros(1, dtype=torch.float32, device=self.device)
+            torch.zeros(self.in_features, dtype=torch.float32, device=self.device)
         )
+
+        W_base = self.original_linear.weight
+        W_cpu = W_base.detach().to(torch.float32).cpu()
+
+        self.min_base = W_cpu.min(dim=1).values    
+        self.max_base = W_cpu.max(dim=1).values    
+
+        self.min_base = self.min_base.to(device=self.device)
+        self.max_base = self.max_base.to(device=self.device)
+
+        
 
     @property 
     def constrained_clip_val(self):
@@ -169,9 +203,10 @@ class QATW4A4Linear(nn.Module):
             qmin = 0
             qmax = 2 ** num_bits - 1
                 
-            min_vals = torch.min(min_vals, torch.zeros_like(min_vals))  # clip to <= 0
-            max_vals = torch.max(max_vals, torch.zeros_like(max_vals))  # clip to >= 0
-            
+            # min_vals = torch.min(min_vals, torch.zeros_like(min_vals))  # clip to <= 0
+            # max_vals = torch.max(max_vals, torch.zeros_like(max_vals))  # clip to >= 0
+            min_vals = torch.minimum(min_vals, max_vals)
+
             # Ensure we have a non-zero range
             range_vals = max_vals - min_vals
             range_vals = torch.clamp(range_vals, min=1e-8)
@@ -189,6 +224,9 @@ class QATW4A4Linear(nn.Module):
             return self._cached_merged_weights
             
         base_weight = self.original_linear.weight
+        # Normalize to [out_features, in_features] for internal computation
+        if not self.weight_is_out_in:
+            base_weight = base_weight.t()
         
         if hasattr(self.original_linear, 'lora_A') and hasattr(self.original_linear, 'lora_B'):
             lora_A = self.original_linear.lora_A.default.weight
@@ -211,66 +249,89 @@ class QATW4A4Linear(nn.Module):
             self._cached_merged_weights = merged
             
         return merged
+
         
-    @property
-    def alpha(self):
-        # Constrain alpha between 0 and 1 using sigmoid
-        return torch.sigmoid(self.raw_alpha)
+    # @property
+    # def alpha(self):
+    #     # Constrain alpha between 0 and 1 using sigmoid
+    #     return torch.sigmoid(self.raw_alpha)
 
     def update_input_stats(self, x):
         # x shape: [batch_size, seq_len, in_features] or [batch_size, in_features]
-        # Calculate per-channel absmax
-        if x.dim() == 3:  # [batch, seq_len, in_features]
-            current_absmax = x.abs().amax(dim=(0, 1))  # [in_features]
-        else:  # [batch, in_features]
-            current_absmax = x.abs().amax(dim=0)  # [in_features]
+        # Flatten all dimensions except the last one (features)
+        x_flat = x.reshape(-1, x.size(-1))  # [N, in_features]
         
-        # Update running statistics with EMA - avoid in-place operations during training
-        with torch.no_grad():
-            self.input_absmax.mul_(1 - self.momentum).add_(current_absmax * self.momentum)
-        return current_absmax
+        # Calculate min and max across batch and sequence dimensions
+        current_min = x_flat.min(dim=0).values  # [in_features]
+        current_max = x_flat.max(dim=0).values  # [in_features]
+        
+        # Update running min/max
+        if not hasattr(self, 'input_min'):
+            # First update, initialize with current values
+            self.input_min = current_min
+            self.input_max = current_max
+        else:
+            # Track the most extreme values seen so far
+            self.input_min = torch.minimum(self.input_min, current_min)
+            self.input_max = torch.maximum(self.input_max, current_max)
+        
+        return current_min, current_max
 
     def forward(self, input):
         # input shape: [batch_size, seq_len, in_features] or [batch_size, in_features]
         # Ensure input_absmax is the right shape [in_features]
         if input.dim() == 3:
             in_features = input.size(-1)
-            if self.input_absmax.dim() != 1 or self.input_absmax.size(0) != in_features:
-                self.input_absmax = torch.ones(in_features, device=input.device, dtype=torch.float32)
+            if self.input_min.dim() != 1 or self.input_min.size(0) != in_features:
+                self.input_min = torch.zeros(in_features, device=input.device, dtype=torch.float32)
+                self.input_max = torch.zeros(in_features, device=input.device, dtype=torch.float32)
         
         # Update input statistics during training
         if self.training:
-            self.update_input_stats(input)
+            current_min, current_max = self.update_input_stats(input)
         
         # Get merged weights [out_features, in_features] - COMPUTE ONLY ONCE
-        merged_weights = self._get_merged_weights()
+        # merged_weights = self._get_merged_weights()
         
         # Calculate scaling factor using SmoothQuant formula - COMPUTE ONLY ONCE
-        if not self.training and hasattr(self, '_cached_scaling_factor'):
-            scaling_factor = self._cached_scaling_factor
-        else:
-            # Calculate max abs value for each input channel (column-wise max)
-            weight_absmax_per_input_channel = merged_weights.abs().amax(dim=0, keepdim=False)
+        # if not self.training and hasattr(self, '_cached_scaling_factor'):
+        #     scaling_factor = self._cached_scaling_factor
+        # else:
+        #     # Calculate max abs value for each input channel (column-wise max)
+        #     weight_absmax_per_input_channel = merged_weights.abs().amax(dim=0, keepdim=False)
             
-            # s_j = (|X_j|^alpha) * (|W_j|^(1-alpha))
-            scaling_factor = (self.input_absmax ** self.alpha) * \
-                            (weight_absmax_per_input_channel ** (1 - self.alpha))
-            scaling_factor = scaling_factor.clamp(min=1e-8, max=1e3)
+        #     # s_j = (|X_j|^alpha) * (|W_j|^(1-alpha))
+        #     scaling_factor = (self.input_absmax ** self.alpha) * \
+        #                     (weight_absmax_per_input_channel ** (1 - self.alpha))
+        #     scaling_factor = scaling_factor.clamp(min=1e-8, max=1e3)
         
-            # Cache for eval mode
-            if not self.training:
-                self._cached_scaling_factor = scaling_factor
+        #     # Cache for eval mode
+        #     if not self.training:
+        #         self._cached_scaling_factor = scaling_factor
         
-        # Apply scaling:
-        # Input: x = x / s_j (broadcast over batch and sequence dims)
-        scaled_input = input / scaling_factor
+        # Reshape smooth_factor for broadcasting: [in_features] -> [1, 1, in_features] or [1, in_features]
+        if input.dim() == 3:  # [batch, seq_len, in_features]
+            smooth_factor = self.smooth_factor.view(1, 1, -1)
+        else:  # [batch, in_features]
+            smooth_factor = self.smooth_factor.view(1, -1)
+            
+        # Apply per-channel scaling to input: x = x / s_j
+        scaled_input = input / smooth_factor
         
-        # Weights: W = W * s_j (broadcast over output features)
-        scaled_weights = merged_weights * scaling_factor.unsqueeze(0)  # [out_features, in_features]
+        # Get merged weights and apply per-channel scaling: W = W * s_j
+        merged_weights = self._get_merged_weights()  # [out_features, in_features]
+        scaled_weights = merged_weights * self.smooth_factor.unsqueeze(0)  # [out_features, in_features]
         
-        # PACT: symmetric clipping for activations
-        clip_val = self.constrained_clip_val
-        clipped_input = torch.clamp(scaled_input, 0.0, clip_val.item())
+        # PACT: per-channel clipping for activations
+        clip_vals = self.constrained_clip_val  # [in_features]
+        # Reshape for broadcasting: [in_features] -> [1, 1, in_features] or [1, in_features]
+        if scaled_input.dim() == 3:  # [batch, seq_len, in_features]
+            clip_vals = clip_vals.view(1, 1, -1)
+        else:  # [batch, in_features]
+            clip_vals = clip_vals.view(1, -1)
+        
+        # Apply symmetric per-channel clipping to [-a, a]
+        clipped_input = torch.clamp(scaled_input, -clip_vals, clip_vals)
         
         if not self.training and hasattr(self, '_cached_quant_params'):
             weight_scale, weight_zero_point, act_scale, act_zero_point = self._cached_quant_params
@@ -282,10 +343,12 @@ class QATW4A4Linear(nn.Module):
                 weight_mins, weight_maxs, self.num_bits, symmetric=True
             )
             
-            # Quantization parameters for activations (per-tensor)
-            clip_val = self.constrained_clip_val
+            # Quantization parameters for activations (per-channel, symmetric)
+            # Use the learnable symmetric clip as bounds for both train and eval
+            act_min = -self.constrained_clip_val
+            act_max = self.constrained_clip_val
             act_scale, act_zero_point = self._calculate_quant_params(
-                0, clip_val, self.num_bits, symmetric=False
+                act_min, act_max, self.num_bits, symmetric=True
             )
             
             # Cache for eval mode
@@ -315,8 +378,16 @@ class QATW4A4Linear(nn.Module):
         
         # Quantize
         # Using positional arguments (can't use keyword args with Function.apply)
+        # Reshape activation quant params for broadcasting along the last (channel) dim
+        if clipped_input.dim() == 3:  # [batch, seq_len, in_features]
+            act_scale_b = act_scale.view(1, 1, -1)
+            act_zero_point_b = act_zero_point.view(1, 1, -1)
+        else:  # [batch, in_features]
+            act_scale_b = act_scale.view(1, -1)
+            act_zero_point_b = act_zero_point.view(1, -1)
+
         quant_input = self.fake_quantize(
-            clipped_input, act_scale, act_zero_point, self.num_bits, 0  # 0 for asymmetric
+            clipped_input, act_scale_b, act_zero_point_b, self.num_bits, 1  # 1 for symmetric
         )
         quant_weight = self.fake_quantize(
             scaled_weights, weight_scale, weight_zero_point, self.num_bits, 1  # 1 for symmetric
@@ -360,7 +431,10 @@ class QATW4A4Linear(nn.Module):
     def check_gradients(self):
         """Debug method to check gradient flow"""
         print(f"activation_clip grad: {self.activation_clip.grad}")
-        print(f"raw_alpha grad: {self.raw_alpha.grad}")
+        if hasattr(self, 'smooth_factor'):
+            grad = self.smooth_factor.grad
+            grad_info = 'None' if grad is None else f"mean={grad.mean().item():.6f}"
+            print(f"smooth_factor grad: {grad_info}")
         if hasattr(self.original_linear, 'lora_A'):
             print(f"lora_A grad: {self.original_linear.lora_A.default.weight.grad is not None}")
             print(f"lora_B grad: {self.original_linear.lora_B.default.weight.grad is not None}")
@@ -477,7 +551,7 @@ print(f"Number of parameters: {model.num_parameters()}")
 def apply_quantization_to_model(model):
     """Apply QATW4A4Linear to all linear layers in the model"""
     for name, module in model.named_modules():
-        if isinstance(module, (nn.Linear, torch.nn.modules.conv.Conv1d)):
+        if isinstance(module, (nn.Linear, Conv1D)):
             # Skip if already quantized
             if hasattr(module, 'original_linear'):
                 continue
@@ -497,7 +571,7 @@ def apply_quantization_to_peft_model(peft_model):
     base_model_to_quantize = peft_model.base_model.model
 
     for name, module in base_model_to_quantize.named_modules():
-        if isinstance(module, (nn.Linear, torch.nn.modules.conv.Conv1d)):
+        if isinstance(module, (nn.Linear, Conv1D)):
             # This check is crucial to ensure we don't re-wrap if somehow already done
             if hasattr(module, 'original_linear'): # This is how your QATW4A4Linear signals it's a wrapper
                 continue # Skip if it's already your custom QAT module
@@ -556,7 +630,7 @@ for name, param in peft_model.named_parameters():
     # and other base model parameters are frozen.
 
     # Enable gradients for LoRA, PACT, and SmoothQuant parameters
-    if "activation_clip" in name or "raw_alpha" in name:
+    if "activation_clip" in name or "smooth_factor" in name:
         param.requires_grad = True
     elif "lora" in name: # LoRA parameters
         param.requires_grad = True # PEFT sets this, but explicit for clarity
@@ -651,25 +725,26 @@ class TensorBoardLoggingCallback:
     
     # REPLACE the log_quantization_params method in TensorBoardLoggingCallback with:
     def log_quantization_params(self, epoch):
-        """Log ALL quantization parameters that are saved in quantization_params.pth"""
+        """Log quantization parameters for analysis and debugging."""
         for name, module in self.model.named_modules():
             if isinstance(module, QATW4A4Linear):
                 # Log PACT activation clipping values
                 clip_val = module.constrained_clip_val.item()
                 self.writer.add_scalar(f"Quantization/{name}/activation_clip", clip_val, epoch)
                 
-                # Log SmoothQuant raw_alpha and computed alpha values
-                raw_alpha = module.raw_alpha.item()
-                alpha = module.alpha.item()
-                self.writer.add_scalar(f"Quantization/{name}/raw_alpha", raw_alpha, epoch)
-                self.writer.add_scalar(f"Quantization/{name}/smoothquant_alpha", alpha, epoch)
+                # Log SmoothQuant scaling factor statistics
+                if hasattr(module, 'smooth_factor'):
+                    self.writer.add_histogram(f"Quantization/{name}/smooth_factor", 
+                                              module.smooth_factor.detach().cpu(), epoch)
+                    self.writer.add_scalar(f"Quantization/{name}/smooth_factor_mean", 
+                                           module.smooth_factor.detach().mean().item(), epoch)
                 
-                # Log input statistics (SmoothQuant component)
-                if hasattr(module, 'input_absmax') and module.input_absmax.numel() > 0:
-                    self.writer.add_histogram(f"Quantization/{name}/input_absmax", 
-                                            module.input_absmax, epoch)
-                    self.writer.add_scalar(f"Quantization/{name}/input_absmax_mean", 
-                                        module.input_absmax.mean().item(), epoch)
+                # Log input statistics
+                if hasattr(module, 'input_min') and hasattr(module, 'input_max'):
+                    self.writer.add_histogram(f"Quantization/{name}/input_min", 
+                                              module.input_min.detach().cpu(), epoch)
+                    self.writer.add_histogram(f"Quantization/{name}/input_max", 
+                                              module.input_max.detach().cpu(), epoch)
                 
                 # Log quantization scales and zero points
                 if hasattr(module, 'weight_scale') and module.weight_scale.numel() > 0:
@@ -683,12 +758,14 @@ class TensorBoardLoggingCallback:
                                             module.weight_zero_point, epoch)
                     
                 if hasattr(module, 'act_scale') and module.act_scale.numel() > 0:
-                    self.writer.add_scalar(f"Quantization/{name}/act_scale", 
-                                        module.act_scale.item(), epoch)
+                    self.writer.add_histogram(f"Quantization/{name}/act_scale", 
+                                              module.act_scale.detach().cpu(), epoch)
+                    self.writer.add_scalar(f"Quantization/{name}/act_scale_mean", 
+                                           module.act_scale.detach().mean().item(), epoch)
                     
                 if hasattr(module, 'act_zero_point') and module.act_zero_point.numel() > 0:
-                    self.writer.add_scalar(f"Quantization/{name}/act_zero_point", 
-                                        module.act_zero_point.item(), epoch)
+                    self.writer.add_histogram(f"Quantization/{name}/act_zero_point", 
+                                              module.act_zero_point.detach().cpu(), epoch)
 
 
 if __name__ == "__main__":
@@ -744,7 +821,41 @@ if __name__ == "__main__":
     # Define Data Collator
     data_collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False)
 
-    # Initialize Trainer with MPS-specific optimizations
+    # Build optimizer with parameter groups: LoRA vs PACT clip vs SmoothQuant factors
+    lora_params: List[torch.nn.Parameter] = []
+    clip_params: List[torch.nn.Parameter] = []
+    smooth_params: List[torch.nn.Parameter] = []
+
+    for name, param in peft_model.named_parameters():
+        if not param.requires_grad:
+            continue
+        lname = name.lower()
+        if "lora" in lname:
+            lora_params.append(param)
+        elif "activation_clip" in lname:
+            clip_params.append(param)
+        elif "smooth_factor" in lname:
+            smooth_params.append(param)
+
+    param_groups = []
+    # Set learning rates: LoRA uses the TrainingArguments LR; quant params use a higher LR
+    lora_lr = training_args.learning_rate
+    quant_lr = 1e-3
+    if lora_params:
+        param_groups.append({"params": lora_params, "lr": lora_lr, "weight_decay": 0.0})
+    if clip_params:
+        param_groups.append({"params": clip_params, "lr": quant_lr, "weight_decay": 0.0})
+    if smooth_params:
+        param_groups.append({"params": smooth_params, "lr": quant_lr, "weight_decay": 0.0})
+
+    # Fallback: if for some reason groups are empty, include all trainable params
+    if not param_groups:
+        all_trainable = [p for p in peft_model.parameters() if p.requires_grad]
+        param_groups = [{"params": all_trainable, "lr": lora_lr, "weight_decay": 0.0}]
+
+    optimizer = torch.optim.AdamW(param_groups, betas=(0.9, 0.999), eps=1e-8)
+
+    # Initialize Trainer with custom optimizer (Trainer will create scheduler)
     trainer = Trainer(
         model=peft_model,
         args=training_args,
@@ -752,14 +863,15 @@ if __name__ == "__main__":
         eval_dataset=eval_dataset,
         tokenizer=tokenizer,
         data_collator=data_collator,
+        optimizers=(optimizer, None),
     )
     
-    # For MPS, we need to ensure the model is on the correct device
-    if torch.backends.mps.is_available():
-        peft_model = peft_model.to(device)
-        # Add gradient checkpointing for MPS to save memory
-        peft_model.enable_input_require_grads()
-        peft_model.config.use_cache = False  # Gradient checkpointing requires this
+    # Ensure model on device and enable input grads for all devices to allow LoRA/SQ to learn
+    peft_model = peft_model.to(device)
+    peft_model.enable_input_require_grads()
+    # Disable KV cache to avoid conflicts with potential checkpointing and ensure full backprop
+    if hasattr(peft_model, 'config'):
+        peft_model.config.use_cache = False
 
     # 7. Train the model
     print("\n--- Starting W4A4 QAT with LoRA Fine-tuning ---")
@@ -789,8 +901,9 @@ if __name__ == "__main__":
                 # Save all quantization parameters
                 param_prefix = f"{name}."
                 quant_params[f"{param_prefix}activation_clip"] = module.activation_clip.data
-                quant_params[f"{param_prefix}raw_alpha"] = module.raw_alpha.data
-                quant_params[f"{param_prefix}input_absmax"] = module.input_absmax.data
+                quant_params[f"{param_prefix}smooth_factor"] = module.smooth_factor.data
+                quant_params[f"{param_prefix}input_min"] = module.input_min.data
+                quant_params[f"{param_prefix}input_max"] = module.input_max.data
                 quant_params[f"{param_prefix}weight_scale"] = module.weight_scale.data
                 quant_params[f"{param_prefix}weight_zero_point"] = module.weight_zero_point.data
                 quant_params[f"{param_prefix}act_scale"] = module.act_scale.data

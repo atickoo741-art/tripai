@@ -13,6 +13,8 @@ from torch.utils.tensorboard import SummaryWriter
 import time
 from typing import List
 
+# Help CUDA memory fragmentation in long runs (must be set before first CUDA alloc)
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 print("train_qat.py script has started execution!", flush=True) # <--- Add this line
 
 # Define the FakeQuantize module with STE
@@ -790,15 +792,20 @@ if __name__ == "__main__":
     # Set up Training Arguments
     use_fp16 = torch.cuda.is_available() and not torch.backends.mps.is_available()
     
+    # Choose memory-friendly settings based on device
+    is_cuda = torch.cuda.is_available() and not torch.backends.mps.is_available()
+    per_device_bs = 4 if is_cuda else 8
+    grad_accum = 16 if is_cuda else 8
+
     training_args = TrainingArguments(
         output_dir=output_dir,
         overwrite_output_dir=False,
         num_train_epochs=10,
-        per_device_train_batch_size=8,  # Reduced to compensate for no gradient checkpointing
-        per_device_eval_batch_size=16,  # Reduced to compensate for no gradient checkpointing
-        gradient_accumulation_steps=8,  # Increased to maintain effective batch size
+        per_device_train_batch_size=per_device_bs,
+        per_device_eval_batch_size=per_device_bs * 2,
+        gradient_accumulation_steps=grad_accum,
         max_grad_norm=1.0,
-        gradient_checkpointing=False,  # DISABLE - incompatible with custom QAT modules
+        gradient_checkpointing=True,
         save_strategy="epoch",
         eval_strategy="epoch",
         logging_dir=os.path.join(output_dir, "tensorboard_logs"),
@@ -807,7 +814,7 @@ if __name__ == "__main__":
         weight_decay=0.01,
         warmup_ratio=0.05,
         lr_scheduler_type="cosine",
-        fp16=False,
+        fp16=is_cuda,
         bf16=False,
         tf32=False,
         report_to="tensorboard",

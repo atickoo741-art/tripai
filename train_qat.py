@@ -12,6 +12,7 @@ from data_preparation import load_and_preprocess_wikitext2
 from torch.utils.tensorboard import SummaryWriter
 import time
 from typing import List
+from torch.utils.data import DataLoader
 
 # Help CUDA memory fragmentation in long runs (must be set before first CUDA alloc)
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
@@ -156,7 +157,9 @@ class QATW4A4Linear(nn.Module):
 
     @property 
     def constrained_clip_val(self):
-        return torch.clamp(torch.abs(self.activation_clip), min=0.5, max=6.0)
+        # Ensure strictly-positive per-channel clip to avoid degenerate scales
+        # Keep no hard upper cap; training/calibration sets magnitude
+        return torch.clamp(torch.abs(self.activation_clip), min=1e-6)
 
 
     @property
@@ -770,6 +773,87 @@ class TensorBoardLoggingCallback:
                                               module.act_zero_point.detach().cpu(), epoch)
 
 
+def calibrate_activation_clips(model, dataloader, steps=200, percentile=99.5, device=None):
+    """Initialize per-channel PACT clips using a short percentile calibration pass.
+    Returns a dict mapping id(module) -> per-channel percentile tensor for use in SmoothQuant init.
+    """
+    model_device = next(model.parameters()).device
+    device = device or model_device
+    model.eval()
+
+    # Collect per-module per-channel absolute percentiles via pre-hooks
+    handles = []
+    per_module_abs_pctl = {}
+
+    def pre_hook(mod, inputs):
+        if not inputs:
+            return
+        x = inputs[0]
+        if not torch.is_tensor(x):
+            return
+        x = x.detach()
+        # Flatten all but last dim (channel)
+        x = x.abs().reshape(-1, x.shape[-1])
+        q = torch.quantile(x, torch.tensor(percentile / 100.0, device=x.device), dim=0)
+        key = id(mod)
+        if key in per_module_abs_pctl:
+            per_module_abs_pctl[key] = torch.maximum(per_module_abs_pctl[key], q)
+        else:
+            per_module_abs_pctl[key] = q
+
+    for m in model.modules():
+        if isinstance(m, QATW4A4Linear):
+            handles.append(m.register_forward_pre_hook(pre_hook))
+
+    # Run a few batches
+    seen = 0
+    with torch.no_grad():
+        for batch in dataloader:
+            batch_on_device = {}
+            for k, v in batch.items():
+                if torch.is_tensor(v):
+                    batch_on_device[k] = v.to(device)
+                else:
+                    batch_on_device[k] = v
+            _ = model(**batch_on_device)
+            seen += 1
+            if seen >= steps:
+                break
+
+    # Apply initialization
+    for m in model.modules():
+        if isinstance(m, QATW4A4Linear):
+            key = id(m)
+            if key not in per_module_abs_pctl:
+                continue
+            A = per_module_abs_pctl[key].to(m.activation_clip.device)
+            # init_a = torch.clamp(A, min=0.5, max=6.0)
+            with torch.no_grad():
+                m.activation_clip.data.copy_(A)
+
+    for h in handles:
+        h.remove()
+    model.train()
+    return per_module_abs_pctl
+
+
+def calibrate_smooth_factors(model, per_module_abs_pctl, alpha: float = 0.5):
+    """Initialize per-channel SmoothQuant scaling factors using activation percentiles and weight stats."""
+    model.eval()
+    with torch.no_grad():
+        for m in model.modules():
+            if isinstance(m, QATW4A4Linear):
+                key = id(m)
+                if key not in per_module_abs_pctl:
+                    continue
+                A = per_module_abs_pctl[key].to(m.smooth_factor.device)
+                # Per-input-channel absmax of merged weights (before any smooth scaling)
+                W = m._get_merged_weights().detach().abs().amax(dim=0)  # [in_features]
+                s = (A.pow(alpha) / (W.pow(1.0 - alpha) + 1e-8)).clamp_(0.1, 10.0)
+                m.smooth_factor.data.copy_(s)
+    model.train()
+
+
 if __name__ == "__main__":
     # 6. Setup and Run Training Loop
     print("\n--- Setting up Training Loop for W4A4 QAT ---")
@@ -827,6 +911,14 @@ if __name__ == "__main__":
 
     # Define Data Collator
     data_collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False)
+
+    # Percentile-based calibration of activation clips (short pass)
+    print("\n--- Calibrating activation clips (percentile init) ---")
+    peft_model = peft_model.to(device)
+    calib_loader = DataLoader(train_dataset, batch_size=per_device_bs, shuffle=False, collate_fn=data_collator)
+    per_module_abs = calibrate_activation_clips(peft_model, calib_loader, steps=200, percentile=99.5, device=device)
+    # Initialize SmoothQuant scaling factors using activation percentiles and weight stats
+    calibrate_smooth_factors(peft_model, per_module_abs, alpha=0.5)
 
     # Build optimizer with parameter groups: LoRA vs PACT clip vs SmoothQuant factors
     lora_params: List[torch.nn.Parameter] = []

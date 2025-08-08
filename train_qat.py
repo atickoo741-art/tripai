@@ -884,7 +884,7 @@ if __name__ == "__main__":
     training_args = TrainingArguments(
         output_dir=output_dir,
         overwrite_output_dir=False,
-        num_train_epochs=10,
+        num_train_epochs=2,
         per_device_train_batch_size=per_device_bs,
         per_device_eval_batch_size=per_device_bs * 2,
         gradient_accumulation_steps=grad_accum,

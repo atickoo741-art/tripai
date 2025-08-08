@@ -873,6 +873,32 @@ if __name__ == "__main__":
         optimizers=(optimizer, None),
     )
     
+    # Save quantization params inside each checkpoint and enable seamless resume
+    class SaveQuantParamsCallback:
+        def on_save(self, args, state, control, model=None, **kwargs):
+            try:
+                ckpt_dir = os.path.join(args.output_dir, f"checkpoint-{state.global_step}")
+                if os.path.isdir(ckpt_dir):
+                    quant_params = {}
+                    for name, module in model.named_modules():
+                        if isinstance(module, QATW4A4Linear):
+                            prefix = f"{name}."
+                            quant_params[f"{prefix}activation_clip"] = module.activation_clip.data.detach().cpu()
+                            if hasattr(module, 'smooth_factor'):
+                                quant_params[f"{prefix}smooth_factor"] = module.smooth_factor.data.detach().cpu()
+                            if hasattr(module, 'input_min') and hasattr(module, 'input_max'):
+                                quant_params[f"{prefix}input_min"] = module.input_min.data.detach().cpu()
+                                quant_params[f"{prefix}input_max"] = module.input_max.data.detach().cpu()
+                            quant_params[f"{prefix}weight_scale"] = module.weight_scale.data.detach().cpu()
+                            quant_params[f"{prefix}weight_zero_point"] = module.weight_zero_point.data.detach().cpu()
+                            quant_params[f"{prefix}act_scale"] = module.act_scale.data.detach().cpu()
+                            quant_params[f"{prefix}act_zero_point"] = module.act_zero_point.data.detach().cpu()
+                    torch.save(quant_params, os.path.join(ckpt_dir, "quantization_params.pth"))
+            except Exception as e:
+                print(f"Warning: failed to save quant params at checkpoint: {e}")
+
+    trainer.add_callback(SaveQuantParamsCallback())
+    
     # Ensure model on device and enable input grads for all devices to allow LoRA/SQ to learn
     peft_model = peft_model.to(device)
     peft_model.enable_input_require_grads()
@@ -880,7 +906,7 @@ if __name__ == "__main__":
     if hasattr(peft_model, 'config'):
         peft_model.config.use_cache = False
 
-    # 7. Train the model
+    # 7. Train the model (fresh run). Checkpoints will save quant params via callback.
     print("\n--- Starting W4A4 QAT with LoRA Fine-tuning ---")
     trainer.train()
 

@@ -8,6 +8,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from transformers.models.gpt2.modeling_gpt2 import GPT2Block, Conv1D
 from transformers import Trainer, TrainingArguments, DataCollatorForLanguageModeling
+from transformers import TrainerCallback
 from data_preparation import load_and_preprocess_wikitext2
 from torch.utils.tensorboard import SummaryWriter
 import time
@@ -965,9 +966,10 @@ if __name__ == "__main__":
         optimizers=(optimizer, None),
     )
     
-    # Save quantization params inside each checkpoint and enable seamless resume
-    class SaveQuantParamsCallback:
-        def on_save(self, args, state, control, model=None, **kwargs):
+    # Save quantization params inside each checkpoint
+    class SaveQuantParamsCallback(TrainerCallback):
+        def on_save(self, args, state, control, **kwargs):
+            model = kwargs.get("model")
             try:
                 ckpt_dir = os.path.join(args.output_dir, f"checkpoint-{state.global_step}")
                 if os.path.isdir(ckpt_dir):

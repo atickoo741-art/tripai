@@ -591,9 +591,24 @@ def main():
             
             # Apply parameters to QATW4A4Linear layers
             params_loaded = 0
+            layers_found = 0
+
             for name, module in model.named_modules():
                 if isinstance(module, QATW4A4Linear):
+                    layers_found += 1
                     param_prefix = f"{name}."
+
+                    required_params = ['activation_clip', 'smooth_factor', 'weight_scale', 'act_scale']
+                    missing_params = []
+
+                    for param_name in required_params:
+                        full_key = f"{param_prefix}{param_name}"
+                        if full_key not in quant_params:
+                            missing_params.append(full_key)
+                
+                    if missing_params:
+                        print(f"WARNING: Missing parameters for {name}: {missing_params}")
+                        continue
                     
                     # Load each parameter if it exists using torch.no_grad()
                     with torch.no_grad():
@@ -601,10 +616,28 @@ def main():
                                         'weight_scale', 'weight_zero_point', 'act_scale', 'act_zero_point']:
                             full_key = f"{param_prefix}{param_name}"
                             if full_key in quant_params:
-                                # Use .data.copy_() instead of .copy_() to avoid gradient tracking
                                 saved_param = quant_params[full_key].to(device)
-                                getattr(module, param_name).data.copy_(saved_param)
+                                current_param = getattr(module, param_name)
+                                
+                                # VALIDATE parameter shapes match
+                                if saved_param.shape != current_param.shape:
+                                    print(f"ERROR: Shape mismatch for {full_key}: saved {saved_param.shape} vs current {current_param.shape}")
+                                    continue
+                                    
+                                current_param.data.copy_(saved_param)
                                 params_loaded += 1
+            print(f"Successfully loaded parameters for {layers_found} QATW4A4Linear layers ({params_loaded} total parameters)")
+            if layers_found == 0:
+                print("ERROR: No QATW4A4Linear layers found in model!")
+                return False
+            
+            return True
+        
+        except Exception as e:
+            print(f"ERROR loading quantization parameters: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
 
             # for name, module in model.named_modules():
             #     if isinstance(module, QATW4A4Linear):
@@ -617,12 +650,7 @@ def main():
                     # print(f"Activation scale: {module.act_scale}")
                     # print(f"Activation zero point: {module.act_zero_point}")
                     # print("-" * 50)
-            print(f"Loaded quantization parameters from {quant_params_path}")
-            return True
-        except Exception as e:
-            print(f"Error loading quantization parameters: {e}")
-            print("Continuing with default parameters...")
-            return True  # Return True to continue execution
+
 
 
 
@@ -640,11 +668,27 @@ def main():
                 description=f"Original {model_type}"
             )
 
+            # # ADD THIS CHECK - if LoRA model has same perplexity as base, something's wrong
+            # if require_lora and abs(eval_results['perplexity'] - 58.5) < 1.0:  # Base GPT-2 perplexity
+            #     print(f"ERROR: {model_type} shows base model perplexity - LoRA not loaded correctly!")
+            #     print(f"Expected much lower perplexity for fine-tuned model, got {eval_results['perplexity']}")
+            #     return None
+
             if quantization_method == "qat":
-                print(f"\n--- Applying QAT quantization architecture ---")
-                # Use a separate instance to quantize that mirrors training wrapping
+                # Create a fresh instance for quantization to avoid state issues
                 quantized_model, _ = load_model_and_tokenizer(model_name, lora_path, require_lora=True)
                 quantized_model = quantized_model.to(device)
+                
+                # VERIFY LoRA is loaded before quantizing
+                with torch.no_grad():
+                    test_input = torch.randint(0, 1000, (1, 10), device=device)
+                    original_output = model(test_input).logits
+                    fresh_output = quantized_model(test_input).logits
+                    if torch.allclose(original_output, fresh_output, atol=1e-4):
+                        print("✓ LoRA adapters verified in fresh model instance")
+                    else:
+                        print("ERROR: LoRA adapters not matching between instances!")
+                        
                 apply_quantization_to_peft_model(quantized_model)
                 
                 # Load quantization parameters and check for failure

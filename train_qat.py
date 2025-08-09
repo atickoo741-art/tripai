@@ -398,16 +398,22 @@ class QATW4A4Linear(nn.Module):
         quant_input = self.fake_quantize(
             clipped_input, act_scale_b, act_zero_point_b, self.num_bits, 1  # 1 for symmetric
         )
+
+        weight_scale_b = weight_scale.view(-1, 1)        # [out, 1]
+        weight_zero_point_b = weight_zero_point.view(-1, 1)  # [out, 1]
+
         quant_weight = self.fake_quantize(
-            scaled_weights, weight_scale, weight_zero_point, self.num_bits, 1  # 1 for symmetric
+            scaled_weights, weight_scale_b, weight_zero_point_b, self.num_bits, 1
         )
 
-        # Perform the linear operation with quantized input and weights
-        # Note: Bias is not quantized, it's usually kept in full precision.
-        # IMPORTANT: GPT-2 uses Conv1D, where weights are (in_features, out_features).
-        # F.linear expects weights as (out_features, in_features) and applies transpose internally (input @ weight.T).
-        # So, we need to transpose quant_weight before passing it to F.linear to match Conv1D behavior.
-        output = F.linear(quant_input, quant_weight, self.original_linear.bias)
+        # If original layer is Conv1D (weights stored [in, out]), ensure quant_weight supplied to F.linear is [out, in]
+        if not self.weight_is_out_in:
+            quant_weight_to_use = quant_weight
+        else:
+            quant_weight_to_use = quant_weight
+            
+        output = F.linear(quant_input, quant_weight_to_use, self.original_linear.bias)
+
         return output
     def eval(self):
         """Override eval to pre-compute cached values"""

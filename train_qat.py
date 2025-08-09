@@ -234,6 +234,7 @@ class QATW4A4Linear(nn.Module):
         if not self.weight_is_out_in:
             base_weight = base_weight.t()
         
+        # Check if this is a LoRA layer by checking if the original linear has LoRA attributes
         if hasattr(self.original_linear, 'lora_A') and hasattr(self.original_linear, 'lora_B'):
             lora_A = self.original_linear.lora_A.default.weight
             lora_B = self.original_linear.lora_B.default.weight
@@ -248,6 +249,8 @@ class QATW4A4Linear(nn.Module):
                 
             merged = base_weight + lora_delta
         else:
+            # For LoRA layers that were converted to QATW4A4Linear, the weight is already the LoRA weight
+            # The original_linear.weight in this case contains the actual trainable LoRA weight, not base weight
             merged = base_weight
         
         # Cache for eval mode

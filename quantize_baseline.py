@@ -10,7 +10,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer, AutoConfig
 from peft import PeftModel, PeftConfig
 from datasets import load_dataset, DatasetDict
 import copy
-from train_qat import QATW4A4Linear
+from train_qat import QATW4A4Linear, FakeQuantize
 
 # Set random seeds for reproducibility
 def set_seed(seed=42):
@@ -41,6 +41,9 @@ class W4A4Linear(nn.Module):
         super().__init__()
         self.num_bits = num_bits
         self.device = original_linear.weight.device
+        # Runtime toggles to allow disabling quantization during calibration/debug
+        self.enable_activation_quant = True
+        self.enable_weight_quant = True
         if original_linear.__class__.__name__ == 'Conv1D':
             self.in_features = original_linear.weight.shape[0]
             self.out_features = original_linear.nf
@@ -57,19 +60,15 @@ class W4A4Linear(nn.Module):
         else:
             self.register_parameter('bias', None)
         
-        # Quantization parameters (will be set during calibration)
-        # self.register_buffer('weight_scale', torch.tensor(1.0))
-        # self.register_buffer('weight_zero_point', torch.tensor(0.0))
-        # self.register_buffer('input_scale', torch.tensor(1.0))
-        # self.register_buffer('input_zero_point', torch.tensor(0.0))
-
+        # Per-channel weight quantization parameters
         self.register_buffer('weight_scale', 
             torch.ones(self.out_features, dtype=torch.float32, device=self.device)
         )
         self.register_buffer('weight_zero_point', 
             torch.zeros(self.out_features, dtype=torch.float32, device=self.device)
         )
-        # Per-channel for activations ([in_features])
+        
+        # Per-channel activation quantization parameters
         self.register_buffer('act_scale', 
             torch.ones(self.in_features, dtype=torch.float32, device=self.device)
         )
@@ -93,39 +92,47 @@ class W4A4Linear(nn.Module):
         
         max_val = torch.max(torch.abs(weight)).item()
 
-        weight_maxs = weight.max(dim=1, keepdim=True)[0]
-        
-
+        # Per-out-channel max over input dimension (return 1D [out_features])
+        weight_maxs = weight.abs().amax(dim=1, keepdim=False)
         scale = weight_maxs / qmax
-        
-        self.weight_scale = scale.abs() + 1e-6  # Avoid zero scale
+
+        # Keep buffer shape as [out_features] to avoid accidental 3D broadcasting
+        self.weight_scale.copy_(scale.abs() + 1e-6)  # Avoid zero scale
         self.weight_zero_point.fill_(0.0)  # Symmetric
     
     def fake_quantize_tensor(self, x, scale, zero_point, qmin, qmax):
-        """Apply fake quantization with straight-through estimator"""
-        # Quantize
-        x_int = torch.round(x / scale + zero_point)
-        x_quant = torch.clamp(x_int, qmin, qmax)
-        # Dequantize (fake quantization)
-        x_fake_quant = (x_quant - zero_point) * scale
-        return x_fake_quant
+        """Apply fake quantization with straight-through estimator using the FakeQuantize class"""
+        num_bits = self.num_bits
+        # Always use symmetric quantization for both weights and activations
+        return FakeQuantize.apply(x, scale, zero_point, num_bits, 1)  # 1 for symmetric
     
     def forward(self, x):
-        # Quantize weights (symmetric, -8 to 7 for 4-bit)
-        qmin_w, qmax_w = -(2 ** (self.num_bits - 1)), (2 ** (self.num_bits - 1)) - 1
-        weight_quant = self.fake_quantize_tensor(
-            self.weight, self.weight_scale, self.weight_zero_point, qmin_w, qmax_w
-        )
-        
-        # Quantize activations (symmetric, -8 to 7 for 4-bit)
-        qmin_a, qmax_a = -(2 ** (self.num_bits - 1)), (2 ** (self.num_bits - 1)) - 1
-        input_quant = self.fake_quantize_tensor(
-            x, self.input_scale, self.input_zero_point, qmin_a, qmax_a
-        )
-        
+        # Prepare shapes for per-channel quantization
+        weight_scale = self.weight_scale if self.weight_scale.dim() == 2 else self.weight_scale.unsqueeze(1)
+        weight_zero_point = self.weight_zero_point if self.weight_zero_point.dim() == 2 else self.weight_zero_point.unsqueeze(1)
+
+        # Quantize weights (per-channel symmetric)
+        if self.enable_weight_quant:
+            weight_quant = self.fake_quantize_tensor(
+                self.weight, weight_scale, weight_zero_point, 0, 0
+            )
+        else:
+            weight_quant = self.weight
+
+        # Quantize activations (per-channel symmetric), preserve input rank
+        if self.enable_activation_quant:
+            if x.dim() == 2:
+                act_scale = self.act_scale.reshape(1, -1)
+                act_zero_point = self.act_zero_point.reshape(1, -1)
+            else:
+                act_scale = self.act_scale.reshape(1, 1, -1)
+                act_zero_point = self.act_zero_point.reshape(1, 1, -1)
+            input_quant = self.fake_quantize_tensor(x, act_scale, act_zero_point, 0, 0)
+        else:
+            input_quant = x
+
         # Linear operation with quantized tensors
         output = F.linear(input_quant, weight_quant, self.bias)
-        
         return output
 
 
@@ -443,82 +450,76 @@ def calibrate_quantization(model, calibration_data, tokenizer, num_samples=50, d
     num_samples = min(num_samples, len(calibration_data))
     calibration_subset = calibration_data.select(range(num_samples))
     
-    print(f"Using {len(calibration_subset)} samples for calibration...")
+    # Track min/max ranges for activations (per-channel)
+    activation_stats = {}
     
-    # Collect activation ranges and minimum values for W4A4Linear only (QATW4A4Linear handles its own calibration)
-    input_ranges = []
-    input_mins = []
-    output_ranges = []
-    
-    # Hook to collect activation ranges for W4A4Linear only
     def forward_hook(module, input, output):
         if not isinstance(module, W4A4Linear):
             return
-            
         if isinstance(input, tuple):
             input = input[0]
         if isinstance(output, tuple):
             output = output[0]
-            
-        # Get min/max for input and max for output
+        # Get per-channel min/max for input activations
         input_tensor = input.detach()
-        input_min = input_tensor.min().item()
-        input_max = input_tensor.max().item()
-        output_max = output.detach().abs().max().item()
-        
-        # input_ranges.append(input_max-input_min) 
-        input_ranges.append(input_max)
-        input_mins.append(input_min)
-        output_ranges.append(output_max)
-    
-    # Register hooks only on W4A4Linear layers (not QATW4A4Linear)
+        # Reshape to [batch*seq_len, in_features] for per-channel stats
+        x_flat = input_tensor.reshape(-1, input_tensor.size(-1))
+        # Update per-channel min/max
+        min_vals = x_flat.min(dim=0)[0]
+        max_vals = x_flat.max(dim=0)[0]
+        # Initialize or update running stats
+        if not hasattr(module, '_min_vals'):
+            module._min_vals = min_vals
+            module._max_vals = max_vals
+        else:
+            module._min_vals = torch.min(module._min_vals, min_vals)
+            module._max_vals = torch.max(module._max_vals, max_vals)
+
+    # Register hooks only on W4A4Linear layers
     handles = []
     for name, module in model.named_modules():
         if isinstance(module, W4A4Linear):
             handles.append(module.register_forward_hook(forward_hook))
     
+    # Temporarily disable activation quant during calibration forward to avoid feedback from stale scales
+    toggled_modules = []
+    for m in model.modules():
+        if isinstance(m, W4A4Linear) and getattr(m, 'enable_activation_quant', True):
+            m.enable_activation_quant = False
+            toggled_modules.append(m)
+
     # Run calibration
     with torch.no_grad():
         for i, example in enumerate(tqdm(calibration_subset, desc="Calibrating")):
-            try:
-                # Convert to tensor and move to device
-                input_ids = torch.tensor(example['input_ids'], device=original_device).unsqueeze(0)
-                attention_mask = torch.tensor(example['attention_mask'], device=original_device).unsqueeze(0)
-                
-                # Skip empty examples
-                if input_ids.numel() == 0 or attention_mask.sum() == 0:
-                    continue
-                
-                # Forward pass to collect activation statistics
-                _ = model(input_ids=input_ids, attention_mask=attention_mask)
-                
-            except Exception as e:
-                print(f"Warning: Error during calibration on example {i}: {str(e)}")
+            input_ids = torch.tensor(example['input_ids'], device=original_device).unsqueeze(0)
+            attention_mask = torch.tensor(example['attention_mask'], device=original_device).unsqueeze(0)
+            if input_ids.numel() == 0 or attention_mask.sum() == 0:
                 continue
-    
-    # Calculate and set scales only for W4A4Linear layers
-    if input_ranges and output_ranges:
-        input_scale = (max(input_ranges)-min(input_mins)) / 15 
-        # input_zero_point = round(min(input_mins)/input_scale)
-        input_zero_point = torch.zeros_like(torch.tensor(input_scale), device=original_device)
+            _ = model(input_ids=input_ids, attention_mask=attention_mask)
+    # Calculate and set per-channel scales for W4A4Linear layers
+    for module in model.modules():
+        if isinstance(module, W4A4Linear) and hasattr(module, '_min_vals'):
+            # Calculate per-channel ranges
+            ranges = module._max_vals - module._min_vals
+            # Calculate per-channel scales (symmetric quantization)
+            max_abs = torch.max(module._max_vals.abs(), module._min_vals.abs())
+            bits = getattr(module, 'num_bits', 4)
+            qmax = (2 ** (bits - 1)) - 1  # e.g., 7 for 4-bit
+            act_scale = (max_abs / qmax).clamp(min=1e-8)
+            # Set the scales and zero points
+            module.act_scale.copy_(act_scale)
+            module.act_zero_point.zero_()  # Symmetric quantization
+            # Clean up temporary attributes
+            del module._min_vals, module._max_vals
+    # Re-enable activation quant after calibration
+    for m in toggled_modules:
+        m.enable_activation_quant = True
 
-        # output_scale = max(output_ranges) / 15
-        
-        # Set scales only for W4A4Linear layers
-        for module in model.modules():
-            if isinstance(module, W4A4Linear):
-                module.input_scale.fill_(input_scale)
-                module.input_zero_point.fill_(input_zero_point)
-                
-                # module.output_scale.fill_(output_scale)
-    
     # Remove hooks
     for handle in handles:
         handle.remove()
-    
     # Restore original training mode
     model.train(was_training)
-        
     print("Calibration complete!")
 
 
@@ -584,15 +585,12 @@ def main():
         
         try:
             quant_params = torch.load(quant_params_path, map_location=device)
-            print("FAT MONKEY")
-            print(quant_params)
-            print("BIG MONKEY BLOO BLOO")
-            print(len(quant_params))
+    # Debug prints removed
             # Apply parameters to QATW4A4Linear layers
             for name, module in model.named_modules():
                 print("type: --->   " + str(type(module)))
                 if isinstance(module, QATW4A4Linear):
-                    print("name: --->   " + name)
+                    # print("name: --->   " + name)
                     # print("SMALL MONKEY BLANGOOONJIII")
                     param_prefix = f"{name}."
                     

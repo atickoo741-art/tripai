@@ -114,8 +114,12 @@ class QATW4A4Linear(nn.Module):
         # Initialize per-channel smooth factors to 1.0
         self.smooth_factor = nn.Parameter(torch.ones(self.in_features, device=self.device))
 
+        # Freeze base weights/bias of the wrapped linear layer
         if hasattr(self.original_linear, 'weight'):
-            self.original_linear.weight.requires_grad_(True)
+            self.original_linear.weight.requires_grad_(False)
+        if hasattr(self.original_linear, 'bias') and self.original_linear.bias is not None:
+            self.original_linear.bias.requires_grad_(False)
+        # Train only QAT per-channel parameters
         self.activation_clip.requires_grad_(True)
         # self.raw_alpha.requires_grad_(True)
         self.smooth_factor.requires_grad_(True)
@@ -616,12 +620,13 @@ lora_config = LoraConfig(
 )
 
 # 4. Apply LoRA adapters to the quantized model
-# print("\n--- Applying LoRA Adapters to quantized model ---")
 peft_model = get_peft_model(model, lora_config)
-
+"""
+Ensure base model remains frozen by default. We will explicitly enable
+LoRA and QAT per-channel parameters later.
+"""
 for param in peft_model.base_model.parameters():
-    if hasattr(param, 'requires_grad'):
-        param.requires_grad = True
+    param.requires_grad = False
 # print("\n--- LoRA Adapters Applied ---") 
 # peft_model.print_trainable_parameters()
 apply_quantization_to_peft_model(peft_model)
@@ -638,25 +643,19 @@ apply_quantization_to_peft_model(peft_model)
 
 # 5. Configure Trainable Parameters
 # Ensure only LoRA adapters and PACT thresholds are trainable.
-print("\n--- Configuring Trainable Parameters (LoRA, PACT Clip_Val) ---")
+print("\n--- Configuring Trainable Parameters (LoRA, PACT clip, SmoothQuant) ---")
 for name, param in peft_model.named_parameters():
-    # LoRA parameters are automatically set to requires_grad=True by peft.
-    # We only need to ensure the PACT clip_val are trainable,
-    # and other base model parameters are frozen.
+    lname = name.lower()
+    is_lora = ("lora" in lname)
+    is_qat = ("activation_clip" in lname) or ("smooth_factor" in lname)
+    param.requires_grad = bool(is_lora or is_qat)
 
-    # Enable gradients for LoRA, PACT, and SmoothQuant parameters
-    if "activation_clip" in name or "smooth_factor" in name:
-        param.requires_grad = True
-    elif "lora" in name: # LoRA parameters
-        param.requires_grad = True # PEFT sets this, but explicit for clarity
-    else:
-        param.requires_grad = False
-
-# Verify trainable parameters
-print("Trainable parameters after configuration:")
-for name, param in peft_model.named_parameters():
-    if param.requires_grad:
-        print(f"- {name}")
+# Sanity checks: assert only intended params are trainable
+trainable = [n for n, p in peft_model.named_parameters() if p.requires_grad]
+unexpected = [n for n in trainable if ("lora" not in n.lower() and "activation_clip" not in n and "smooth_factor" not in n)]
+if unexpected:
+    raise RuntimeError(f"Unexpected trainable params found (should be only LoRA/activation_clip/smooth_factor): {unexpected[:8]}")
+print(f"Trainable parameter count: {len(trainable)}")
 
 # The final step will be setting up the training loop.
 

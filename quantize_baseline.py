@@ -11,39 +11,6 @@ from peft import PeftModel, PeftConfig
 from datasets import load_dataset, DatasetDict
 import copy
 from train_qat import QATW4A4Linear
-# ============================================
-# FakeQuantize with STE (Straight-Through Estimator)
-# ============================================
-# class FakeQuantize(torch.autograd.Function):
-#     @staticmethod
-#     def forward(ctx, x, scale, zero_point, qmin, qmax):
-#         # Quantize
-#         x_int = torch.round(x / scale + zero_point)
-#         x_quant = torch.clamp(x_int, qmin, qmax)
-#         # Dequantize
-#         x_dequant = (x_quant - zero_point) * scale
-#         return x_dequant
-
-#     @staticmethod
-#     def backward(ctx, grad_output):
-#         # Straight-Through Estimator (STE)
-#         return grad_output, None, None, None, None
-
-# ============================================
-# PACT (PArameterized Clipping acTivation) for activation quantization
-# ============================================
-# class PACT(torch.nn.Module):
-#     def __init__(self, init_val=6.0):
-#         super().__init__()
-#         self.alpha = torch.nn.Parameter(torch.tensor(init_val, dtype=torch.float32))
-#         self.relu = torch.nn.ReLU6()
-        
-#     def forward(self, x):
-#         return self.relu(x) - self.relu(x - self.alpha)
-
-# ============================================
-# Uniform W4A4 Linear (for base GPT-2 and baseline LoRA)
-# ============================================
 
 # Set random seeds for reproducibility
 def set_seed(seed=42):
@@ -73,6 +40,7 @@ class W4A4Linear(nn.Module):
     def __init__(self, original_linear, num_bits=4):
         super().__init__()
         self.num_bits = num_bits
+        self.device = original_linear.weight.device
         if original_linear.__class__.__name__ == 'Conv1D':
             self.in_features = original_linear.weight.shape[0]
             self.out_features = original_linear.nf
@@ -90,10 +58,26 @@ class W4A4Linear(nn.Module):
             self.register_parameter('bias', None)
         
         # Quantization parameters (will be set during calibration)
-        self.register_buffer('weight_scale', torch.tensor(1.0))
-        self.register_buffer('weight_zero_point', torch.tensor(0.0))
-        self.register_buffer('input_scale', torch.tensor(1.0))
-        self.register_buffer('input_zero_point', torch.tensor(0.0))
+        # self.register_buffer('weight_scale', torch.tensor(1.0))
+        # self.register_buffer('weight_zero_point', torch.tensor(0.0))
+        # self.register_buffer('input_scale', torch.tensor(1.0))
+        # self.register_buffer('input_zero_point', torch.tensor(0.0))
+
+        self.register_buffer('weight_scale', 
+            torch.ones(self.out_features, dtype=torch.float32, device=self.device)
+        )
+        self.register_buffer('weight_zero_point', 
+            torch.zeros(self.out_features, dtype=torch.float32, device=self.device)
+        )
+        # Per-channel for activations ([in_features])
+        self.register_buffer('act_scale', 
+            torch.ones(self.in_features, dtype=torch.float32, device=self.device)
+        )
+        self.register_buffer('act_zero_point', 
+            torch.zeros(self.in_features, dtype=torch.float32, device=self.device)
+        )
+
+
         # self.register_buffer('output_scale', torch.tensor(1.0))
         # self.register_buffer('output_zero_point', torch.tensor(0.0))
         
@@ -108,11 +92,13 @@ class W4A4Linear(nn.Module):
         qmin, qmax = -(2 ** (self.num_bits - 1)), (2 ** (self.num_bits - 1)) - 1  # -8 to 7
         
         max_val = torch.max(torch.abs(weight)).item()
-        if max_val == 0:
-            max_val = 1.0
+
+        weight_maxs = weight.max(dim=1, keepdim=True)[0]
         
-        scale = max_val / qmax
-        self.weight_scale.fill_(scale)
+
+        scale = weight_maxs / qmax
+        
+        self.weight_scale = scale.abs() + 1e-6  # Avoid zero scale
         self.weight_zero_point.fill_(0.0)  # Symmetric
     
     def fake_quantize_tensor(self, x, scale, zero_point, qmin, qmax):
@@ -224,8 +210,7 @@ def replace_layers_qat(model):
 
 def quantize_model(model, bits=4, quantization_method='uniform', depth=0, source_model=None):
     """
-    Apply quantization to the model.
-    
+    Apply quantization to the model.    
     Args:
         model: The model to quantize
         bits: Number of bits for quantization (default: 4)
@@ -445,7 +430,7 @@ def load_and_preprocess_wikitext2(model_name="gpt2"):
     
     return tokenized_dataset_dict, tokenizer
 
-def calibrate_quantization(model, calibration_data, tokenizer, num_samples=50, description=""): 
+def calibrate_quantization(model, calibration_data, tokenizer, num_samples=50, description=""):
     """Calibrate the quantization parameters using a separate calibration set"""
     print(f"\n--- Calibrating quantization parameters for {description} ---")
     
@@ -514,8 +499,8 @@ def calibrate_quantization(model, calibration_data, tokenizer, num_samples=50, d
     # Calculate and set scales only for W4A4Linear layers
     if input_ranges and output_ranges:
         input_scale = (max(input_ranges)-min(input_mins)) / 15 
-        input_zero_point = round(min(input_mins)/input_scale)
-        # input_zero_point = 0
+        # input_zero_point = round(min(input_mins)/input_scale)
+        input_zero_point = torch.zeros_like(torch.tensor(input_scale), device=original_device)
 
         # output_scale = max(output_ranges) / 15
         
@@ -535,7 +520,6 @@ def calibrate_quantization(model, calibration_data, tokenizer, num_samples=50, d
     model.train(was_training)
         
     print("Calibration complete!")
-
 
 
 
@@ -793,11 +777,11 @@ def main():
     print("\n" + "="*80)
     print("FINAL COMPARISON")
     print("="*80)
-    print(f"{'Model':<20} | {'Original PPL':>12} | {'Quantized PPL':>12} | {'Degradation':>12} | {'Quant Method':>15}")
+    print(f"{('Model'):<20} | {('Original PPL'):>12} | {('Quantized PPL'):>12} | {('Degradation'):>12} | {('Quant Method'):>15}")
     print("-" * 80)
-    print(f"{'Base GPT-2':<20} | {base_results['original_ppl']:12.2f} | {base_results['quantized_ppl']:12.2f} | {base_results['quantized_ppl'] - base_results['original_ppl']:12.2f} | {base_results['quantization_method']:>15}")
-    print(f"{'Baseline LoRA':<20} | {baseline_results['original_ppl']:12.2f} | {baseline_results['quantized_ppl']:12.2f} | {baseline_results['quantized_ppl'] - baseline_results['original_ppl']:12.2f} | {baseline_results['quantization_method']:>15}")
-    print(f"{'QAT LoRA':<20} | {qat_results['original_ppl']:12.2f} | {qat_results['quantized_ppl']:12.2f} | {qat_results['quantized_ppl'] - qat_results['original_ppl']:12.2f} | {qat_results['quantization_method']:>15}")
+    print(f"{('Base GPT-2'):<20} | {base_results['original_ppl']:12.2f} | {base_results['quantized_ppl']:12.2f} | {base_results['quantized_ppl'] - base_results['original_ppl']:12.2f} | {base_results['quantization_method']:>15}")
+    print(f"{('Baseline LoRA'):<20} | {baseline_results['original_ppl']:12.2f} | {baseline_results['quantized_ppl']:12.2f} | {baseline_results['quantized_ppl'] - baseline_results['original_ppl']:12.2f} | {baseline_results['quantization_method']:>15}")
+    print(f"{('QAT LoRA'):<20} | {qat_results['original_ppl']:12.2f} | {qat_results['quantized_ppl']:12.2f} | {qat_results['quantized_ppl'] - qat_results['original_ppl']:12.2f} | {qat_results['quantization_method']:>15}")
     print("="*80)
     # Save quantized model if needed (optional) 
     save_quantized = False  # Set to True if you want to save

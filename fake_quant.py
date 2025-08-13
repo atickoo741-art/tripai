@@ -3,7 +3,7 @@ from torch import nn
 from functools import partial
 import torch.nn.functional as F
 from transformers.models.gpt2.modeling_gpt2 import GPT2Block, Conv1D
-
+from peft.peft_model import PeftModel
 
 @torch.no_grad()
 def quantize_weight_per_channel_absmax(w, n_bits=4):
@@ -188,10 +188,19 @@ def quantize_peft_gpt2(peft_model):
             setattr(parent, attrs[-1], QATW4A4Linear(module))
     return model
 
-#test comment
+
 def quantize_model(model):
     from transformers.models.gpt2.modeling_gpt2 import GPT2Block
-    if isinstance(model, GPT2Block):
+
+    if isinstance(model, PeftModel):
+        base = model.base_model.model
+    else:
+        base = model
+
+    
+    if getattr(base.config, 'model_type', None) == 'gpt2':
        return quantize_peft_gpt2(model)
+    else:
+        raise ValueError(f"Unsupported model type: {base.config.model_type}")
     
 

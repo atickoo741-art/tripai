@@ -5,7 +5,7 @@ import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer, TrainingArguments, Trainer, DataCollatorForLanguageModeling
 from calibrations import calibrate_activation_clips, calibrate_smooth_factors
 from peft import LoraConfig, get_peft_model, TaskType
-from fake_quant import apply_quantization_to_peft_model, QATW4A4Linear
+from fake_quant import quantize_model, QATW4A4Linear
 from torch.utils.data import DataLoader
 from typing import List
 from utils import find_available_dir, SaveQuantParamsCallback, save_quantization_parameters
@@ -74,7 +74,8 @@ if __name__ == "__main__":
         param.requires_grad = False
     # print("\n--- LoRA Adapters Applied ---") 
     # peft_model.print_trainable_parameters()
-    apply_quantization_to_peft_model(peft_model)
+    quantize_model(peft_model)
+    
 
     # First apply quantization to the base model
     # print("\n--- Applying W4A4 quantization to base model ---")
@@ -231,13 +232,11 @@ if __name__ == "__main__":
     eval_results = trainer.evaluate()
     print(f"Perplexity: {torch.exp(torch.tensor(eval_results['eval_loss']))}")
 
-    # Create model directory if it doesn't exist
+
     os.makedirs(model_dir, exist_ok=True)
     
     # Save the model, tokenizer, and quantization parameters
     print(f"\n--- Saving W4A4 QAT LoRA model to {model_dir} ---")
-    
-    # Save quantization parameters
     
     # Save quantization parameters after training
     save_quantization_parameters(peft_model, model_dir)

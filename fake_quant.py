@@ -5,7 +5,42 @@ import torch.nn.functional as F
 from transformers.models.gpt2.modeling_gpt2 import GPT2Block, Conv1D
 from peft.peft_model import PeftModel
 
-@torch.no_grad()
+
+class ActSTEQuant(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, x, clip_vals, num_bits):
+        # Symmetric per-channel: scale = clip/qmax, zero_point = 0
+        qmin = -(1 << (num_bits - 1))
+        qmax = (1 << (num_bits - 1)) - 1
+        scale = (clip_vals / max(qmax, 1)).clamp(min=1e-8)
+        # Right-align broadcast to x rank
+        while scale.dim() < x.dim():
+            scale = scale.unsqueeze(-1)
+        x_q = torch.clamp(torch.round(x / scale), qmin, qmax)
+        x_dq = x_q * scale
+        return x_dq
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        # STE: gradients only to x
+        return grad_output, None, None
+
+class WeightSTEQuant(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, W, num_bits):
+        # Symmetric per-row(out) scale from row max (detached); zero_point = 0
+        qmin = -(1 << (num_bits - 1))
+        qmax = (1 << (num_bits - 1)) - 1
+        row_max = W.detach().abs().amax(dim=1, keepdim=True)
+        scale = (row_max / max(qmax, 1)).clamp(min=1e-8)
+        W_q = torch.clamp(torch.round(W / scale), qmin, qmax)
+        W_dq = W_q * scale
+        return W_dq
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        return grad_output, None
+
 def quantize_weight_per_channel_absmax(w, n_bits=4):
     # w: (out_features, in_features)
     scales = w.abs().max(dim=-1, keepdim=True)[0]
@@ -133,22 +168,21 @@ class QATW4A4Linear(nn.Module):
             
         # Apply per-channel scaling to input: x = x / s_j
         scaled_input = input / smooth_factor
-        
-        # Get merged weights and apply per-channel scaling: W = W * s_j
-        merged_weights = self._get_merged_weights()  # [out_features, in_features]
-        scaled_weights = merged_weights * self.smooth_factor.unsqueeze(0)  # [out_features, in_features]
-        
+        merged_weights = self._get_merged_weights()  
+        scaled_weights = merged_weights * self.smooth_factor.unsqueeze(0) 
+
         # PACT: per-channel clipping for activations
         clip_vals = self.constrained_clip_val  # [in_features]
-        # Reshape for broadcasting: [in_features] -> [1, 1, in_features] or [1, in_features]
-        
-        # Apply symmetric per-channel clipping to [-a, a]
         clipped_input = torch.clamp(scaled_input, -clip_vals, clip_vals)
         
 
-        quant_input = quantize_weight_per_channel_absmax(clipped_input, self.num_bits)
+        # quant_input = quantize_weight_per_channel_absmax(clipped_input, self.num_bits)
+        # quant_weight = quantize_weight_per_channel_absmax(scaled_weights, self.num_bits)
+        # quant_input = STEQuant.apply(clipped_input, self.num_bits)
+        # quant_weight = STEQuant.apply(scaled_weights, self.num_bits)
 
-        quant_weight = quantize_weight_per_channel_absmax(scaled_weights, self.num_bits)
+        quant_input = ActSTEQuant.apply(clipped_input, self.num_bits, self.constrained_clip_val)
+        quant_weight = WeightSTEQuant.apply(scaled_weights, self.num_bits)
 
         # If original layer is Conv1D (weights stored [in, out]), ensure quant_weight supplied to F.linear is [out, in]
             
@@ -188,7 +222,7 @@ def quantize_peft_gpt2(peft_model):
             setattr(parent, attrs[-1], QATW4A4Linear(module))
     return model
 
-
+# sorts models by model type and passes model on to respective model specific quantization function
 def quantize_model(model):
     from transformers.models.gpt2.modeling_gpt2 import GPT2Block
 
@@ -197,7 +231,7 @@ def quantize_model(model):
     else:
         base = model
 
-    
+
     if getattr(base.config, 'model_type', None) == 'gpt2':
        return quantize_peft_gpt2(model)
     else:

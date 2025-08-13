@@ -188,7 +188,7 @@ def quantize_peft_gpt2(peft_model):
             setattr(parent, attrs[-1], QATW4A4Linear(module))
     return model
 
-
+#test comment
 def quantize_model(model):
     from transformers.models.gpt2.modeling_gpt2 import GPT2Block
     if isinstance(model, GPT2Block):

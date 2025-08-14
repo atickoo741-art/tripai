@@ -4,6 +4,8 @@ from functools import partial
 import torch.nn.functional as F
 from transformers.models.gpt2.modeling_gpt2 import GPT2Block, Conv1D
 from peft.peft_model import PeftModel
+from transformers import AutoModelForCausalLM, AutoTokenizer
+import os
 
 
 class ActSTEQuant(torch.autograd.Function):
@@ -12,12 +14,20 @@ class ActSTEQuant(torch.autograd.Function):
         # Symmetric per-channel: scale = clip/qmax, zero_point = 0
         qmin = -(1 << (num_bits - 1))
         qmax = (1 << (num_bits - 1)) - 1
-        scale = (clip_vals / max(qmax, 1)).clamp(min=1e-8)
+        
+        # Ensure qmax is a float if clip_vals is float to avoid type errors in division
+        if isinstance(qmax, int):
+            qmax = float(qmax)
+
+        scale = (clip_vals / qmax).clamp(min=1e-8)
+
         # Right-align broadcast to x rank
-        while scale.dim() < x.dim():
-            scale = scale.unsqueeze(-1)
-        x_q = torch.clamp(torch.round(x / scale), qmin, qmax)
-        x_dq = x_q * scale
+        target_shape = [1] * len(x.shape)
+        target_shape[-1] = scale.shape[-1] 
+        broadcastable_scale = scale.view(target_shape)
+
+        x_q = torch.clamp(torch.round(x / broadcastable_scale), qmin, qmax)
+        x_dq = x_q * broadcastable_scale
         return x_dq
 
     @staticmethod
@@ -41,13 +51,6 @@ class WeightSTEQuant(torch.autograd.Function):
     def backward(ctx, grad_output):
         return grad_output, None
 
-def quantize_weight_per_channel_absmax(w, n_bits=4):
-    # w: (out_features, in_features)
-    scales = w.abs().max(dim=-1, keepdim=True)[0]
-    q_max = 2 ** (n_bits - 1) - 1
-    scales.clamp_(min=1e-5).div_(q_max)
-    w.div_(scales).round_().mul_(scales)
-    return w
 
 class QATW4A4Linear(nn.Module):
     def __init__(self, original_linear_layer, num_bits=4, init_clip_val=2.0):
@@ -181,7 +184,7 @@ class QATW4A4Linear(nn.Module):
         # quant_input = STEQuant.apply(clipped_input, self.num_bits)
         # quant_weight = STEQuant.apply(scaled_weights, self.num_bits)
 
-        quant_input = ActSTEQuant.apply(clipped_input, self.num_bits, self.constrained_clip_val)
+        quant_input = ActSTEQuant.apply(clipped_input, self.constrained_clip_val, self.num_bits)
         quant_weight = WeightSTEQuant.apply(scaled_weights, self.num_bits)
 
         # If original layer is Conv1D (weights stored [in, out]), ensure quant_weight supplied to F.linear is [out, in]
@@ -202,25 +205,30 @@ class QATW4A4Linear(nn.Module):
             print(f"lora_B grad: {self.original_linear.lora_B.default.weight.grad is not None}")
 
 
-def quantize_peft_gpt2(peft_model):
-    "apply QATW4A4Linear to all nn.Linear and Conv1D layers in a PEFT GPT-2 model"
-    model = peft_model.base_model.model
 
-    for name, module in model.named_modules():
+
+
+
+def quantize_peft_gpt2(peft_model):
+    """Apply QATW4A4Linear to all linear layers within the peft_model's base_model."""
+    base_model_to_quantize = peft_model.base_model.model
+
+    for name, module in base_model_to_quantize.named_modules():
         if isinstance(module, (nn.Linear, Conv1D)):
-            # Skip if already quantized
-            if hasattr(module, 'original_linear'):
-                continue
-                
-            # Get parent module and attribute name
-            parent = model
+            # This check is crucial to ensure we don't re-wrap if somehow already done
+            if hasattr(module, 'original_linear'): # This is how your QATW4A4Linear signals it's a wrapper
+                continue # Skip if it's already your custom QAT module
+
+            print(f"Applying quantization to {name}")
+
+            parent = base_model_to_quantize
             attrs = name.split('.')
             for attr in attrs[:-1]:
                 parent = getattr(parent, attr)
             
-            # Replace with quantized version
+            # Replace the original (now LoRA-enabled) linear layer with your QATW4A4Linear wrapper
             setattr(parent, attrs[-1], QATW4A4Linear(module))
-    return model
+
 
 # sorts models by model type and passes model on to respective model specific quantization function
 def quantize_model(model):
@@ -237,4 +245,67 @@ def quantize_model(model):
     else:
         raise ValueError(f"Unsupported model type: {base.config.model_type}")
     
+
+
+def _find_quant_params_path(checkpoint_dir: str) -> str | None:
+    cand = os.path.join(checkpoint_dir, "quantization_params.pth")
+    if os.path.isfile(cand):
+        return cand
+    # Search subdirectories (e.g., checkpoint-XXXX)
+    if os.path.isdir(checkpoint_dir):
+        subdirs = [os.path.join(checkpoint_dir, d) for d in os.listdir(checkpoint_dir) if os.path.isdir(os.path.join(checkpoint_dir, d))]
+        subdirs.sort()
+        for sd in reversed(subdirs):
+            f = os.path.join(sd, "quantization_params.pth")
+            if os.path.isfile(f):
+                return f
+    return None
+
+
+def load_peqat_model(adapter_dir: str, base_model_name: str = "gpt2", device: torch.device | None = None):
+    """
+    Load a base HF model and PEFT LoRA adapters from adapter_dir, optionally merge them,
+    apply QATW4A4Linear wrappers to GPT-2 linear layers, and load saved quantization
+    parameters (activation_clip, smooth_factor) from quantization_params.pth.
+
+    Returns: (model, tokenizer)
+    """
+    if device is None:
+        device = torch.device('cuda' if torch.cuda.is_available() else ('mps' if torch.backends.mps.is_available() else 'cpu'))
+
+    # Load base and adapters
+    tokenizer = AutoTokenizer.from_pretrained(base_model_name)
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+    base = AutoModelForCausalLM.from_pretrained(base_model_name, torch_dtype=torch.float32, device_map=None).to(device)
+    peft_model = PeftModel.from_pretrained(base, adapter_dir, torch_dtype=torch.float32).to(device)
+
+    # Keep LoRA structure; QATW4A4Linear will merge at forward
+    # Replace GPT-2 linears within the PEFT base model
+    quantize_model(peft_model)
+
+    # Load quant params
+    qp_path = _find_quant_params_path(adapter_dir)
+    if qp_path and os.path.isfile(qp_path):
+        quant_params = torch.load(qp_path, map_location=device)
+        with torch.no_grad():
+            for name, module in peft_model.named_modules():
+                if isinstance(module, QATW4A4Linear):
+                    # Keys may have been saved with 'base_model.model.' prefix
+                    prefixes = [f"{name}.", f"base_model.model.{name}."]
+                    for param_name in ["activation_clip", "smooth_factor"]:
+                        loaded = None
+                        for pref in prefixes:
+                            key = pref + param_name
+                            if key in quant_params:
+                                loaded = quant_params[key].to(device=device, dtype=module.activation_clip.dtype)
+                                break
+                        if loaded is not None:
+                            getattr(module, param_name).data.copy_(loaded.view_as(getattr(module, param_name)))
+    else:
+        # No saved params; leave defaults
+        pass
+
+    peft_model.eval()
+    return peft_model, tokenizer
 

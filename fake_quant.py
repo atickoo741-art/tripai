@@ -115,13 +115,13 @@ class QATW4A4Linear(nn.Module):
 
     @property
     def weight(self):
-        """Return the merged weights for PEFT compatibility"""
-        return self._get_merged_weights()
+        # return self._get_merged_weights()
+        return self.original_linear.weight
 
-    @weight.setter  
-    def weight(self, value):
-        """Set the original linear weight for PEFT compatibility"""
-        self.original_linear.weight = nn.Parameter(value.detach().clone())
+    # @weight.setter  
+    # def weight(self, value):
+    #     """Set the original linear weight for PEFT compatibility"""
+    #     self.original_linear.weight = nn.Parameter(value.detach().clone())
         
 
     def _get_merged_weights(self):
@@ -173,7 +173,11 @@ class QATW4A4Linear(nn.Module):
             
         # Apply per-channel scaling to input: x = x / s_j
         scaled_input = input / smooth_factor
-        merged_weights = self._get_merged_weights()  
+        # merged_weights = self._get_merged_weights()
+
+        merged_weights = self.weight.T if not self.weight_is_out_in else self.weight
+        # print(self.weight)
+
         scaled_weights = merged_weights * self.smooth_factor.unsqueeze(0) 
 
         # PACT: per-channel clipping for activations

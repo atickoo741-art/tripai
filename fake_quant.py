@@ -9,7 +9,7 @@ import os
 # from utils import Evaluation
 from datasets import load_dataset
 # from ppl_eval import Evaluation
-
+import tqdm
 class ActSTEQuant(torch.autograd.Function):
     @staticmethod
     def forward(ctx, x, clip_vals, num_bits):
@@ -115,8 +115,8 @@ class QATW4A4Linear(nn.Module):
 
     @property
     def weight(self):
-        # return self._get_merged_weights()
-        return self.original_linear.weight
+        return self._get_merged_weights()
+        # return self.original_linear.weight
 
     # @weight.setter  
     # def weight(self, value):
@@ -173,16 +173,21 @@ class QATW4A4Linear(nn.Module):
             
         # Apply per-channel scaling to input: x = x / s_j
         scaled_input = input / smooth_factor
-        # merged_weights = self._get_merged_weights()
 
-        merged_weights = self.weight.T if not self.weight_is_out_in else self.weight
+
+        # merged_weights = self.weight.T if not self.weight_is_out_in else self.weight
+        merged_weights = self.weight
+        # merged_weights = torch.ones_like(self.weight.T if not self.weight_is_out_in else self.weight)
         # print(self.weight)
 
-        scaled_weights = merged_weights * self.smooth_factor.unsqueeze(0) 
+        scaled_weights = merged_weights.T * self.smooth_factor.unsqueeze(1)
 
+        # print(self.smooth_factor)
+        
         # PACT: per-channel clipping for activations
         clip_vals = self.constrained_clip_val  # [in_features]
         clipped_input = torch.clamp(scaled_input, -clip_vals, clip_vals)
+        
         
 
         # quant_input = quantize_weight_per_channel_absmax(clipped_input, self.num_bits)
@@ -191,7 +196,7 @@ class QATW4A4Linear(nn.Module):
         # quant_weight = STEQuant.apply(scaled_weights, self.num_bits)
 
         quant_input = ActSTEQuant.apply(clipped_input, self.constrained_clip_val, self.num_bits)
-        quant_weight = WeightSTEQuant.apply(scaled_weights, self.num_bits)
+        quant_weight = WeightSTEQuant.apply(scaled_weights.T, self.num_bits)
 
         # If original layer is Conv1D (weights stored [in, out]), ensure quant_weight supplied to F.linear is [out, in]
             
@@ -229,7 +234,9 @@ def quantize_peft_gpt2(peft_model):
 
             parent = base_model_to_quantize
             attrs = name.split('.')
+            # print(attrs)
             for attr in attrs[:-1]:
+                # print("BIG MONKEY BANANA", attr)
                 parent = getattr(parent, attr)
             
             # Replace the original (now LoRA-enabled) linear layer with your QATW4A4Linear wrapper
@@ -291,15 +298,19 @@ def load_peqat_model(adapter_dir: str, base_model_name: str = "gpt2", device: to
     
     dataset = load_dataset("wikitext", "wikitext-2-raw-v1", split="test")
     evaluation = Evaluation(tokenizer, dataset, device)
-    evaluation.evaluate(peft_model, seq_len=1024, n_samples=40)
+    # evaluation.evaluate(peft_model, seq_len=1024, n_samples=40)
+    evaluation.evaluate(peft_model)
     
     # Load quant params
     qp_path = _find_quant_params_path(adapter_dir)
     if qp_path and os.path.isfile(qp_path):
         quant_params = torch.load(qp_path, map_location=device)
+        # print(quant_params)
+
         with torch.no_grad():
             for name, module in peft_model.named_modules():
                 if isinstance(module, QATW4A4Linear):
+                    
                     # Keys may have been saved with 'base_model.model.' prefix
                     prefixes = [f"{name}.", f"base_model.model.{name}."]
                     for param_name in ["activation_clip", "smooth_factor"]:
@@ -310,6 +321,7 @@ def load_peqat_model(adapter_dir: str, base_model_name: str = "gpt2", device: to
                                 loaded = quant_params[key].to(device=device, dtype=module.activation_clip.dtype)
                                 break
                         if loaded is not None:
+                            print(f"Loading quant params for {name}")
                             getattr(module, param_name).data.copy_(loaded.view_as(getattr(module, param_name)))
     else:
         # No saved params; leave defaults
@@ -385,24 +397,27 @@ class Evaluation:
         self.dataset = dataset
         self.tokenizer = tokenizer
         self.device = device
-    
-    def evaluate(self, model, seq_len=1024, n_samples=None):
-        input_ids = self.tokenizer("\n\n".join(self.dataset["text"]), return_tensors="pt").input_ids.to(self.device)
-        n_samples = n_samples if n_samples is not None else (input_ids.size(1) // seq_len)
+        self.num_samples = num_samples
 
+
+        self.dataset = tokenizer(
+            "\n\n".join(dataset["text"]), return_tensors="pt"
+        ).input_ids.to(device)
+    def evaluate(self, model):
         model.eval()
-
         nlls = []
-        with torch.no_grad():
-            for i in range(n_samples):
-                start = i * seq_len
-                end = (i + 1) * seq_len
-                batch = input_ids[:, start:end]
-                logits = model(batch).logits
-                shift_logits = logits[:, :-1, :].contiguous().float()
-                shift_labels = batch[:, 1:]
-                loss = nn.CrossEntropyLoss()(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
-                nlls.append(loss.float() * (seq_len - 1))
-        denom = n_samples * (seq_len - 1)
-        ppl = torch.exp(torch.stack(nlls).sum() / denom)
-        print(f"Perplexity: {ppl.item():.2f}")
+        num_samples = self.num_samples if self.num_samples else self.dataset.size(1) // 2048
+        for i in tqdm.tqdm(range(num_samples), desc="Evaluating..."):
+            batch = self.dataset[:, (i * 2048) : ((i + 1) * 2048)].to(model.device)
+            with torch.no_grad():
+                lm_logits = model(batch).logits
+            shift_logits = lm_logits[:, :-1, :].contiguous().float()
+            shift_labels = self.dataset[:, (i * 2048) : ((i + 1) * 2048)][:, 1:]
+            loss_fct = nn.CrossEntropyLoss()
+            loss = loss_fct(
+                shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1)
+            )
+            neg_log_likelihood = loss.float() * 2048
+            nlls.append(neg_log_likelihood)
+
+        print(torch.exp(torch.stack(nlls).sum() / (num_samples * 2048)))

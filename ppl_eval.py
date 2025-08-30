@@ -31,7 +31,8 @@ def main():
 
     dataset = load_dataset("wikitext", "wikitext-2-raw-v1", split="test")
     eval_obj = Evaluation(tokenizer, dataset, device, num_samples=args.n_samples)
-    eval_obj.evaluate(model, seq_len=args.seq_len, n_samples=args.n_samples)
+    # eval_obj.evaluate(model, seq_len=args.seq_len, n_samples=args.n_samples)
+    eval_obj.evaluate(model)
 
 
 if __name__ == "__main__":

@@ -14,6 +14,8 @@ from safetensors.torch import load_file
 import json
 from peft import LoraConfig, get_peft_model
 from safetensors import safe_open
+from transformers import DataCollatorForLanguageModeling
+import itertools
 
 class ActSTEQuant(torch.autograd.Function):
     @staticmethod
@@ -120,8 +122,8 @@ class QATW4A4Linear(nn.Module):
 
     @property
     def weight(self):
-        return self._get_merged_weights()
-        # return self.original_linear.weight
+        # return self._get_merged_weights()
+        return self.original_linear.weight if self.weight_is_out_in else self.original_linear.weight.T
 
     # @weight.setter  
     # def weight(self, value):
@@ -184,8 +186,7 @@ class QATW4A4Linear(nn.Module):
         merged_weights = self.weight
         # merged_weights = torch.ones_like(self.weight.T if not self.weight_is_out_in else self.weight)
         # print(self.weight)
-
-        scaled_weights = merged_weights.T * self.smooth_factor.unsqueeze(1)
+        scaled_weights = merged_weights * self.smooth_factor.unsqueeze(0)
 
         # print(self.smooth_factor)
         
@@ -201,7 +202,7 @@ class QATW4A4Linear(nn.Module):
         # quant_weight = STEQuant.apply(scaled_weights, self.num_bits)
 
         quant_input = ActSTEQuant.apply(clipped_input, self.constrained_clip_val, self.num_bits)
-        quant_weight = WeightSTEQuant.apply(scaled_weights.T, self.num_bits)
+        quant_weight = WeightSTEQuant.apply(scaled_weights, self.num_bits)
 
         # If original layer is Conv1D (weights stored [in, out]), ensure quant_weight supplied to F.linear is [out, in]
             
@@ -467,31 +468,82 @@ def save_quantization_parameters(model, save_dir):
         torch.save(quant_params, os.path.join(save_dir, "quantization_params.pth"))
         print(f"Saved {len(quant_params)} quantization parameters")
 class Evaluation:
-    def __init__(self, tokenizer, dataset, device, num_samples = 40):
-        self.dataset = dataset
+    def __init__(self, tokenizer, dataset, device, num_samples=None, block_size=1024):
         self.tokenizer = tokenizer
         self.device = device
-        self.num_samples = num_samples
+        self.block_size = block_size
+        self.num_samples = num_samples # Max number of samples (batches) to evaluate
 
+        # Tokenize and group texts
+        tokenized_datasets = dataset.map(
+            self._tokenize_function,
+            batched=True,
+            num_proc=4, # Use multiple processes for faster tokenization
+            remove_columns=["text"],
+        )
 
-        self.dataset = tokenizer(
-            "\n\n".join(dataset["text"]), return_tensors="pt"
-        ).input_ids.to(device)
+        # Group texts into chunks of block_size
+        self.lm_dataset = tokenized_datasets.map(
+            self._group_texts,
+            batched=True,
+            batch_size=1000,
+            num_proc=4,
+        )
+        # Set format for PyTorch
+        self.lm_dataset.set_format(type="torch", columns=["input_ids", "labels"])
+
+        # Data collator for language modeling will handle padding
+        self.data_collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False)
+
+    def _tokenize_function(self, examples):
+        return self.tokenizer(examples["text"])
+
+    def _group_texts(self, examples):
+        # Concatenate all texts.
+        concatenated_examples = {k: sum(examples[k], []) for k in examples.keys()}
+        total_length = len(concatenated_examples[list(examples.keys())[0]])
+        # We drop the small remainder, we could add padding if the model supported it instead of this drop, you can
+        # customize this part to your needs.
+        total_length = (total_length // self.block_size) * self.block_size
+        # Split by chunks of max_len.
+        result = {
+            k: [t[i : i + self.block_size] for i in range(0, total_length, self.block_size)]
+            for k, t in concatenated_examples.items()
+        }
+        result["labels"] = result["input_ids"].copy()
+        return result
+
     def evaluate(self, model):
         model.eval()
-        nlls = []
-        num_samples = self.num_samples if self.num_samples else self.dataset.size(1) // 2048
-        for i in tqdm.tqdm(range(num_samples), desc="Evaluating..."):
-            batch = self.dataset[:, (i * 2048) : ((i + 1) * 2048)].to(model.device)
-            with torch.no_grad():
-                lm_logits = model(batch).logits
-            shift_logits = lm_logits[:, :-1, :].contiguous().float()
-            shift_labels = self.dataset[:, (i * 2048) : ((i + 1) * 2048)][:, 1:]
-            loss_fct = nn.CrossEntropyLoss()
-            loss = loss_fct(
-                shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1)
-            )
-            neg_log_likelihood = loss.float() * 2048
-            nlls.append(neg_log_likelihood)
+        
+        total_nll = 0.0
+        total_eval_tokens = 0
+        
+        eval_dataloader = torch.utils.data.DataLoader(
+            self.lm_dataset, batch_size=1, collate_fn=self.data_collator
+        ) # Batch size 1 for simplicity during perplexity eval
 
-        print(torch.exp(torch.stack(nlls).sum() / (num_samples * 2048)))
+        # Limit evaluation to num_samples if specified
+        if self.num_samples is not None:
+            eval_dataloader = itertools.islice(eval_dataloader, self.num_samples)
+
+        for batch in tqdm.tqdm(eval_dataloader, desc="Evaluating..."):
+            input_ids = batch["input_ids"].to(self.device)
+            labels = batch["labels"].to(self.device)
+
+            with torch.no_grad():
+                outputs = model(input_ids=input_ids, labels=labels)
+                loss = outputs.loss
+                
+                # Calculate number of actual (non-padded) tokens in the batch
+                num_actual_tokens = (labels != -100).sum().item()
+                total_nll += loss.item() * num_actual_tokens
+                total_eval_tokens += num_actual_tokens
+
+        if total_eval_tokens == 0:
+            print("Perplexity: inf (No tokens evaluated)")
+            return float('inf')
+
+        avg_nll = total_nll / total_eval_tokens
+        perplexity = torch.exp(torch.tensor(avg_nll))
+        print(f"Perplexity: {perplexity.item()}")

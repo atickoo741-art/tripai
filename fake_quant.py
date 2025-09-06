@@ -10,6 +10,11 @@ import os
 from datasets import load_dataset
 # from ppl_eval import Evaluation
 import tqdm
+from safetensors.torch import load_file
+import json
+from peft import LoraConfig, get_peft_model
+from safetensors import safe_open
+
 class ActSTEQuant(torch.autograd.Function):
     @staticmethod
     def forward(ctx, x, clip_vals, num_bits):
@@ -275,7 +280,7 @@ def _find_quant_params_path(checkpoint_dir: str) -> str | None:
     return None
 
 
-def load_peqat_model(adapter_dir: str, base_model_name: str = "gpt2", device: torch.device | None = None):
+def deprecated_load_peqat_model(adapter_dir: str, base_model_name: str = "gpt2", device: torch.device | None = None):
     """
     Load a base HF model and PEFT LoRA adapters from adapter_dir, optionally merge them,
     apply QATW4A4Linear wrappers to GPT-2 linear layers, and load saved quantization
@@ -329,6 +334,75 @@ def load_peqat_model(adapter_dir: str, base_model_name: str = "gpt2", device: to
 
     peft_model.eval()
     return peft_model, tokenizer
+
+def load_peqat_model(adapter_dir: str, base_model_name: str = "gpt2", device: torch.device | None = None):
+    if device is None:
+        device = torch.device('cuda' if torch.cuda.is_available() else ('mps' if torch.backends.mps.is_available() else 'cpu'))
+
+    print(f"Loading base model {base_model_name} and PEFT adapters from {adapter_dir}")
+    tokenizer = AutoTokenizer.from_pretrained(base_model_name)
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+    base_model = AutoModelForCausalLM.from_pretrained(base_model_name, torch_dtype=torch.float32, device_map=None).to(device)
+
+    # 1. Load LoraConfig from adapter_config.json
+    adapter_config_path = os.path.join(adapter_dir, "adapter_config.json")
+    if not os.path.isfile(adapter_config_path):
+        raise FileNotFoundError(f"adapter_config.json not found in {adapter_dir}")
+    
+    with open(adapter_config_path, 'r') as f:
+        lora_config_dict = json.load(f)
+    
+    # Create LoraConfig object
+    lora_config = LoraConfig(**lora_config_dict)
+
+    # 2. Create PeftModel structure (this injects LoRA layers into the base_model)
+    peft_model = get_peft_model(base_model, lora_config)
+
+    # 3. Apply QATW4A4Linear wrappers to the LoRA-enabled model
+    quantize_model(peft_model)
+
+    # 4. Manually load weights from adapter_model.safetensors into the peft_model
+    lora_tensors_path = os.path.join(adapter_dir, "adapter_model.safetensors")
+    if os.path.isfile(lora_tensors_path):
+        print(f"Manually loading LoRA and QAT parameters from {lora_tensors_path}")
+        with safe_open(lora_tensors_path, framework="pt") as f:
+            lora_tensors = {k: f.get_tensor(k) for k in f.keys()}
+            print(f.keys())
+        peft_model.load_state_dict(lora_tensors, strict=False) # Use strict=False for flexibility
+    else:
+        print(f"Warning: adapter_model.safetensors not found in {adapter_dir}. LoRA weights will not be loaded.")
+
+    # 5. Load and apply additional quantization parameters from quantization_params.pth
+    # This ensures all QAT parameters are correctly loaded, as adapter_model.safetensors might not contain all
+    # of them or they might be nested differently. (Matches previous deprecated implementation behavior)
+    qp_path = _find_quant_params_path(adapter_dir)
+    if qp_path and os.path.isfile(qp_path):
+        print(f"Loading quantization parameters from {qp_path}")
+        quant_params = torch.load(qp_path, map_location=device)
+
+        with torch.no_grad():
+            for name, module in peft_model.named_modules():
+                if isinstance(module, QATW4A4Linear):
+                    # Keys may have been saved with 'base_model.model.' prefix in quantization_params.pth
+                    prefixes = [f"{name}.", f"base_model.model.{name}."]
+                    for param_name in ["activation_clip", "smooth_factor"]:
+                        loaded = None
+                        for pref in prefixes:
+                            key = pref + param_name
+                            if key in quant_params:
+                                loaded = quant_params[key].to(device=device, dtype=getattr(module, param_name).dtype)
+                                break
+                        if loaded is not None:
+                            print(f"Setting {param_name} for {name}")
+                            getattr(module, param_name).data.copy_(loaded.view_as(getattr(module, param_name)))
+    else:
+        print("No quantization_params.pth found, using default initialized QAT values.")
+
+    # 6. Set model to evaluation mode
+    peft_model.eval()
+    return peft_model, tokenizer
+
 
 import os
 from transformers import TrainerCallback

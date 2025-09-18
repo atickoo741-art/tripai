@@ -132,36 +132,30 @@ class QATW4A4Linear(nn.Module):
         
 
     def _get_merged_weights(self):
-        """Merge base weights with LoRA deltas if they exist."""
-        # Cache during eval mode
+        """Merge base weights with LoRA, then this merged result gets quantized in forward()."""
         if not self.training and hasattr(self, '_cached_merged_weights'):
             return self._cached_merged_weights
             
         base_weight = self.original_linear.weight
-        # Normalize to [out_features, in_features] for internal computation
         if not self.weight_is_out_in:
             base_weight = base_weight.t()
-        
-        # Check if this is a LoRA layer by checking if the original linear has LoRA attributes
-        if hasattr(self.original_linear, 'lora_A') and hasattr(self.original_linear, 'lora_B'):
-            lora_A = self.original_linear.lora_A.default.weight
-            lora_B = self.original_linear.lora_B.default.weight
-            lora_scaling = self.original_linear.scaling['default']
+
+        # Access LoRA from parent module if it exists
+        if hasattr(self, 'parent_lora_module'):
+            lora_module = self.parent_lora_module
+            # Get LoRA weights and merge
+            lora_A = lora_module.lora_A['default'].weight  
+            lora_B = lora_module.lora_B['default'].weight
+            scaling = lora_module.scaling['default']
             
-            lora_delta = lora_B @ lora_A * lora_scaling
+            # Compute LoRA contribution
+            lora_delta = (lora_B @ lora_A) * scaling
             
-            if lora_delta.shape != base_weight.shape:
-                delta = torch.zeros_like(base_weight)
-                delta[:lora_delta.shape[0], :lora_delta.shape[1]] = lora_delta
-                lora_delta = delta
-                
+            # MERGE base + LoRA (this merged result will be quantized in forward())
             merged = base_weight + lora_delta
         else:
-            # For LoRA layers that were converted to QATW4A4Linear, the weight is already the LoRA weight
-            # The original_linear.weight in this case contains the actual trainable LoRA weight, not base weight
             merged = base_weight
-        
-        # Cache for eval mode
+
         if not self.training:
             self._cached_merged_weights = merged
             
@@ -181,7 +175,7 @@ class QATW4A4Linear(nn.Module):
         # Apply per-channel scaling to input: x = x / s_j
         scaled_input = input / smooth_factor
 
-        merged_weights = self.weight
+        merged_weights = self._get_merged_weights()
         scaled_weights = merged_weights.T * self.smooth_factor.unsqueeze(0)
 
 
@@ -189,7 +183,7 @@ class QATW4A4Linear(nn.Module):
         clipped_input = torch.clamp(scaled_input, -clip_vals, clip_vals)
         
 
-        quant_input = ActSTEQuant.apply(clipped_input, self.constrained_clip_val, self.num_bits)
+        quant_input = ActSTEQuant.apply(clipped_input, clip_vals, self.num_bits)
         quant_weight = WeightSTEQuant.apply(scaled_weights, self.num_bits)
 
         # If original layer is Conv1D (weights stored [in, out]), ensure quant_weight supplied to F.linear is [out, in]
@@ -238,10 +232,8 @@ class NaiveW4A4Linear(nn.Module):
         # Initialize per-channel smooth factors to 1.0
 
         # Freeze base weights/bias of the wrapped linear layer
-        if hasattr(self.original_linear, 'weight'):
-            self.original_linear.weight.requires_grad_(False)
-        if hasattr(self.original_linear, 'bias') and self.original_linear.bias is not None:
-            self.original_linear.bias.requires_grad_(False)
+        self.activation_clip.requires_grad_(True)
+        self.smooth_factor.requires_grad_(True)
 
         W_base = self.original_linear.weight
         W_cpu = W_base.detach().to(torch.float32).cpu()
@@ -283,24 +275,22 @@ def naive_quantize_model(model):
             setattr(parent, attrs[-1], NaiveW4A4Linear(module))
 
 def quantize_peft_gpt2(peft_model):
-    """Apply QATW4A4Linear to all linear layers within the peft_model's base_model."""
+    """Apply QATW4A4Linear to base layers, allowing access to LoRA for merging."""
     base_model_to_quantize = peft_model.base_model.model
-
+    
     for name, module in base_model_to_quantize.named_modules():
         if hasattr(module, 'lora_A') and hasattr(module, 'lora_B'):
-            if hasattr(module, 'original_linear'):
-                continue
-                
-            print(f"Applying quantization to {name}")
-            
-            parent = base_model_to_quantize
-            attrs = name.split('.')
-            for attr in attrs[:-1]:
-                parent = getattr(parent, attr)
-            
-            setattr(parent, attrs[-1], QATW4A4Linear(module))
-            # print(module.lora_A.default.weight)
-            # print(module.lora_B.default.weight)
+            # This is a LoRA-adapted layer
+            if hasattr(module, 'base_layer'):
+                base_layer = module.base_layer
+                if not isinstance(base_layer, QATW4A4Linear):
+                    print(f"Wrapping base layer for quantization at {name}")
+                    # Wrap the base layer with quantization
+                    wrapped_base = QATW4A4Linear(base_layer)
+                    # Give it reference to parent LoRA for merging
+                    wrapped_base.parent_lora_module = module  
+                    # Replace base_layer with wrapped version
+                    module.base_layer = wrapped_base
 
 
 # sorts models by model type and passes model on to respective model specific quantization function

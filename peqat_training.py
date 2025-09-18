@@ -8,7 +8,7 @@ from peft import LoraConfig, get_peft_model, TaskType
 from fake_quant import quantize_model, QATW4A4Linear
 from torch.utils.data import DataLoader
 from typing import List
-from utils import find_available_dir, SaveQuantParamsCallback, save_quantization_parameters
+from fake_quant import find_available_dir, SaveQuantParamsCallback, save_quantization_parameters
 
 
 
@@ -65,29 +65,22 @@ if __name__ == "__main__":
     )
 
     # 4. Apply LoRA adapters to the quantized model
+    # After creating peft_model but BEFORE quantization
     peft_model = get_peft_model(model, lora_config)
-    """
-    Ensure base model remains frozen by default. We will explicitly enable
-    LoRA and QAT per-channel parameters later.
-    """
+
+    # Freeze base model (this is already done by PEFT)
     for param in peft_model.base_model.parameters():
         param.requires_grad = False
-    # print("\n--- LoRA Adapters Applied ---") 
-    # peft_model.print_trainable_parameters()
+
+    # Enable LoRA parameters (PEFT does this by default, but let's be explicit)
+    for name, param in peft_model.named_parameters():
+        if 'lora' in name.lower():
+            param.requires_grad = True
+
+    # NOW apply quantization wrappers
     quantize_model(peft_model)
-    
 
-    # First apply quantization to the base model
-    # print("\n--- Applying W4A4 quantization to base model ---")
-
-    # apply_quantization_to_peft_model(peft_model)
-    # print("\n--- W4A4 Quantization Applied to LoRA-enabled model ---")
-
-
-
-    # 5. Configure Trainable Parameters
-    # Ensure only LoRA adapters and PACT thresholds are trainable.
-    print("\n--- Configuring Trainable Parameters (LoRA, PACT clip, SmoothQuant) ---")
+    # After quantization, configure QAT parameters to be trainable
     for name, param in peft_model.named_parameters():
         lname = name.lower()
         is_lora = ("lora" in lname)

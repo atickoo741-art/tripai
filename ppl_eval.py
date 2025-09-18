@@ -4,9 +4,8 @@ from transformers import AutoTokenizer, AutoModelForCausalLM
 from peft import PeftModel
 import os
 import argparse
-from fake_quant import load_peqat_model, Evaluation
+from fake_quant import load_peqat_model, Evaluation, naive_quantize_model
 from datasets import load_dataset
-
 
 
 
@@ -28,6 +27,12 @@ def main():
     is_peft = os.path.isfile(os.path.join(args.model_path, "adapter_config.json"))
 
     model, tokenizer = load_peqat_model(args.model_path, args.base_model_name, device)
+
+    # model = AutoModelForCausalLM.from_pretrained(args.model_path, torch_dtype=torch.float32, device_map=None).to(device)
+    # tokenizer = AutoTokenizer.from_pretrained(args.model_path)
+
+    # naive_quantize_model(model)
+
 
     dataset = load_dataset("wikitext", "wikitext-2-raw-v1", split="test")
     eval_obj = Evaluation(tokenizer, dataset, device, num_samples=args.n_samples, block_size=args.seq_len)

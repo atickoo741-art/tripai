@@ -181,25 +181,13 @@ class QATW4A4Linear(nn.Module):
         # Apply per-channel scaling to input: x = x / s_j
         scaled_input = input / smooth_factor
 
-
-        # merged_weights = self.weight.T if not self.weight_is_out_in else self.weight
         merged_weights = self.weight
-        # merged_weights = torch.ones_like(self.weight.T if not self.weight_is_out_in else self.weight)
-        # print(self.weight)
-        scaled_weights = merged_weights * self.smooth_factor.unsqueeze(0)
+        scaled_weights = merged_weights.T * self.smooth_factor.unsqueeze(0)
 
-        # print(self.smooth_factor)
-        
-        # PACT: per-channel clipping for activations
+
         clip_vals = self.constrained_clip_val  # [in_features]
         clipped_input = torch.clamp(scaled_input, -clip_vals, clip_vals)
         
-        
-
-        # quant_input = quantize_weight_per_channel_absmax(clipped_input, self.num_bits)
-        # quant_weight = quantize_weight_per_channel_absmax(scaled_weights, self.num_bits)
-        # quant_input = STEQuant.apply(clipped_input, self.num_bits)
-        # quant_weight = STEQuant.apply(scaled_weights, self.num_bits)
 
         quant_input = ActSTEQuant.apply(clipped_input, self.constrained_clip_val, self.num_bits)
         quant_weight = WeightSTEQuant.apply(scaled_weights, self.num_bits)
@@ -222,31 +210,97 @@ class QATW4A4Linear(nn.Module):
             print(f"lora_B grad: {self.original_linear.lora_B.default.weight.grad is not None}")
 
 
+class NaiveW4A4Linear(nn.Module):
+    def __init__(self, original_linear_layer, num_bits=4):
+        super().__init__()
+        self.original_linear = original_linear_layer
+        self.num_bits = num_bits
+        # self.fake_quantize = FakeQuantize.apply
+        # Support both nn.Linear (weight shape [out, in]) and GPT-2 Conv1D (weight shape [in, out])
+        if hasattr(original_linear_layer, 'in_features') and hasattr(original_linear_layer, 'out_features'):
+            # nn.Linear-like
+            self.in_features = original_linear_layer.in_features
+            self.out_features = original_linear_layer.out_features
+            self.weight_is_out_in = True
+        elif hasattr(original_linear_layer, 'weight'):
+            # Conv1D-like (GPT-2)
+            print(original_linear_layer.weight)
+            weight_shape = original_linear_layer.weight.shape
+            # Conv1D stores weight as [in_features, out_features]
+            self.in_features = weight_shape[0]
+            self.out_features = weight_shape[1]
+            self.weight_is_out_in = False
+        
+
+        self.device = next(original_linear_layer.parameters()).device
+        
+        
+        # Initialize per-channel smooth factors to 1.0
+
+        # Freeze base weights/bias of the wrapped linear layer
+        if hasattr(self.original_linear, 'weight'):
+            self.original_linear.weight.requires_grad_(False)
+        if hasattr(self.original_linear, 'bias') and self.original_linear.bias is not None:
+            self.original_linear.bias.requires_grad_(False)
+
+        W_base = self.original_linear.weight
+        W_cpu = W_base.detach().to(torch.float32).cpu()
+
+        self.min_base = W_cpu.min(dim=1).values    
+        self.max_base = W_cpu.max(dim=1).values    
+
+        self.min_base = self.min_base.to(device=self.device)
+        self.max_base = self.max_base.to(device=self.device)
 
 
+    @property
+    def weight(self):
+        # return self._get_merged_weights()
+        return self.original_linear.weight if self.weight_is_out_in else self.original_linear.weight.T
+        
 
+    def forward(self, input):
+        
+
+        quant_input = WeightSTEQuant.apply(input, self.num_bits)
+        quant_weight = WeightSTEQuant.apply(self.weight, self.num_bits)
+
+        # If original layer is Conv1D (weights stored [in, out]), ensure quant_weight supplied to F.linear is [out, in]
+            
+        output = F.linear(quant_input, quant_weight, self.original_linear.bias)
+
+        return output
+
+
+def naive_quantize_model(model):
+    for name, module in model.named_modules():
+        if hasattr(module, 'weight') and isinstance(module, (nn.Linear, Conv1D)):
+            parent = model
+            attrs = name.split('.')
+            for attr in attrs[:-1]:
+                parent = getattr(parent, attr)
+            
+            setattr(parent, attrs[-1], NaiveW4A4Linear(module))
 
 def quantize_peft_gpt2(peft_model):
     """Apply QATW4A4Linear to all linear layers within the peft_model's base_model."""
     base_model_to_quantize = peft_model.base_model.model
 
     for name, module in base_model_to_quantize.named_modules():
-        if isinstance(module, (nn.Linear, Conv1D)):
-            # This check is crucial to ensure we don't re-wrap if somehow already done
-            if hasattr(module, 'original_linear'): # This is how your QATW4A4Linear signals it's a wrapper
-                continue # Skip if it's already your custom QAT module
-
+        if hasattr(module, 'lora_A') and hasattr(module, 'lora_B'):
+            if hasattr(module, 'original_linear'):
+                continue
+                
             print(f"Applying quantization to {name}")
-
+            
             parent = base_model_to_quantize
             attrs = name.split('.')
-            # print(attrs)
             for attr in attrs[:-1]:
-                # print("BIG MONKEY BANANA", attr)
                 parent = getattr(parent, attr)
             
-            # Replace the original (now LoRA-enabled) linear layer with your QATW4A4Linear wrapper
             setattr(parent, attrs[-1], QATW4A4Linear(module))
+            # print(module.lora_A.default.weight)
+            # print(module.lora_B.default.weight)
 
 
 # sorts models by model type and passes model on to respective model specific quantization function
@@ -354,26 +408,27 @@ def load_peqat_model(adapter_dir: str, base_model_name: str = "gpt2", device: to
     with open(adapter_config_path, 'r') as f:
         lora_config_dict = json.load(f)
     
+    # print(lora_config_dict)
     # Create LoraConfig object
     lora_config = LoraConfig(**lora_config_dict)
 
     # 2. Create PeftModel structure (this injects LoRA layers into the base_model)
     peft_model = get_peft_model(base_model, lora_config)
+   
+    safe_tensors_path = os.path.join(adapter_dir, "adapter_model.safetensors")
+    safe_tensors_dict = load_file(safe_tensors_path)
 
-    # 3. Apply QATW4A4Linear wrappers to the LoRA-enabled model
+
     quantize_model(peft_model)
 
-    # 4. Manually load weights from adapter_model.safetensors into the peft_model
-    lora_tensors_path = os.path.join(adapter_dir, "adapter_model.safetensors")
-    if os.path.isfile(lora_tensors_path):
-        print(f"Manually loading LoRA and QAT parameters from {lora_tensors_path}")
-        with safe_open(lora_tensors_path, framework="pt") as f:
-            lora_tensors = {k: f.get_tensor(k) for k in f.keys()}
-            print(f.keys())
-        peft_model.load_state_dict(lora_tensors, strict=False) # Use strict=False for flexibility
-    else:
-        print(f"Warning: adapter_model.safetensors not found in {adapter_dir}. LoRA weights will not be loaded.")
 
+
+    # for name, module in peft_model.named_modules():
+    #     # print(name)
+    #     if hasattr(module, 'weight') and ('lora_A.default' in name or 'lora_B.default' in name):
+    #         print(name)
+    #         print(module.weight)
+            
     # 5. Load and apply additional quantization parameters from quantization_params.pth
     # This ensures all QAT parameters are correctly loaded, as adapter_model.safetensors might not contain all
     # of them or they might be nested differently. (Matches previous deprecated implementation behavior)
@@ -384,19 +439,25 @@ def load_peqat_model(adapter_dir: str, base_model_name: str = "gpt2", device: to
 
         with torch.no_grad():
             for name, module in peft_model.named_modules():
-                if isinstance(module, QATW4A4Linear):
-                    # Keys may have been saved with 'base_model.model.' prefix in quantization_params.pth
-                    prefixes = [f"{name}.", f"base_model.model.{name}."]
-                    for param_name in ["activation_clip", "smooth_factor"]:
-                        loaded = None
-                        for pref in prefixes:
-                            key = pref + param_name
-                            if key in quant_params:
-                                loaded = quant_params[key].to(device=device, dtype=getattr(module, param_name).dtype)
-                                break
-                        if loaded is not None:
-                            print(f"Setting {param_name} for {name}")
-                            getattr(module, param_name).data.copy_(loaded.view_as(getattr(module, param_name)))
+                # print(name)
+                # if hasattr(module, 'weight') and ('lora_A.default' in name or 'lora_B.default' in name):
+                #     # print(module.weight)
+                #     print(name)
+                if not isinstance(module, QATW4A4Linear):
+                    continue
+                prefixes = [f"{name}.", f"base_model.model.{name}."]
+                for param_name in ["activation_clip", "smooth_factor"]:
+                    loaded = None
+                    for pref in prefixes:
+                        key = pref + param_name
+                        if key in quant_params:
+                            loaded = quant_params[key].to(device=device, dtype=getattr(module, param_name).dtype)
+                            break
+                    if loaded is not None:
+                        print(f"Setting {param_name} for {name}")
+                        # print(getattr(module, param_name))
+                        getattr(module, param_name).data.copy_(loaded.view_as(getattr(module, param_name)))
+                        # print(getattr(module, param_name))
     else:
         print("No quantization_params.pth found, using default initialized QAT values.")
 

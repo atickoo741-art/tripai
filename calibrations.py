@@ -1,5 +1,6 @@
 import torch
-from train_qat import QATW4A4Linear
+# from train_qat import QATW4A4Linear
+from fake_quant import QATW4A4Linear
 
 def calibrate_activation_clips(model, dataloader, steps=200, percentile=99.5, device=None):
     """Initialize per-channel PACT clips using a short percentile calibration pass.

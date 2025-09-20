@@ -82,7 +82,8 @@ class QATW4A4Linear(nn.Module):
             self.weight_is_out_in = False
         
 
-        self.device = next(original_linear_layer.parameters()).device
+        # self.device = next(original_linear_layer.parameters()).device
+        self.device = original_linear_layer.weight.device
         
 
         self.activation_clip = nn.Parameter(
@@ -102,14 +103,14 @@ class QATW4A4Linear(nn.Module):
         # self.raw_alpha.requires_grad_(True)
         self.smooth_factor.requires_grad_(True)
 
-        W_base = self.original_linear.weight
-        W_cpu = W_base.detach().to(torch.float32).cpu()
+        # W_base = self.original_linear.weight
+        # W_cpu = W_base.detach().to(torch.float32).cpu()
 
-        self.min_base = W_cpu.min(dim=1).values    
-        self.max_base = W_cpu.max(dim=1).values    
+        # self.min_base = W_cpu.min(dim=1).values    
+        # self.max_base = W_cpu.max(dim=1).values    
 
-        self.min_base = self.min_base.to(device=self.device)
-        self.max_base = self.max_base.to(device=self.device)
+        # self.min_base = self.min_base.to(device=self.device)
+        # self.max_base = self.max_base.to(device=self.device)
 
         self.parent_lora_module_name = parent_lora_module_name  # refers to the lora layer that this is the base for
         self.root_model = root_model  # refers to overall peft model
@@ -132,7 +133,7 @@ class QATW4A4Linear(nn.Module):
     #     self.original_linear.weight = nn.Parameter(value.detach().clone())
         
 
-    def _get_merged_weights(self):
+    def _get_merged_weights(self, root_model):
         """Merge base weights with LoRA, then this merged result gets quantized in forward()."""
         if not self.training and hasattr(self, '_cached_merged_weights'):
             return self._cached_merged_weights
@@ -143,7 +144,7 @@ class QATW4A4Linear(nn.Module):
 
 
         # Access LoRA from parent module if it exists
-        if self.parent_lora_module_name and self.root_model:
+        if self.parent_lora_module_name and root_model:
 
             lora_module = self.root_model.get_submodule(self.parent_lora_module_name)
             # lora_module = self.parent_lora_module_name
@@ -169,7 +170,17 @@ class QATW4A4Linear(nn.Module):
     def forward(self, input):
         # input shape: [batch_size, seq_len, in_features] or [batch_size, in_features]
         # Ensure input_absmax is the right shape [in_features]
-        
+        # root_model = next(iter(self.parameters())).parent_lora_module_name.base_model
+        # current_module = self
+        # while not isinstance(current_module, PeftModel):
+        #     if not hasattr(current_module, 'parent_lora_module_name'):
+        #         # This is an extra check to prevent infinite loops in unexpected model architectures
+        #         raise AttributeError("Could not find parent LoraLayer or PeftModel")
+        #     current_module = current_module.parent_lora_module_name
+
+        # root_model = current_module
+        root_model = self.root_model
+
         # Reshape smooth_factor for broadcasting: [in_features] -> [1, 1, in_features] or [1, in_features]
         if input.dim() == 3:  # [batch, seq_len, in_features]
             smooth_factor = self.smooth_factor.view(1, 1, -1)
@@ -179,8 +190,8 @@ class QATW4A4Linear(nn.Module):
         # Apply per-channel scaling to input: x = x / s_j
         scaled_input = input / smooth_factor
 
-        merged_weights = self._get_merged_weights()
-        scaled_weights = merged_weights.T * self.smooth_factor.unsqueeze(0)
+        merged_weights = self._get_merged_weights(root_model)
+        scaled_weights = merged_weights * self.smooth_factor.unsqueeze(0)
 
 
         clip_vals = self.constrained_clip_val  # [in_features]
@@ -231,13 +242,6 @@ class NaiveW4A4Linear(nn.Module):
         
 
         self.device = next(original_linear_layer.parameters()).device
-        
-        
-        # Initialize per-channel smooth factors to 1.0
-
-        # Freeze base weights/bias of the wrapped linear layer
-        self.activation_clip.requires_grad_(True)
-        self.smooth_factor.requires_grad_(True)
 
         W_base = self.original_linear.weight
         W_cpu = W_base.detach().to(torch.float32).cpu()
@@ -283,29 +287,20 @@ def quantize_peft_gpt2(peft_model):
     Apply QATW4A4Linear to base layers by iterating from the root model
     to get correct module names.
     """
-    root_model = peft_model
-    
-    # Step 1: Collect a list of all modules to be wrapped.
+
     modules_to_wrap = []
-    # Iterate from the root model to get full, correct names
-    for name, module in root_model.named_modules():
-        # Check if the module is a PEFT LoRA adapter
+    for name, module in peft_model.named_modules():
         if hasattr(module, 'lora_A') and hasattr(module, 'lora_B'):
             if hasattr(module, 'base_layer'):
                 base_layer = module.base_layer
                 if not isinstance(base_layer, QATW4A4Linear):
                     modules_to_wrap.append((name, module))
-    
-    # Step 2: Iterate through the collected list and perform the wrapping.
+
     for name, module in modules_to_wrap:
         print(f"Wrapping base layer for quantization at {name}")
         base_layer = module.base_layer
-        
-        # Pass the root model and the full module name to the constructor.
-        # This breaks the circular object reference.
         wrapped_base = QATW4A4Linear(
             original_linear_layer=base_layer, 
-            root_model=root_model, 
             parent_lora_module_name=name
         )
         

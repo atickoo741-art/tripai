@@ -77,7 +77,7 @@ def calibrate_smooth_factors(model, per_module_abs_pctl, alpha: float = 0.5):
                     continue
                 A = per_module_abs_pctl[key].to(m.smooth_factor.device)
                 # Per-input-channel absmax of merged weights (before any smooth scaling)
-                W = m._get_merged_weights().detach().abs().amax(dim=0)  # [in_features]
+                W = m._get_merged_weights(model).detach().abs().amax(dim=0)  # [in_features]
                 s = (A.pow(alpha) / (W.pow(1.0 - alpha) + 1e-8)).clamp_(0.1, 10.0)
                 m.smooth_factor.data.copy_(s)
     model.train()

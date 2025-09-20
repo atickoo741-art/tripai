@@ -1,7 +1,7 @@
 from safetensors import safe_open
 import os
 import torch
-file_path = "/Users/shresthmishra/Documents/Code/w4a4peqat/qat_lora_model_5/adapter_model.safetensors"
+file_path = "/Users/shresthmishra/Documents/Code/w4a4peqat/qat_lora_model_6/adapter_model.safetensors"
 from safetensors.torch import load_file
 
 
@@ -23,6 +23,15 @@ with safe_open(file_path, framework="pt") as f: # "pt" for PyTorch
     safe_tensors_dict = load_file(file_path)
 
     for key, tensor in safe_tensors_dict.items():
+        print(f"Tensor name: {key}")
+        print(tensor)
         if key.endswith('lora_A.original_linear.weight') or key.endswith('lora_B.original_linear.weight'):
             print(f"Tensor name: {key}")
             print(tensor)
+
+
+quant_params = torch.load("/Users/shresthmishra/Documents/Code/w4a4peqat/qat_lora_model_6/quantization_params.pth")
+# for key in quant_params:
+    # print(f"Key: {key}")
+    # print(f"Value: {value}")
+print(quant_params)

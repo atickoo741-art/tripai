@@ -5,10 +5,10 @@ import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer, TrainingArguments, Trainer, DataCollatorForLanguageModeling
 from calibrations import calibrate_activation_clips, calibrate_smooth_factors
 from peft import LoraConfig, get_peft_model, TaskType
-from fake_quant import quantize_model, QATW4A4Linear
 from torch.utils.data import DataLoader
 from typing import List
-from fake_quant import find_available_dir, SaveQuantParamsCallback, save_quantization_parameters
+from fake_quant import quantize_model, QATW4A4Linear, find_available_dir, SaveQuantParamsCallback, save_quantization_parameters, Evaluation
+
 
 
 
@@ -80,11 +80,12 @@ if __name__ == "__main__":
         if 'lora' in name.lower():
             param.requires_grad = True
 
-    # NOW apply quantization wrappers
+
     quantize_model(peft_model)
     for name, module in peft_model.named_modules():
         if isinstance(module, QATW4A4Linear):
             print(name)
+
 
     # After quantization, configure QAT parameters to be trainable
     for name, param in peft_model.named_parameters():
@@ -92,6 +93,34 @@ if __name__ == "__main__":
         is_lora = ("lora" in lname)
         is_qat = ("activation_clip" in lname) or ("smooth_factor" in lname)
         param.requires_grad = bool(is_lora or is_qat)
+
+    print("\n=== PARAMETER FILTERING DEBUG ===")
+    lora_count = 0
+    qat_count = 0
+    other_count = 0
+
+    for name, param in peft_model.named_parameters():
+        lname = name.lower()
+        is_lora = ("lora" in lname)
+        is_qat = ("activation_clip" in lname) or ("smooth_factor" in lname)
+        
+        # DEBUG: Print what's happening
+        if is_lora:
+            print(f"LoRA FOUND: {name} -> {param.numel()} params")
+            lora_count += param.numel()
+        elif is_qat:
+            print(f"QAT FOUND: {name} -> {param.numel()} params")
+            qat_count += param.numel()
+        else:
+            print(f"OTHER: {name} -> {param.numel()} params (will be frozen)")
+            other_count += param.numel()
+        
+        param.requires_grad = bool(is_lora or is_qat)
+
+    print(f"LoRA params found: {lora_count}")
+    print(f"QAT params found: {qat_count}")
+    print(f"Other params: {other_count}")
+    print(f"Total trainable should be: {lora_count + qat_count}")
 
     # Sanity checks: assert only intended params are trainable
     trainable = [n for n, p in peft_model.named_parameters() if p.requires_grad]
@@ -179,15 +208,34 @@ if __name__ == "__main__":
     smooth_params: List[torch.nn.Parameter] = []
 
     for name, param in peft_model.named_parameters():
-        if not param.requires_grad:
-            continue
-        lname = name.lower()
-        if "lora" in lname:
+        name_lower = name.lower()
+        
+        # Explicitly check for LoRA patterns and force enable
+        is_lora = any(pattern in name for pattern in [
+            'lora_A.default.weight', 
+            'lora_B.default.weight'
+        ])
+        
+        # Check for QAT patterns
+        is_qat = any(pattern in name for pattern in [
+            'activation_clip', 
+            'smooth_factor'
+        ])
+        
+        if is_lora:
+            param.requires_grad_(True)  # Force enable
             lora_params.append(param)
-        elif "activation_clip" in lname:
-            clip_params.append(param)
-        elif "smooth_factor" in lname:
-            smooth_params.append(param)
+            print(f"Added LoRA param: {name} ({param.numel()} params)")
+        elif is_qat:
+            param.requires_grad_(True)  # Force enable  
+            if "activation_clip" in name:
+                clip_params.append(param)
+                print(f"Added clip param: {name} ({param.numel()} params)")
+            elif "smooth_factor" in name:
+                smooth_params.append(param)
+                print(f"Added smooth param: {name} ({param.numel()} params)")
+
+    print(f"Optimizer setup: {len(lora_params)} LoRA, {len(clip_params)} clip, {len(smooth_params)} smooth params")
 
     param_groups = []
     # Set learning rates: LoRA uses the TrainingArguments LR; quant params use a higher LR

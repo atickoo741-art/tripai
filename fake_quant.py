@@ -16,6 +16,7 @@ from peft import LoraConfig, get_peft_model
 from safetensors import safe_open
 from transformers import DataCollatorForLanguageModeling
 import itertools
+import weakref
 
 class ActSTEQuant(torch.autograd.Function):
     @staticmethod
@@ -113,7 +114,7 @@ class QATW4A4Linear(nn.Module):
         # self.max_base = self.max_base.to(device=self.device)
 
         self.parent_lora_module_name = parent_lora_module_name  # refers to the lora layer that this is the base for
-        self.root_model = root_model  # refers to overall peft model
+        self._root_model_ref = weakref.ref(root_model) if root_model is not None else None
 
     @property 
     def constrained_clip_val(self):
@@ -127,6 +128,11 @@ class QATW4A4Linear(nn.Module):
         # return self._get_merged_weights()
         return self.original_linear.weight if self.weight_is_out_in else self.original_linear.weight.T
 
+    @property
+    def root_model(self):
+        if self._root_model_ref is None:
+            return None
+        return self._root_model_ref()
     # @weight.setter  
     # def weight(self, value):
     #     """Set the original linear weight for PEFT compatibility"""
@@ -301,7 +307,8 @@ def quantize_peft_gpt2(peft_model):
         base_layer = module.base_layer
         wrapped_base = QATW4A4Linear(
             original_linear_layer=base_layer, 
-            parent_lora_module_name=name
+            parent_lora_module_name=name,
+            root_model=peft_model
         )
         
         module.base_layer = wrapped_base
@@ -421,12 +428,19 @@ def load_peqat_model(adapter_dir: str, base_model_name: str = "gpt2", device: to
     # 2. Create PeftModel structure (this injects LoRA layers into the base_model)
     peft_model = get_peft_model(base_model, lora_config)
    
-    safe_tensors_path = os.path.join(adapter_dir, "adapter_model.safetensors")
-    safe_tensors_dict = load_file(safe_tensors_path)
+    # safe_tensors_path = os.path.join(adapter_dir, "adapter_model.safetensors")
+    # safe_tensors_dict = load_file(safe_tensors_path)
 
 
     quantize_model(peft_model)
 
+    safe_tensors_path = os.path.join(adapter_dir, "adapter_model.safetensors")
+    if os.path.exists(safe_tensors_path):
+        safe_tensors_dict = load_file(safe_tensors_path)
+        peft_model.load_state_dict(safe_tensors_dict, strict=False)
+    
+
+    peft_model = peft_model.to(device)
 
 
     # for name, module in peft_model.named_modules():
@@ -445,10 +459,6 @@ def load_peqat_model(adapter_dir: str, base_model_name: str = "gpt2", device: to
 
         with torch.no_grad():
             for name, module in peft_model.named_modules():
-                # print(name)
-                # if hasattr(module, 'weight') and ('lora_A.default' in name or 'lora_B.default' in name):
-                #     # print(module.weight)
-                #     print(name)
                 if not isinstance(module, QATW4A4Linear):
                     continue
                 prefixes = [f"{name}.", f"base_model.model.{name}."]
@@ -498,15 +508,15 @@ class SaveQuantParamsCallback(TrainerCallback):
                     if isinstance(module, QATW4A4Linear):
                         prefix = f"{name}."
                         quant_params[f"{prefix}activation_clip"] = module.activation_clip.data.detach().cpu()
-                        if hasattr(module, 'smooth_factor'):
-                            quant_params[f"{prefix}smooth_factor"] = module.smooth_factor.data.detach().cpu()
-                        if hasattr(module, 'input_min') and hasattr(module, 'input_max'):
-                            quant_params[f"{prefix}input_min"] = module.input_min.data.detach().cpu()
-                            quant_params[f"{prefix}input_max"] = module.input_max.data.detach().cpu()
-                        quant_params[f"{prefix}weight_scale"] = module.weight_scale.data.detach().cpu()
-                        quant_params[f"{prefix}weight_zero_point"] = module.weight_zero_point.data.detach().cpu()
-                        quant_params[f"{prefix}act_scale"] = module.act_scale.data.detach().cpu()
-                        quant_params[f"{prefix}act_zero_point"] = module.act_zero_point.data.detach().cpu()
+                        # if hasattr(module, 'smooth_factor'):
+                        quant_params[f"{prefix}smooth_factor"] = module.smooth_factor.data.detach().cpu()
+                        # if hasattr(module, 'input_min') and hasattr(module, 'input_max'):
+                        #     quant_params[f"{prefix}input_min"] = module.input_min.data.detach().cpu()
+                        #     quant_params[f"{prefix}input_max"] = module.input_max.data.detach().cpu()
+                        # quant_params[f"{prefix}weight_scale"] = module.weight_scale.data.detach().cpu()
+                        # quant_params[f"{prefix}weight_zero_point"] = module.weight_zero_point.data.detach().cpu()
+                        # quant_params[f"{prefix}act_scale"] = module.act_scale.data.detach().cpu()
+                        # quant_params[f"{prefix}act_zero_point"] = module.act_zero_point.data.detach().cpu()
                 torch.save(quant_params, os.path.join(ckpt_dir, "quantization_params.pth"))
         except Exception as e:
             print(f"Warning: failed to save quant params at checkpoint: {e}")
@@ -524,12 +534,12 @@ def save_quantization_parameters(model, save_dir):
                 param_prefix = f"{name}."
                 quant_params[f"{param_prefix}activation_clip"] = module.activation_clip.data
                 quant_params[f"{param_prefix}smooth_factor"] = module.smooth_factor.data
-                quant_params[f"{param_prefix}input_min"] = module.input_min.data
-                quant_params[f"{param_prefix}input_max"] = module.input_max.data
-                quant_params[f"{param_prefix}weight_scale"] = module.weight_scale.data
-                quant_params[f"{param_prefix}weight_zero_point"] = module.weight_zero_point.data
-                quant_params[f"{param_prefix}act_scale"] = module.act_scale.data
-                quant_params[f"{param_prefix}act_zero_point"] = module.act_zero_point.data
+                # quant_params[f"{param_prefix}input_min"] = module.input_min.data
+                # quant_params[f"{param_prefix}input_max"] = module.input_max.data
+                # quant_params[f"{param_prefix}weight_scale"] = module.weight_scale.data
+                # quant_params[f"{param_prefix}weight_zero_point"] = module.weight_zero_point.data
+                # quant_params[f"{param_prefix}act_scale"] = module.act_scale.data
+                # quant_params[f"{param_prefix}act_zero_point"] = module.act_zero_point.data
         
         # Save quantization parameters
         torch.save(quant_params, os.path.join(save_dir, "quantization_params.pth"))

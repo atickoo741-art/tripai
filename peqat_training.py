@@ -68,6 +68,9 @@ if __name__ == "__main__":
     # After creating peft_model but BEFORE quantization
     peft_model = get_peft_model(model, lora_config)
 
+    for name, module in peft_model.named_modules():
+        print(name)
+
     # Freeze base model (this is already done by PEFT)
     for param in peft_model.base_model.parameters():
         param.requires_grad = False
@@ -79,6 +82,9 @@ if __name__ == "__main__":
 
     # NOW apply quantization wrappers
     quantize_model(peft_model)
+    for name, module in peft_model.named_modules():
+        if isinstance(module, QATW4A4Linear):
+            print(name)
 
     # After quantization, configure QAT parameters to be trainable
     for name, param in peft_model.named_parameters():
@@ -155,6 +161,12 @@ if __name__ == "__main__":
 
     # Percentile-based calibration of activation clips (short pass)
     print("\n--- Calibrating activation clips (percentile init) ---")
+
+    for name, module in peft_model.named_modules():
+        if isinstance(module, QATW4A4Linear):
+            print(name)
+        # print(name)
+
     peft_model = peft_model.to(device)
     calib_loader = DataLoader(train_dataset, batch_size=per_device_bs, shuffle=False, collate_fn=data_collator)
     per_module_abs = calibrate_activation_clips(peft_model, calib_loader, steps=200, percentile=99.5, device=device)

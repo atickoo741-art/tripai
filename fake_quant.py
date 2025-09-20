@@ -62,7 +62,7 @@ class WeightSTEQuant(torch.autograd.Function):
 
 
 class QATW4A4Linear(nn.Module):
-    def __init__(self, original_linear_layer, num_bits=4, init_clip_val=2.0):
+    def __init__(self, original_linear_layer, num_bits=4, init_clip_val=2.0, root_model=None, parent_lora_module_name=None):
         super().__init__()
         self.original_linear = original_linear_layer
         self.num_bits = num_bits
@@ -92,11 +92,11 @@ class QATW4A4Linear(nn.Module):
         # Initialize per-channel smooth factors to 1.0
         self.smooth_factor = nn.Parameter(torch.ones(self.in_features, device=self.device))
 
-        # Freeze base weights/bias of the wrapped linear layer
-        if hasattr(self.original_linear, 'weight'):
-            self.original_linear.weight.requires_grad_(False)
-        if hasattr(self.original_linear, 'bias') and self.original_linear.bias is not None:
-            self.original_linear.bias.requires_grad_(False)
+        # # Freeze base weights/bias of the wrapped linear layer
+        # if hasattr(self.original_linear, 'weight'):
+        #     self.original_linear.weight.requires_grad_(False)
+        # if hasattr(self.original_linear, 'bias') and self.original_linear.bias is not None:
+        #     self.original_linear.bias.requires_grad_(False)
         # Train only QAT per-channel parameters
         self.activation_clip.requires_grad_(True)
         # self.raw_alpha.requires_grad_(True)
@@ -111,7 +111,8 @@ class QATW4A4Linear(nn.Module):
         self.min_base = self.min_base.to(device=self.device)
         self.max_base = self.max_base.to(device=self.device)
 
-        
+        self.parent_lora_module_name = parent_lora_module_name  # refers to the lora layer that this is the base for
+        self.root_model = root_model  # refers to overall peft model
 
     @property 
     def constrained_clip_val(self):
@@ -140,9 +141,12 @@ class QATW4A4Linear(nn.Module):
         if not self.weight_is_out_in:
             base_weight = base_weight.t()
 
+
         # Access LoRA from parent module if it exists
-        if hasattr(self, 'parent_lora_module'):
-            lora_module = self.parent_lora_module
+        if self.parent_lora_module_name and self.root_model:
+
+            lora_module = self.root_model.get_submodule(self.parent_lora_module_name)
+            # lora_module = self.parent_lora_module_name
             # Get LoRA weights and merge
             lora_A = lora_module.lora_A['default'].weight  
             lora_B = lora_module.lora_B['default'].weight
@@ -275,22 +279,39 @@ def naive_quantize_model(model):
             setattr(parent, attrs[-1], NaiveW4A4Linear(module))
 
 def quantize_peft_gpt2(peft_model):
-    """Apply QATW4A4Linear to base layers, allowing access to LoRA for merging."""
-    base_model_to_quantize = peft_model.base_model.model
+    """
+    Apply QATW4A4Linear to base layers by iterating from the root model
+    to get correct module names.
+    """
+    root_model = peft_model
     
-    for name, module in base_model_to_quantize.named_modules():
+    # Step 1: Collect a list of all modules to be wrapped.
+    modules_to_wrap = []
+    # Iterate from the root model to get full, correct names
+    for name, module in root_model.named_modules():
+        # Check if the module is a PEFT LoRA adapter
         if hasattr(module, 'lora_A') and hasattr(module, 'lora_B'):
-            # This is a LoRA-adapted layer
             if hasattr(module, 'base_layer'):
                 base_layer = module.base_layer
                 if not isinstance(base_layer, QATW4A4Linear):
-                    print(f"Wrapping base layer for quantization at {name}")
-                    # Wrap the base layer with quantization
-                    wrapped_base = QATW4A4Linear(base_layer)
-                    # Give it reference to parent LoRA for merging
-                    wrapped_base.parent_lora_module = module  
-                    # Replace base_layer with wrapped version
-                    module.base_layer = wrapped_base
+                    modules_to_wrap.append((name, module))
+    
+    # Step 2: Iterate through the collected list and perform the wrapping.
+    for name, module in modules_to_wrap:
+        print(f"Wrapping base layer for quantization at {name}")
+        base_layer = module.base_layer
+        
+        # Pass the root model and the full module name to the constructor.
+        # This breaks the circular object reference.
+        wrapped_base = QATW4A4Linear(
+            original_linear_layer=base_layer, 
+            root_model=root_model, 
+            parent_lora_module_name=name
+        )
+        
+        module.base_layer = wrapped_base
+    
+    return peft_model
 
 
 # sorts models by model type and passes model on to respective model specific quantization function

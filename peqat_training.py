@@ -7,7 +7,7 @@ from calibrations import calibrate_activation_clips, calibrate_smooth_factors
 from peft import LoraConfig, get_peft_model, TaskType
 from torch.utils.data import DataLoader
 from typing import List
-from fake_quant import quantize_model, QATW4A4Linear, find_available_dir, SaveQuantParamsCallback, save_quantization_parameters, Evaluation
+from fake_quant import quantize_model, PEQATLoRAModule, find_available_dir, SaveQuantParamsCallback, save_quantization_parameters, Evaluation
 
 
 
@@ -83,7 +83,7 @@ if __name__ == "__main__":
 
     quantize_model(peft_model)
     for name, module in peft_model.named_modules():
-        if isinstance(module, QATW4A4Linear):
+        if isinstance(module, PEQATLoRAModule):
             print(name)
 
 
@@ -192,7 +192,7 @@ if __name__ == "__main__":
     print("\n--- Calibrating activation clips (percentile init) ---")
 
     for name, module in peft_model.named_modules():
-        if isinstance(module, QATW4A4Linear):
+        if isinstance(module, PEQATLoRAModule):
             print(name)
         # print(name)
 

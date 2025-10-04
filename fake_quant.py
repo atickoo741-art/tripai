@@ -17,6 +17,7 @@ from safetensors import safe_open
 from transformers import DataCollatorForLanguageModeling
 import itertools
 import weakref
+from transformers import TrainerCallback
 
 class ActSTEQuant(torch.autograd.Function):
     @staticmethod
@@ -51,7 +52,7 @@ class WeightSTEQuant(torch.autograd.Function):
         # Symmetric per-row(out) scale from row max (detached); zero_point = 0
         qmin = -(1 << (num_bits - 1))
         qmax = (1 << (num_bits - 1)) - 1
-        row_max = W.detach().abs().amax(dim=1, keepdim=True)
+        row_max = W.abs().amax(dim=1, keepdim=True)
         scale = (row_max / max(qmax, 1)).clamp(min=1e-8)
         W_q = torch.clamp(torch.round(W / scale), qmin, qmax)
         W_dq = W_q * scale
@@ -62,167 +63,146 @@ class WeightSTEQuant(torch.autograd.Function):
         return grad_output, None
 
 
-class QATW4A4Linear(nn.Module):
-    def __init__(self, original_linear_layer, num_bits=4, init_clip_val=2.0, root_model=None, parent_lora_module_name=None):
+class QATW4A4LinearCore(nn.Module):
+    """Core quantization logic without LoRA awareness"""
+    
+    def __init__(self, original_linear_layer, num_bits=4, init_clip_val=2.0):
         super().__init__()
         self.original_linear = original_linear_layer
         self.num_bits = num_bits
-        # self.fake_quantize = FakeQuantize.apply
-        # Support both nn.Linear (weight shape [out, in]) and GPT-2 Conv1D (weight shape [in, out])
+        
+        # Determine layer type and dimensions
         if hasattr(original_linear_layer, 'in_features') and hasattr(original_linear_layer, 'out_features'):
-            # nn.Linear-like
             self.in_features = original_linear_layer.in_features
             self.out_features = original_linear_layer.out_features
             self.weight_is_out_in = True
         else:
-            # Conv1D-like (GPT-2)
+            # Conv1D case
             weight_shape = original_linear_layer.weight.shape
-            # Conv1D stores weight as [in_features, out_features]
             self.in_features = weight_shape[0]
             self.out_features = weight_shape[1]
             self.weight_is_out_in = False
-        
 
-        # self.device = next(original_linear_layer.parameters()).device
         self.device = original_linear_layer.weight.device
         
-
+        # Trainable QAT parameters
         self.activation_clip = nn.Parameter(
             torch.ones(self.in_features, device=self.device) * init_clip_val
         )
-        
-        # Initialize per-channel smooth factors to 1.0
-        self.smooth_factor = nn.Parameter(torch.ones(self.in_features, device=self.device))
-
-        # # Freeze base weights/bias of the wrapped linear layer
-        # if hasattr(self.original_linear, 'weight'):
-        #     self.original_linear.weight.requires_grad_(False)
-        # if hasattr(self.original_linear, 'bias') and self.original_linear.bias is not None:
-        #     self.original_linear.bias.requires_grad_(False)
-        # Train only QAT per-channel parameters
-        self.activation_clip.requires_grad_(True)
-        # self.raw_alpha.requires_grad_(True)
-        self.smooth_factor.requires_grad_(True)
-
-        # W_base = self.original_linear.weight
-        # W_cpu = W_base.detach().to(torch.float32).cpu()
-
-        # self.min_base = W_cpu.min(dim=1).values    
-        # self.max_base = W_cpu.max(dim=1).values    
-
-        # self.min_base = self.min_base.to(device=self.device)
-        # self.max_base = self.max_base.to(device=self.device)
-
-        self.parent_lora_module_name = parent_lora_module_name  # refers to the lora layer that this is the base for
-        self._root_model_ref = weakref.ref(root_model) if root_model is not None else None
+        self.smooth_factor = nn.Parameter(
+            torch.ones(self.in_features, device=self.device)
+        )
 
     @property 
     def constrained_clip_val(self):
-        # Ensure strictly-positive per-channel clip to avoid degenerate scales
-        # Keep no hard upper cap; training/calibration sets magnitude
+        """Ensure strictly positive clip values"""
         return torch.clamp(torch.abs(self.activation_clip), min=1e-6)
 
-
-    @property
-    def weight(self):
-        # return self._get_merged_weights()
-        return self.original_linear.weight if self.weight_is_out_in else self.original_linear.weight.T
-
-    @property
-    def root_model(self):
-        if self._root_model_ref is None:
-            return None
-        return self._root_model_ref()
-    # @weight.setter  
-    # def weight(self, value):
-    #     """Set the original linear weight for PEFT compatibility"""
-    #     self.original_linear.weight = nn.Parameter(value.detach().clone())
-        
-
-    def _get_merged_weights(self, root_model):
-        """Merge base weights with LoRA, then this merged result gets quantized in forward()."""
-        if not self.training and hasattr(self, '_cached_merged_weights'):
-            return self._cached_merged_weights
-            
+    def get_base_weight(self):
+        """Get base weight in correct orientation [out_features, in_features]"""
         base_weight = self.original_linear.weight
         if not self.weight_is_out_in:
             base_weight = base_weight.t()
+        return base_weight
 
 
-        # Access LoRA from parent module if it exists
-        if self.parent_lora_module_name and root_model:
-
-            lora_module = self.root_model.get_submodule(self.parent_lora_module_name)
-            # lora_module = self.parent_lora_module_name
-            # Get LoRA weights and merge
-            lora_A = lora_module.lora_A['default'].weight  
-            lora_B = lora_module.lora_B['default'].weight
-            scaling = lora_module.scaling['default']
+class PEQATLoRAModule(nn.Module):
+    """
+    Complete LoRA module replacement that handles:
+    1. Base weights + LoRA merging
+    2. SmoothQuant scaling
+    3. PACT clipping
+    4. W4A4 quantization with STE
+    """
+    
+    def __init__(self, original_lora_module, num_bits=4, init_clip_val=2.0):
+        super().__init__()
+        
+        # Wrap the base layer with QAT core
+        self.qat_core = QATW4A4LinearCore(
+            original_lora_module.base_layer,
+            num_bits=num_bits,
+            init_clip_val=init_clip_val
+        )
+        
+        # Copy LoRA parameters from original module
+        # These become part of this module's parameters
+        # print(vars(original_lora_module))
+        # print(original_lora_module.named_modules())
+        self.lora_A = original_lora_module.lora_A
+        print(self.lora_A["default"].weight)
+        self.lora_B = original_lora_module.lora_B
+        self.scaling = original_lora_module.scaling
+        
+        # Copy LoRA configuration attributes
+        self.r = original_lora_module.r
+        self.lora_alpha = original_lora_module.lora_alpha
+        self.lora_dropout = original_lora_module.lora_dropout
+        self.active_adapter = original_lora_module.active_adapter
+        
+        print("-------------------------------")
+        print(original_lora_module.active_adapter[0])
+        
+        # Copy other attributes that PEFT might expect
+        if hasattr(original_lora_module, 'fan_in_fan_out'):
+            self.fan_in_fan_out = original_lora_module.fan_in_fan_out
+        if hasattr(original_lora_module, 'merged'):
+            self.merged = original_lora_module.merged
+        
+        self.num_bits = num_bits
+    
+    def get_merged_weight(self):
+        """Compute base_weight + lora_delta"""
+        base_weight = self.qat_core.get_base_weight()
+        
+        # Compute LoRA delta if not merged
+        if self.r['default'] > 0 and not getattr(self, 'merged', False):
+            lora_A = self.lora_A[self.active_adapter[0]].weight
+            lora_B = self.lora_B[self.active_adapter[0]].weight
+            scaling = self.scaling[self.active_adapter[0]]
             
-            # Compute LoRA contribution
+            # LoRA contribution: (B @ A) * scaling
             lora_delta = (lora_B @ lora_A) * scaling
-            
-            # MERGE base + LoRA (this merged result will be quantized in forward())
-            merged = base_weight + lora_delta
+            merged_weight = base_weight + lora_delta
         else:
-            merged = base_weight
-
-        if not self.training:
-            self._cached_merged_weights = merged
-            
-        return merged
-
-
-    def forward(self, input):
-        # input shape: [batch_size, seq_len, in_features] or [batch_size, in_features]
-        # Ensure input_absmax is the right shape [in_features]
-        # root_model = next(iter(self.parameters())).parent_lora_module_name.base_model
-        # current_module = self
-        # while not isinstance(current_module, PeftModel):
-        #     if not hasattr(current_module, 'parent_lora_module_name'):
-        #         # This is an extra check to prevent infinite loops in unexpected model architectures
-        #         raise AttributeError("Could not find parent LoraLayer or PeftModel")
-        #     current_module = current_module.parent_lora_module_name
-
-        # root_model = current_module
-        root_model = self.root_model
-
-        # Reshape smooth_factor for broadcasting: [in_features] -> [1, 1, in_features] or [1, in_features]
-        if input.dim() == 3:  # [batch, seq_len, in_features]
-            smooth_factor = self.smooth_factor.view(1, 1, -1)
+            merged_weight = base_weight
+        
+        return merged_weight
+    
+    def forward(self, x):
+        """
+        Single forward pass with merged, quantized computation
+        """
+        # Get merged weights (base + LoRA)
+        merged_weight = self.get_merged_weight()
+        
+        # Apply SmoothQuant scaling
+        if x.dim() == 3:  # [batch, seq_len, in_features]
+            smooth_factor = self.qat_core.smooth_factor.view(1, 1, -1)
         else:  # [batch, in_features]
-            smooth_factor = self.smooth_factor.view(1, -1)
-            
-        # Apply per-channel scaling to input: x = x / s_j
-        scaled_input = input / smooth_factor
-
-        merged_weights = self._get_merged_weights(root_model)
-        scaled_weights = merged_weights * self.smooth_factor.unsqueeze(0)
-
-
-        clip_vals = self.constrained_clip_val  # [in_features]
+            smooth_factor = self.qat_core.smooth_factor.view(1, -1)
+        
+        scaled_input = x / smooth_factor
+        scaled_weights = merged_weight * self.qat_core.smooth_factor.unsqueeze(0)
+        
+        # Apply PACT clipping to activations
+        clip_vals = self.qat_core.constrained_clip_val
         clipped_input = torch.clamp(scaled_input, -clip_vals, clip_vals)
         
-
+        # Apply fake quantization with STE
         quant_input = ActSTEQuant.apply(clipped_input, clip_vals, self.num_bits)
         quant_weight = WeightSTEQuant.apply(scaled_weights, self.num_bits)
-
-        # If original layer is Conv1D (weights stored [in, out]), ensure quant_weight supplied to F.linear is [out, in]
-            
-        output = F.linear(quant_input, quant_weight, self.original_linear.bias)
-
+        
+        # Final linear operation
+        bias = self.qat_core.original_linear.bias
+        output = F.linear(quant_input, quant_weight, bias)
+        
         return output
-
-    def check_gradients(self):
-        """Debug method to check gradient flow"""
-        print(f"activation_clip grad: {self.activation_clip.grad}")
-        if hasattr(self, 'smooth_factor'):
-            grad = self.smooth_factor.grad
-            grad_info = 'None' if grad is None else f"mean={grad.mean().item():.6f}"
-            print(f"smooth_factor grad: {grad_info}")
-        if hasattr(self.original_linear, 'lora_A'):
-            print(f"lora_A grad: {self.original_linear.lora_A.default.weight.grad is not None}")
-            print(f"lora_B grad: {self.original_linear.lora_B.default.weight.grad is not None}")
+    
+    def __repr__(self):
+        return (f"PEQATLoRAModule(in_features={self.qat_core.in_features}, "
+                f"out_features={self.qat_core.out_features}, "
+                f"r={self.r['default']}, num_bits={self.num_bits})")
 
 
 class NaiveW4A4Linear(nn.Module):
@@ -288,46 +268,86 @@ def naive_quantize_model(model):
             
             setattr(parent, attrs[-1], NaiveW4A4Linear(module))
 
-def quantize_peft_gpt2(peft_model):
-    """
-    Apply QATW4A4Linear to base layers by iterating from the root model
-    to get correct module names.
-    """
 
-    modules_to_wrap = []
+def get_trainable_params(model):
+    """
+    Separate LoRA and QAT parameters for optimizer setup
+    
+    Returns:
+        lora_params: List of LoRA adapter parameters
+        qat_params: List of QAT parameters (activation_clip, smooth_factor)
+    """
+    lora_params = []
+    qat_params = []
+    
+    for name, param in model.named_parameters():
+        if any(x in name for x in ['lora_A', 'lora_B']):
+            lora_params.append(param)
+            param.requires_grad = True
+        elif any(x in name for x in ['activation_clip', 'smooth_factor']):
+            qat_params.append(param)
+            param.requires_grad = True
+        else:
+            param.requires_grad = False  # Freeze base model
+    
+    print(f"Found {len(lora_params)} LoRA parameters")
+    print(f"Found {len(qat_params)} QAT parameters")
+    
+    return lora_params, qat_params
+
+
+def quantize_peft_gpt2(peft_model, num_bits=4, init_clip_val=2.0):
+    """
+    Replace all LoRA modules in the model with PEQATLoRAModule
+    
+    Args:
+        peft_model: PEFT model with LoRA adapters
+        num_bits: Quantization bits (default 4)
+        init_clip_val: Initial activation clip value (default 2.0)
+    
+    Returns:
+        Modified model with quantized LoRA modules
+    """
+    modules_to_replace = []
+    
+    # Find all LoRA modules
     for name, module in peft_model.named_modules():
         if hasattr(module, 'lora_A') and hasattr(module, 'lora_B'):
-            if hasattr(module, 'base_layer'):
-                base_layer = module.base_layer
-                if not isinstance(base_layer, QATW4A4Linear):
-                    modules_to_wrap.append((name, module))
-
-    for name, module in modules_to_wrap:
-        print(f"Wrapping base layer for quantization at {name}")
-        base_layer = module.base_layer
-        wrapped_base = QATW4A4Linear(
-            original_linear_layer=base_layer, 
-            parent_lora_module_name=name,
-            root_model=peft_model
+            modules_to_replace.append((name, module))
+    
+    print(f"Found {len(modules_to_replace)} LoRA modules to quantize")
+    
+    # Replace each LoRA module
+    for name, lora_module in modules_to_replace:
+        print(f"Quantizing LoRA module: {name}")
+        
+        # Create quantized replacement
+        quantized_module = PEQATLoRAModule(
+            lora_module,
+            num_bits=num_bits,
+            init_clip_val=init_clip_val
         )
         
-        module.base_layer = wrapped_base
+        # Navigate to parent and replace
+        parent = peft_model
+        attrs = name.split('.')
+        for attr in attrs[:-1]:
+            parent = getattr(parent, attr)
+        setattr(parent, attrs[-1], quantized_module)
     
     return peft_model
 
 
 # sorts models by model type and passes model on to respective model specific quantization function
-def quantize_model(model):
-    from transformers.models.gpt2.modeling_gpt2 import GPT2Block
-
+def quantize_model(model, num_bits=4, init_clip_val=2.0):
+    """Entry point for model quantization"""
     if isinstance(model, PeftModel):
         base = model.base_model.model
     else:
         base = model
 
-
     if getattr(base.config, 'model_type', None) == 'gpt2':
-       return quantize_peft_gpt2(model)
+        return quantize_peft_gpt2(model, num_bits=num_bits, init_clip_val=init_clip_val)
     else:
         raise ValueError(f"Unsupported model type: {base.config.model_type}")
     
@@ -347,61 +367,6 @@ def _find_quant_params_path(checkpoint_dir: str) -> str | None:
                 return f
     return None
 
-
-def deprecated_load_peqat_model(adapter_dir: str, base_model_name: str = "gpt2", device: torch.device | None = None):
-    """
-    Load a base HF model and PEFT LoRA adapters from adapter_dir, optionally merge them,
-    apply QATW4A4Linear wrappers to GPT-2 linear layers, and load saved quantization
-    parameters (activation_clip, smooth_factor) from quantization_params.pth.
-
-    Returns: (model, tokenizer)
-    """
-    if device is None:
-        device = torch.device('cuda' if torch.cuda.is_available() else ('mps' if torch.backends.mps.is_available() else 'cpu'))
-
-    # Load base and adapters
-    tokenizer = AutoTokenizer.from_pretrained(base_model_name)
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
-    base = AutoModelForCausalLM.from_pretrained(base_model_name, torch_dtype=torch.float32, device_map=None).to(device)
-    peft_model = PeftModel.from_pretrained(base, adapter_dir, torch_dtype=torch.float32).to(device)
-
-
-    quantize_model(peft_model)
-    
-    dataset = load_dataset("wikitext", "wikitext-2-raw-v1", split="test")
-    evaluation = Evaluation(tokenizer, dataset, device)
-    # evaluation.evaluate(peft_model, seq_len=1024, n_samples=40)
-    evaluation.evaluate(peft_model)
-    
-    # Load quant params
-    qp_path = _find_quant_params_path(adapter_dir)
-    if qp_path and os.path.isfile(qp_path):
-        quant_params = torch.load(qp_path, map_location=device)
-        # print(quant_params)
-
-        with torch.no_grad():
-            for name, module in peft_model.named_modules():
-                if isinstance(module, QATW4A4Linear):
-                    
-                    # Keys may have been saved with 'base_model.model.' prefix
-                    prefixes = [f"{name}.", f"base_model.model.{name}."]
-                    for param_name in ["activation_clip", "smooth_factor"]:
-                        loaded = None
-                        for pref in prefixes:
-                            key = pref + param_name
-                            if key in quant_params:
-                                loaded = quant_params[key].to(device=device, dtype=module.activation_clip.dtype)
-                                break
-                        if loaded is not None:
-                            print(f"Loading quant params for {name}")
-                            getattr(module, param_name).data.copy_(loaded.view_as(getattr(module, param_name)))
-    else:
-        # No saved params; leave defaults
-        pass
-
-    peft_model.eval()
-    return peft_model, tokenizer
 
 def load_peqat_model(adapter_dir: str, base_model_name: str = "gpt2", device: torch.device | None = None):
     if device is None:
@@ -482,10 +447,7 @@ def load_peqat_model(adapter_dir: str, base_model_name: str = "gpt2", device: to
     return peft_model, tokenizer
 
 
-import os
-from transformers import TrainerCallback
-from fake_quant import QATW4A4Linear
-import torch
+
 
 def find_available_dir(base_dir):
     """Find the next available directory with an index to prevent overwrites."""
@@ -505,19 +467,12 @@ class SaveQuantParamsCallback(TrainerCallback):
             if os.path.isdir(ckpt_dir):
                 quant_params = {}
                 for name, module in model.named_modules():
-                    if isinstance(module, QATW4A4Linear):
+                    if isinstance(module, PEQATLoRAModule):
                         prefix = f"{name}."
-                        quant_params[f"{prefix}activation_clip"] = module.activation_clip.data.detach().cpu()
-                        # if hasattr(module, 'smooth_factor'):
-                        quant_params[f"{prefix}smooth_factor"] = module.smooth_factor.data.detach().cpu()
-                        # if hasattr(module, 'input_min') and hasattr(module, 'input_max'):
-                        #     quant_params[f"{prefix}input_min"] = module.input_min.data.detach().cpu()
-                        #     quant_params[f"{prefix}input_max"] = module.input_max.data.detach().cpu()
-                        # quant_params[f"{prefix}weight_scale"] = module.weight_scale.data.detach().cpu()
-                        # quant_params[f"{prefix}weight_zero_point"] = module.weight_zero_point.data.detach().cpu()
-                        # quant_params[f"{prefix}act_scale"] = module.act_scale.data.detach().cpu()
-                        # quant_params[f"{prefix}act_zero_point"] = module.act_zero_point.data.detach().cpu()
+                        quant_params[f"{prefix}activation_clip"] = module.qat_core.activation_clip.data.detach().cpu()
+                        quant_params[f"{prefix}smooth_factor"] = module.qat_core.smooth_factor.data.detach().cpu()
                 torch.save(quant_params, os.path.join(ckpt_dir, "quantization_params.pth"))
+                print(f"Saved {len(quant_params)} quantization parameters to {ckpt_dir}")
         except Exception as e:
             print(f"Warning: failed to save quant params at checkpoint: {e}")
 
@@ -525,25 +480,18 @@ def save_quantization_parameters(model, save_dir):
         os.makedirs(save_dir, exist_ok=True)
 
         quant_params = {}
-        i = 0
         for name, module in model.named_modules():
-            i += 1
-            print(i)
-            if isinstance(module, QATW4A4Linear):
+            if isinstance(module, PEQATLoRAModule):
                 # Save all quantization parameters
                 param_prefix = f"{name}."
-                quant_params[f"{param_prefix}activation_clip"] = module.activation_clip.data
-                quant_params[f"{param_prefix}smooth_factor"] = module.smooth_factor.data
-                # quant_params[f"{param_prefix}input_min"] = module.input_min.data
-                # quant_params[f"{param_prefix}input_max"] = module.input_max.data
-                # quant_params[f"{param_prefix}weight_scale"] = module.weight_scale.data
-                # quant_params[f"{param_prefix}weight_zero_point"] = module.weight_zero_point.data
-                # quant_params[f"{param_prefix}act_scale"] = module.act_scale.data
-                # quant_params[f"{param_prefix}act_zero_point"] = module.act_zero_point.data
+                quant_params[f"{param_prefix}activation_clip"] = module.qat_core.activation_clip.data
+                quant_params[f"{param_prefix}smooth_factor"] = module.qat_core.smooth_factor.data
         
         # Save quantization parameters
         torch.save(quant_params, os.path.join(save_dir, "quantization_params.pth"))
         print(f"Saved {len(quant_params)} quantization parameters")
+
+
 class Evaluation:
     def __init__(self, tokenizer, dataset, device, num_samples=None, block_size=1024):
         self.tokenizer = tokenizer

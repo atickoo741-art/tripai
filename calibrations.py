@@ -1,6 +1,7 @@
 import torch
 # from train_qat import QATW4A4Linear
-from fake_quant import QATW4A4Linear
+from fake_quant import PEQATLoRAModule
+
 
 def calibrate_activation_clips(model, dataloader, steps=200, percentile=99.5, device=None):
     """Initialize per-channel PACT clips using a short percentile calibration pass.
@@ -31,7 +32,7 @@ def calibrate_activation_clips(model, dataloader, steps=200, percentile=99.5, de
             per_module_abs_pctl[key] = q
 
     for m in model.modules():
-        if isinstance(m, QATW4A4Linear):
+        if isinstance(m, PEQATLoRAModule):
             handles.append(m.register_forward_pre_hook(pre_hook))
 
     # Run a few batches
@@ -51,14 +52,14 @@ def calibrate_activation_clips(model, dataloader, steps=200, percentile=99.5, de
 
     # Apply initialization
     for m in model.modules():
-        if isinstance(m, QATW4A4Linear):
+        if isinstance(m, PEQATLoRAModule):
             key = id(m)
             if key not in per_module_abs_pctl:
                 continue
-            A = per_module_abs_pctl[key].to(m.activation_clip.device)
+            A = per_module_abs_pctl[key].to(m.qat_core.activation_clip.device)
             # init_a = torch.clamp(A, min=0.5, max=6.0)
             with torch.no_grad():
-                m.activation_clip.data.copy_(A)
+                m.qat_core.activation_clip.data.copy_(A)
 
     for h in handles:
         h.remove()
@@ -71,13 +72,13 @@ def calibrate_smooth_factors(model, per_module_abs_pctl, alpha: float = 0.5):
     model.eval()
     with torch.no_grad():
         for m in model.modules():
-            if isinstance(m, QATW4A4Linear):
+            if isinstance(m, PEQATLoRAModule):
                 key = id(m)
                 if key not in per_module_abs_pctl:
                     continue
-                A = per_module_abs_pctl[key].to(m.smooth_factor.device)
+                A = per_module_abs_pctl[key].to(m.qat_core.smooth_factor.device)
                 # Per-input-channel absmax of merged weights (before any smooth scaling)
-                W = m._get_merged_weights(model).detach().abs().amax(dim=0)  # [in_features]
+                W = m.get_merged_weight().detach().abs().amax(dim=0)  # [in_features]
                 s = (A.pow(alpha) / (W.pow(1.0 - alpha) + 1e-8)).clamp_(0.1, 10.0)
-                m.smooth_factor.data.copy_(s)
+                m.qat_core.smooth_factor.data.copy_(s)
     model.train()

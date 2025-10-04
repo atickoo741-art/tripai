@@ -424,7 +424,7 @@ def load_peqat_model(adapter_dir: str, base_model_name: str = "gpt2", device: to
 
         with torch.no_grad():
             for name, module in peft_model.named_modules():
-                if not isinstance(module, QATW4A4Linear):
+                if not isinstance(module, QATW4A4LinearCore):
                     continue
                 prefixes = [f"{name}.", f"base_model.model.{name}."]
                 for param_name in ["activation_clip", "smooth_factor"]:
@@ -439,6 +439,8 @@ def load_peqat_model(adapter_dir: str, base_model_name: str = "gpt2", device: to
                         # print(getattr(module, param_name))
                         getattr(module, param_name).data.copy_(loaded.view_as(getattr(module, param_name)))
                         # print(getattr(module, param_name))
+                    else:
+                        print(f"WARNING: Could not find saved parameter for {name}.{param_name}")
     else:
         print("No quantization_params.pth found, using default initialized QAT values.")
 
@@ -467,29 +469,34 @@ class SaveQuantParamsCallback(TrainerCallback):
             if os.path.isdir(ckpt_dir):
                 quant_params = {}
                 for name, module in model.named_modules():
-                    if isinstance(module, PEQATLoRAModule):
+                    if isinstance(module, QATW4A4LinearCore):
                         prefix = f"{name}."
                         quant_params[f"{prefix}activation_clip"] = module.qat_core.activation_clip.data.detach().cpu()
                         quant_params[f"{prefix}smooth_factor"] = module.qat_core.smooth_factor.data.detach().cpu()
                 torch.save(quant_params, os.path.join(ckpt_dir, "quantization_params.pth"))
-                print(f"Saved {len(quant_params)} quantization parameters to {ckpt_dir}")
+                if len(quant_params) == 0:
+                    print("WARNING: No quantization parameters found to save!")
+                else:
+                    torch.save(quant_params, os.path.join(ckpt_dir, "quantization_params.pth"))
+                    print(f"✓ Saved {len(quant_params)} quantization parameters to {ckpt_dir}")
         except Exception as e:
             print(f"Warning: failed to save quant params at checkpoint: {e}")
 
 def save_quantization_parameters(model, save_dir):
-        os.makedirs(save_dir, exist_ok=True)
+    os.makedirs(save_dir, exist_ok=True)
 
-        quant_params = {}
-        for name, module in model.named_modules():
-            if isinstance(module, PEQATLoRAModule):
-                # Save all quantization parameters
-                param_prefix = f"{name}."
-                quant_params[f"{param_prefix}activation_clip"] = module.qat_core.activation_clip.data
-                quant_params[f"{param_prefix}smooth_factor"] = module.qat_core.smooth_factor.data
-        
-        # Save quantization parameters
-        torch.save(quant_params, os.path.join(save_dir, "quantization_params.pth"))
-        print(f"Saved {len(quant_params)} quantization parameters")
+    quant_params = {}
+    for name, module in model.named_modules():
+        if isinstance(module, QATW4A4LinearCore):
+            # Save all quantization parameters
+            param_prefix = f"{name}."
+            quant_params[f"{param_prefix}activation_clip"] = module.activation_clip.data.detach().cpu()
+            quant_params[f"{param_prefix}smooth_factor"] = module.smooth_factor.data.detach().cpu()
+    
+    # Save quantization parameters
+    torch.save(quant_params, os.path.join(save_dir, "quantization_params.pth"))
+    print(f"Saved {len(quant_params)} quantization parameters")
+
 
 
 class Evaluation:

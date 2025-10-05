@@ -7,7 +7,8 @@ from calibrations import calibrate_activation_clips, calibrate_smooth_factors
 from peft import LoraConfig, get_peft_model, TaskType
 from torch.utils.data import DataLoader
 from typing import List
-from fake_quant import quantize_model, PEQATLoRAModule, find_available_dir, SaveQuantParamsCallback, save_quantization_parameters, Evaluation
+from fake_quant import quantize_model, PEQATLoRAModule, find_available_dir, SaveQuantParamsCallback, save_quantization_parameters, Evaluation, GradientMonitorCallback
+import torch.nn as nn
 
 
 
@@ -87,6 +88,25 @@ if __name__ == "__main__":
             print(name)
 
 
+    # FIX: Reinitialize lora_B to break the zero-gradient deadlock
+    print("\n--- Fixing LoRA Gradient Flow ---")
+    for name, module in peft_model.named_modules():
+        if isinstance(module, PEQATLoRAModule):
+            adapter_name = module.active_adapter[0]
+            lora_B_module = module.lora_B[adapter_name]
+            
+            # Reinitialize lora_B with small non-zero values
+            with torch.no_grad():
+                # Use small random initialization instead of zeros
+                nn.init.normal_(lora_B_module.weight, mean=0.0, std=0.001)
+            
+            print(f"Reinitialized {name}.lora_B[{adapter_name}]: "
+                f"mean={lora_B_module.weight.mean():.6f}, "
+                f"std={lora_B_module.weight.std():.6f}")
+
+    print("LoRA gradient flow fix applied\n")
+
+
     # After quantization, configure QAT parameters to be trainable
     for name, param in peft_model.named_parameters():
         lname = name.lower()
@@ -164,7 +184,7 @@ if __name__ == "__main__":
         per_device_train_batch_size=per_device_bs,
         per_device_eval_batch_size=per_device_bs * 2,
         gradient_accumulation_steps=grad_accum,
-        max_grad_norm=1.0,
+        max_grad_norm=0.0, # DISABLE global clipping, we do it per-group
         gradient_checkpointing=True,
         save_strategy="epoch",
         eval_strategy="epoch",
@@ -172,7 +192,7 @@ if __name__ == "__main__":
         logging_steps=20,
         learning_rate=5e-5,  # Reduced learning rate for stability
         weight_decay=0.01,
-        warmup_ratio=0.05,
+        warmup_ratio=0.1,
         lr_scheduler_type="cosine",
         fp16=is_cuda,
         bf16=False,
@@ -239,21 +259,41 @@ if __name__ == "__main__":
 
     param_groups = []
     # Set learning rates: LoRA uses the TrainingArguments LR; quant params use a higher LR
-    lora_lr = training_args.learning_rate
-    quant_lr = 1e-3
+    lora_lr = training_args.learning_rate 
+    qat_lr = training_args.learning_rate * 2.0 
+
+
+    param_groups = []
     if lora_params:
-        param_groups.append({"params": lora_params, "lr": lora_lr, "weight_decay": 0.0})
+        param_groups.append({
+            "params": lora_params, 
+            "lr": lora_lr, 
+            "weight_decay": 0.01  # Small L2 regularization for LoRA
+        })
     if clip_params:
-        param_groups.append({"params": clip_params, "lr": quant_lr, "weight_decay": 0.0})
+        param_groups.append({
+            "params": clip_params, 
+            "lr": qat_lr, 
+            "weight_decay": 0.0  # No weight decay on clip values
+        })
     if smooth_params:
-        param_groups.append({"params": smooth_params, "lr": quant_lr, "weight_decay": 0.0})
+        param_groups.append({
+            "params": smooth_params, 
+            "lr": qat_lr, 
+            "weight_decay": 0.0  # No weight decay on smooth factors
+        })
+
 
     # Fallback: if for some reason groups are empty, include all trainable params
     if not param_groups:
         all_trainable = [p for p in peft_model.parameters() if p.requires_grad]
         param_groups = [{"params": all_trainable, "lr": lora_lr, "weight_decay": 0.0}]
 
-    optimizer = torch.optim.AdamW(param_groups, betas=(0.9, 0.999), eps=1e-8)
+    optimizer = torch.optim.AdamW(
+    param_groups, 
+    betas=(0.9, 0.999),  
+    eps=1e-8,
+    fused=False)
 
     # Initialize Trainer with custom optimizer (Trainer will create scheduler)
     trainer = Trainer(
@@ -268,6 +308,12 @@ if __name__ == "__main__":
     
 
     trainer.add_callback(SaveQuantParamsCallback())
+    trainer.add_callback(GradientMonitorCallback(
+    log_every_n_steps=10,
+    clip_lora=1.0,   # LoRA can have larger gradients
+    clip_qat=0.5     # QAT should have smaller gradients
+    ))
+
     
     # Ensure model on device and enable input grads for all devices to allow LoRA/SQ to learn
     peft_model = peft_model.to(device)
@@ -275,6 +321,32 @@ if __name__ == "__main__":
     # Disable KV cache to avoid conflicts with potential checkpointing and ensure full backprop
     if hasattr(peft_model, 'config'):
         peft_model.config.use_cache = False
+
+    print("\n=== Pre-Training Gradient Check (Detailed) ===")
+    peft_model.train()
+    dummy_batch = next(iter(trainer.get_train_dataloader()))
+    dummy_batch = {k: v.to(device) for k, v in dummy_batch.items()}
+
+    # First forward-backward pass
+    outputs = peft_model(**dummy_batch)
+    loss = outputs.loss
+    loss.backward()
+
+    print("\nLoRA A matrices:")
+    for name, param in peft_model.named_parameters():
+        if 'lora_A' in name and param.grad is not None:
+            print(f"  {name}: norm={param.grad.norm().item():.6f}, "
+                f"max={param.grad.abs().max().item():.6f}")
+
+    print("\nLoRA B matrices:")
+    for name, param in peft_model.named_parameters():
+        if 'lora_B' in name and param.grad is not None:
+            print(f"  {name}: norm={param.grad.norm().item():.6f}, "
+                f"max={param.grad.abs().max().item():.6f}")
+
+    peft_model.zero_grad()
+    print("=" * 50)
+
 
     # 7. Train the model (fresh run). Checkpoints will save quant params via callback.
     print("\n--- Starting W4A4 QAT with LoRA Fine-tuning ---")

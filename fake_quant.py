@@ -52,7 +52,7 @@ class WeightSTEQuant(torch.autograd.Function):
         # Symmetric per-row(out) scale from row max (detached); zero_point = 0
         qmin = -(1 << (num_bits - 1))
         qmax = (1 << (num_bits - 1)) - 1
-        row_max = W.abs().amax(dim=1, keepdim=True)
+        row_max = W.detach().abs().amax(dim=1, keepdim=True)
         scale = (row_max / max(qmax, 1)).clamp(min=1e-8)
         W_q = torch.clamp(torch.round(W / scale), qmin, qmax)
         W_dq = W_q * scale
@@ -153,7 +153,7 @@ class PEQATLoRAModule(nn.Module):
     
     def get_merged_weight(self):
         """Compute base_weight + lora_delta"""
-        base_weight = self.qat_core.get_base_weight()
+        base_weight = self.qat_core.get_base_weight().detach()
         
         # Compute LoRA delta if not merged
         if self.r['default'] > 0 and not getattr(self, 'merged', False):
@@ -482,6 +482,93 @@ class SaveQuantParamsCallback(TrainerCallback):
         except Exception as e:
             print(f"Warning: failed to save quant params at checkpoint: {e}")
 
+class GradientMonitorCallback(TrainerCallback):
+    def __init__(self, log_every_n_steps=10, clip_lora=1.0, clip_qat=0.5):
+        self.log_every_n_steps = log_every_n_steps
+        self.step_count = 0
+        self.clip_lora = clip_lora
+        self.clip_qat = clip_qat
+    
+    def on_optimizer_step(self, args, state, control, **kwargs):
+        """Runs after backward but before zero_grad"""
+        self.step_count += 1
+        
+        model = kwargs.get("model")
+        
+        # Separate parameters by type for targeted clipping
+        lora_params = []
+        qat_params = []
+        
+        for name, param in model.named_parameters():
+            if not param.requires_grad or param.grad is None:
+                continue
+            
+            if 'lora' in name.lower():
+                lora_params.append(param)
+            elif 'activation_clip' in name or 'smooth_factor' in name:
+                qat_params.append(param)
+        
+        # Apply per-group gradient clipping BEFORE optimizer step
+        lora_norm = 0.0
+        qat_norm = 0.0
+        
+        if lora_params:
+            lora_norm = torch.nn.utils.clip_grad_norm_(
+                lora_params, 
+                max_norm=self.clip_lora
+            )
+        
+        if qat_params:
+            qat_norm = torch.nn.utils.clip_grad_norm_(
+                qat_params, 
+                max_norm=self.clip_qat
+            )
+        
+        # Logging
+        if self.step_count % self.log_every_n_steps != 0:
+            return
+        
+        print(f"\n=== Gradient Monitor (Step {state.global_step}) ===")
+        print(f"LoRA grad norm: {lora_norm:.4f} (clipped at {self.clip_lora})")
+        print(f"QAT grad norm: {qat_norm:.4f} (clipped at {self.clip_qat})")
+        
+        # Count parameters with gradients
+        total_params = sum(1 for _ in model.named_parameters())
+        params_with_grad = sum(1 for _, p in model.named_parameters() 
+                              if p.grad is not None)
+        print(f"Total: {total_params}, With gradients: {params_with_grad}")
+        
+        lora_grads = []
+        qat_grads = []
+        
+        for name, param in model.named_parameters():
+            if not param.requires_grad or param.grad is None:
+                continue
+            
+            grad_norm = param.grad.norm().item()
+            
+            if 'lora' in name.lower():
+                lora_grads.append((name, grad_norm))
+            elif 'activation_clip' in name or 'smooth_factor' in name:
+                qat_grads.append((name, grad_norm))
+        
+        if lora_grads:
+            print(f"\nLoRA Gradients ({len(lora_grads)} params):")
+            avg_norm = sum(abs(n) for _, n in lora_grads) / len(lora_grads)
+            print(f"  Average absolute norm: {avg_norm:.6f}")
+            for name, norm in lora_grads[:3]:
+                print(f"  {name}: {norm:.6f}")
+        
+        if qat_grads:
+            print(f"\nQAT Gradients ({len(qat_grads)} params):")
+            avg_norm = sum(abs(n) for _, n in qat_grads) / len(qat_grads)
+            print(f"  Average absolute norm: {avg_norm:.6f}")
+            for name, norm in qat_grads[:3]:
+                print(f"  {name}: {norm:.6f}")
+        
+        print("=" * 50)
+
+        
 def save_quantization_parameters(model, save_dir):
     os.makedirs(save_dir, exist_ok=True)
 

@@ -96,7 +96,8 @@ class QATW4A4LinearCore(nn.Module):
     @property 
     def constrained_clip_val(self):
         """Ensure strictly positive clip values"""
-        return torch.clamp(torch.abs(self.activation_clip), min=1e-6)
+        # return torch.clamp(torch.abs(self.activation_clip), min=1e-6)
+        return self.activation_clip.clamp(min=1e-6)
 
     def get_base_weight(self):
         """Get base weight in correct orientation [out_features, in_features]"""
@@ -568,7 +569,7 @@ class GradientMonitorCallback(TrainerCallback):
         
         print("=" * 50)
 
-        
+
 def save_quantization_parameters(model, save_dir):
     os.makedirs(save_dir, exist_ok=True)
 

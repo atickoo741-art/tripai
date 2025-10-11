@@ -3,7 +3,7 @@ import json
 from data_preparation import load_and_preprocess_wikitext2
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer, TrainingArguments, Trainer, DataCollatorForLanguageModeling
-from calibrations import calibrate_activation_clips, calibrate_smooth_factors
+from calibrations import calibrate_activation_clips, calibrate_smooth_factors, unified_calibration
 from peft import LoraConfig, get_peft_model, TaskType
 from torch.utils.data import DataLoader
 from typing import List
@@ -58,12 +58,15 @@ if __name__ == "__main__":
     print("\n--- Applying LoRA Adapters to quantized model ---")
     lora_config = LoraConfig(
         r=8,  # Rank of the update matrices (lower = less parameters)
-        lora_alpha=32,  # Alpha parameter for LoRA scaling
+        lora_alpha=8,  # Alpha parameter for LoRA scaling
         target_modules=["c_attn", "c_proj", "c_fc"],  # Target attention and feed-forward layers
         lora_dropout=0.05,
         bias="none",  # Don't train bias parameters
         task_type=TaskType.CAUSAL_LM,
     )
+
+
+    
 
     # 4. Apply LoRA adapters to the quantized model
     # After creating peft_model but BEFORE quantization
@@ -87,24 +90,44 @@ if __name__ == "__main__":
         if isinstance(module, PEQATLoRAModule):
             print(name)
 
-
-    # FIX: Reinitialize lora_B to break the zero-gradient deadlock
-    print("\n--- Fixing LoRA Gradient Flow ---")
+    print("\n--- LoRA Initialization Check ---")
     for name, module in peft_model.named_modules():
         if isinstance(module, PEQATLoRAModule):
             adapter_name = module.active_adapter[0]
-            lora_B_module = module.lora_B[adapter_name]
+            lora_A = module.lora_A[adapter_name].weight
+            lora_B = module.lora_B[adapter_name].weight
             
-            # Reinitialize lora_B with small non-zero values
-            with torch.no_grad():
-                # Use small random initialization instead of zeros
-                nn.init.normal_(lora_B_module.weight, mean=0.0, std=0.001)
+            print(f"{name}:")
+            print(f"  lora_A: norm={lora_A.norm().item():.4f}, "
+                f"mean={lora_A.mean().item():.6f}, "
+                f"std={lora_A.std().item():.6f}")
+            print(f"  lora_B: norm={lora_B.norm().item():.4f}, "
+                f"mean={lora_B.mean().item():.6f}, "
+                f"std={lora_B.std().item():.6f}")
+            print(f"  scaling: {module.scaling[adapter_name]}")
             
-            print(f"Reinitialized {name}.lora_B[{adapter_name}]: "
-                f"mean={lora_B_module.weight.mean():.6f}, "
-                f"std={lora_B_module.weight.std():.6f}")
+            # Check if B is actually zero
+            if lora_B.abs().max().item() < 1e-6:
+                print(f"  ⚠️  lora_B is zero-initialized (PEFT default)")
 
-    print("LoRA gradient flow fix applied\n")
+
+    # # FIX: Reinitialize lora_B to break the zero-gradient deadlock
+    # print("\n--- Fixing LoRA Gradient Flow ---")
+    # for name, module in peft_model.named_modules():
+    #     if isinstance(module, PEQATLoRAModule):
+    #         adapter_name = module.active_adapter[0]
+    #         lora_B_module = module.lora_B[adapter_name]
+            
+    #         # Reinitialize lora_B with small non-zero values
+    #         with torch.no_grad():
+    #             # Use small random initialization instead of zeros
+    #             nn.init.normal_(lora_B_module.weight, mean=0.0, std=0.001)
+            
+    #         print(f"Reinitialized {name}.lora_B[{adapter_name}]: "
+    #             f"mean={lora_B_module.weight.mean():.6f}, "
+    #             f"std={lora_B_module.weight.std():.6f}")
+
+    # print("LoRA gradient flow fix applied\n")
 
 
     # After quantization, configure QAT parameters to be trainable
@@ -218,9 +241,11 @@ if __name__ == "__main__":
 
     peft_model = peft_model.to(device)
     calib_loader = DataLoader(train_dataset, batch_size=per_device_bs, shuffle=False, collate_fn=data_collator)
-    per_module_abs = calibrate_activation_clips(peft_model, calib_loader, steps=200, percentile=99.5, device=device)
-    # Initialize SmoothQuant scaling factors using activation percentiles and weight stats
-    calibrate_smooth_factors(peft_model, per_module_abs, alpha=0.5)
+    # per_module_abs = calibrate_activation_clips(peft_model, calib_loader, steps=200, percentile=99.5, device=device)
+    # # Initialize SmoothQuant scaling factors using activation percentiles and weight stats
+    # calibrate_smooth_factors(peft_model, per_module_abs, alpha=0.5)
+    unified_calibration(peft_model, calib_loader, steps=200, percentile=99.5, alpha=0.5, device=device)
+
 
     # Build optimizer with parameter groups: LoRA vs PACT clip vs SmoothQuant factors
     lora_params: List[torch.nn.Parameter] = []

@@ -12,6 +12,7 @@ dill==0.3.8
 filelock==3.18.0
 frozenlist==1.7.0
 fsspec==2025.3.0
+git-filter-repo==2.47.0
 grpcio==1.74.0
 hf-xet==1.1.5
 huggingface-hub==0.33.4
@@ -26,7 +27,7 @@ networkx==3.5
 numpy==2.3.1
 packaging==25.0
 pandas==2.3.1
-peft==0.16.0
+peft==0.17.1
 pillow==11.2.1
 propcache==0.3.2
 protobuf==6.31.1
@@ -46,8 +47,8 @@ tensorboard==2.20.0
 tensorboard-data-server==0.7.2
 tokenizers==0.21.2
 torch==2.9.0.dev20250715
-# torchaudio==2.8.0.dev20250715
-# torchvision==0.24.0.dev20250715
+torchaudio==2.8.0.dev20250715
+torchvision==0.24.0.dev20250715
 tqdm==4.67.1
 transformers==4.53.2
 typing_extensions==4.14.1

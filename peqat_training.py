@@ -20,6 +20,7 @@ if __name__ == "__main__":
     tokenizer = AutoTokenizer.from_pretrained(model_name)
 
     # Set up device
+    print(torch.cuda.is_available())
     if torch.backends.mps.is_available():
         device = torch.device("mps")
         torch.set_default_dtype(torch.float32)  # MPS works best with float32

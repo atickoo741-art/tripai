@@ -131,8 +131,9 @@ class PEQATLoRAModule(nn.Module):
         # print(vars(original_lora_module))
         # print(original_lora_module.named_modules())
         self.lora_A = original_lora_module.lora_A
-        print(self.lora_A["default"].weight)
+        # print(self.lora_A["default"].weight)
         self.lora_B = original_lora_module.lora_B
+        # print(self.lora_B["default"].weight)
         self.scaling = original_lora_module.scaling
         
         # Copy LoRA configuration attributes
@@ -141,8 +142,8 @@ class PEQATLoRAModule(nn.Module):
         self.lora_dropout = original_lora_module.lora_dropout
         self.active_adapter = original_lora_module.active_adapter
         
-        print("-------------------------------")
-        print(original_lora_module.active_adapter[0])
+        # print("-------------------------------")
+        # print(original_lora_module.active_adapter[0])
         
         # Copy other attributes that PEFT might expect
         if hasattr(original_lora_module, 'fan_in_fan_out'):
@@ -320,7 +321,7 @@ def quantize_peft_gpt2(peft_model, num_bits=4, init_clip_val=2.0):
     
     # Replace each LoRA module
     for name, lora_module in modules_to_replace:
-        print(f"Quantizing LoRA module: {name}")
+        # print(f"Quantizing LoRA module: {name}")
         
         # Create quantized replacement
         quantized_module = PEQATLoRAModule(
@@ -402,8 +403,46 @@ def load_peqat_model(adapter_dir: str, base_model_name: str = "gpt2", device: to
 
     safe_tensors_path = os.path.join(adapter_dir, "adapter_model.safetensors")
     if os.path.exists(safe_tensors_path):
-        safe_tensors_dict = load_file(safe_tensors_path)
-        peft_model.load_state_dict(safe_tensors_dict, strict=False)
+        saved_state_dict = load_file(safe_tensors_path)
+        peft_model.load_state_dict(saved_state_dict, strict=False)
+        missing_keys, unexpected_keys = peft_model.load_state_dict(saved_state_dict, strict=False)
+        
+        print(f"\n{'='*60}")
+        print("KEY REMAPPING")
+        print(f"{'='*60}")
+
+        # Remap keys: add .default before .weight for lora_A and lora_B
+        remapped_state_dict = {}
+        for saved_key, value in saved_state_dict.items():
+            if 'lora_A.weight' in saved_key or 'lora_B.weight' in saved_key:
+                # Insert .default before .weight
+                # From: base_model.model.transformer.h.0.attn.c_attn.lora_A.weight
+                # To:   base_model.model.transformer.h.0.attn.c_attn.lora_A.default.weight
+                runtime_key = saved_key.replace('.weight', '.default.weight')
+                remapped_state_dict[runtime_key] = value
+                print(f"✓ {saved_key}")
+                print(f"  -> {runtime_key}")
+            else:
+                # Keep other keys as-is
+                remapped_state_dict[saved_key] = value
+
+        # Load the remapped state dict
+        missing_keys, unexpected_keys = peft_model.load_state_dict(remapped_state_dict, strict=False)
+        
+        # Filter to only show LoRA-related issues
+        lora_missing = [k for k in missing_keys if 'lora' in k.lower()]
+        lora_unexpected = [k for k in unexpected_keys if 'lora' in k.lower()]
+        
+        print(f"{'='*60}\n")
+
+        if missing_keys:
+            print(f"⚠️  WARNING: Missing keys when loading LoRA: {lora_missing}")
+        if unexpected_keys:
+            print(f"⚠️  WARNING: Unexpected keys: {lora_unexpected[:5]}")
+        
+        print(f"✓ Loaded {len(saved_state_dict)} parameters from adapter_model.safetensors")
+    else:
+        raise FileNotFoundError(f"adapter_model.safetensors not found in {adapter_dir}")
     
 
     peft_model = peft_model.to(device)
@@ -635,35 +674,31 @@ class Evaluation:
 
     def evaluate(self, model):
         model.eval()
-        
-        total_nll = 0.0
-        total_eval_tokens = 0
-        
-        eval_dataloader = torch.utils.data.DataLoader(
-            self.lm_dataset, batch_size=1, collate_fn=self.data_collator
-        ) # Batch size 1 for simplicity during perplexity eval
+        total_loss = 0.0
+        num_batches = 0
 
-        # Limit evaluation to num_samples if specified
+        eval_dataloader = torch.utils.data.DataLoader(
+            self.lm_dataset, 
+            batch_size=8,  # Match training eval batch size
+            collate_fn=self.data_collator
+        )
+
         if self.num_samples is not None:
             eval_dataloader = itertools.islice(eval_dataloader, self.num_samples)
 
         for batch in tqdm.tqdm(eval_dataloader, desc="Evaluating..."):
             input_ids = batch["input_ids"].to(self.device)
             labels = batch["labels"].to(self.device)
-
+            
             with torch.no_grad():
                 outputs = model(input_ids=input_ids, labels=labels)
-                loss = outputs.loss
-                
-                # Calculate number of actual (non-padded) tokens in the batch
-                num_actual_tokens = (labels != -100).sum().item()
-                total_nll += loss.item() * num_actual_tokens
-                total_eval_tokens += num_actual_tokens
+                # outputs.loss is already the mean loss per token in this batch
+                total_loss += outputs.loss.item()
+                num_batches += 1
 
-        if total_eval_tokens == 0:
-            print("Perplexity: inf (No tokens evaluated)")
-            return float('inf')
+        avg_loss = total_loss / num_batches
+        perplexity = torch.exp(torch.tensor(avg_loss))
 
-        avg_nll = total_nll / total_eval_tokens
-        perplexity = torch.exp(torch.tensor(avg_nll))
-        print(f"Perplexity: {perplexity.item()}")
+        print(f"Average Loss: {avg_loss:.4f}")
+        print(f"Perplexity: {perplexity.item():.2f}")
+        return perplexity.item()

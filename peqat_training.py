@@ -381,7 +381,23 @@ if __name__ == "__main__":
     # 8. Evaluate and Save
     print("\n--- Evaluating W4A4 QAT LoRA Model ---")
     eval_results = trainer.evaluate()
-    print(f"Perplexity: {torch.exp(torch.tensor(eval_results['eval_loss']))}")
+    trainer_loss = eval_results['eval_loss']
+    trainer_ppl = torch.exp(torch.tensor(trainer_loss))
+
+    print(f"Trainer Loss: {trainer_loss:.4f}")
+    print(f"Trainer Perplexity: {trainer_ppl:.2f}")
+
+    # Now evaluate with YOUR evaluation class on the SAME split
+    print("\n--- Cross-checking with custom Evaluation class ---")
+    from datasets import load_dataset
+    val_dataset = load_dataset("wikitext", "wikitext-2-raw-v1", split="validation")
+    custom_eval = Evaluation(tokenizer, val_dataset, device, num_samples=None, block_size=1024)
+    custom_ppl = custom_eval.evaluate(peft_model)
+
+    print(f"\nComparison:")
+    print(f"  Trainer perplexity: {trainer_ppl:.2f}")
+    print(f"  Custom eval perplexity: {custom_ppl:.2f}")
+    print(f"  Difference: {abs(trainer_ppl - custom_ppl):.2f}")
 
 
     os.makedirs(model_dir, exist_ok=True)

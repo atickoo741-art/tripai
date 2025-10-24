@@ -198,13 +198,13 @@ if __name__ == "__main__":
     
     # Choose memory-friendly settings based on device
     is_cuda = torch.cuda.is_available() and not torch.backends.mps.is_available()
-    per_device_bs = 32 if is_cuda else 8
-    grad_accum = 32 if is_cuda else 8
+    per_device_bs = 128 if is_cuda else 8
+    grad_accum = 1 if is_cuda else 8
 
     training_args = TrainingArguments(
         output_dir=output_dir,
         overwrite_output_dir=False,
-        num_train_epochs=5,
+        num_train_epochs=10,
         per_device_train_batch_size=per_device_bs,
         per_device_eval_batch_size=per_device_bs * 2,
         gradient_accumulation_steps=grad_accum,
@@ -214,7 +214,7 @@ if __name__ == "__main__":
         eval_strategy="epoch",
         logging_dir=os.path.join(output_dir, "tensorboard_logs"),
         logging_steps=20,
-        learning_rate=1e-4,  # Reduced learning rate for stability
+        learning_rate=5e-5,  # Reduced learning rate for stability
         weight_decay=0.01,
         warmup_ratio=0.1,
         lr_scheduler_type="cosine",

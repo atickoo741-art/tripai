@@ -511,8 +511,8 @@ class SaveQuantParamsCallback(TrainerCallback):
                 for name, module in model.named_modules():
                     if isinstance(module, QATW4A4LinearCore):
                         prefix = f"{name}."
-                        quant_params[f"{prefix}activation_clip"] = module.qat_core.activation_clip.data.detach().cpu()
-                        quant_params[f"{prefix}smooth_factor"] = module.qat_core.smooth_factor.data.detach().cpu()
+                        quant_params[f"{prefix}activation_clip"] = module.activation_clip.data.detach().cpu()
+                        quant_params[f"{prefix}smooth_factor"] = module.smooth_factor.data.detach().cpu()
                 torch.save(quant_params, os.path.join(ckpt_dir, "quantization_params.pth"))
                 if len(quant_params) == 0:
                     print("WARNING: No quantization parameters found to save!")

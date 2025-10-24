@@ -7,7 +7,7 @@ from calibrations import calibrate_activation_clips, calibrate_smooth_factors, u
 from peft import LoraConfig, get_peft_model, TaskType
 from torch.utils.data import DataLoader
 from typing import List
-from fake_quant import quantize_model, PEQATLoRAModule, find_available_dir, SaveQuantParamsCallback, save_quantization_parameters, Evaluation, GradientMonitorCallback
+from fake_quant import quantize_model, PEQATLoRAModule, find_available_dir, SaveQuantParamsCallback, save_quantization_parameters, Evaluation, GradientMonitorCallback, QATW4A4LinearCore
 import torch.nn as nn
 
 
@@ -198,18 +198,18 @@ if __name__ == "__main__":
     
     # Choose memory-friendly settings based on device
     is_cuda = torch.cuda.is_available() and not torch.backends.mps.is_available()
-    per_device_bs = 4 if is_cuda else 8
+    per_device_bs = 64 if is_cuda else 8
     grad_accum = 16 if is_cuda else 8
 
     training_args = TrainingArguments(
         output_dir=output_dir,
         overwrite_output_dir=False,
-        num_train_epochs=2,
+        num_train_epochs=5,
         per_device_train_batch_size=per_device_bs,
         per_device_eval_batch_size=per_device_bs * 2,
         gradient_accumulation_steps=grad_accum,
         max_grad_norm=0.0, # DISABLE global clipping, we do it per-group
-        gradient_checkpointing=True,
+        gradient_checkpointing=False,
         save_strategy="epoch",
         eval_strategy="epoch",
         logging_dir=os.path.join(output_dir, "tensorboard_logs"),
@@ -226,7 +226,7 @@ if __name__ == "__main__":
         load_best_model_at_end=True,
         metric_for_best_model="eval_loss",
         dataloader_pin_memory=True,
-        dataloader_num_workers=4,
+        dataloader_num_workers=16,
     )
 
     # Define Data Collator
@@ -400,21 +400,65 @@ if __name__ == "__main__":
     print(f"  Difference: {abs(trainer_ppl - custom_ppl):.2f}")
 
 
-    os.makedirs(model_dir, exist_ok=True)
+    
     
     # Save the model, tokenizer, and quantization parameters
+    
     print(f"\n--- Saving W4A4 QAT LoRA model to {model_dir} ---")
+    os.makedirs(model_dir, exist_ok=True)
     
     # Save quantization parameters after training
-    save_quantization_parameters(peft_model, model_dir)
+    # save_quantization_parameters(peft_model, model_dir)
     
     # Save the LoRA adapters
-    peft_model.save_pretrained(model_dir)
     print(f"--- Saving W4A4 QAT LoRA adapters to {model_dir} ---")
-    
+    peft_model.save_pretrained(model_dir)
+
     # Save the tokenizer
     tokenizer.save_pretrained(model_dir)
     
+    best_checkpoint = trainer.state.best_model_checkpoint
+    if best_checkpoint and os.path.exists(best_checkpoint):
+        import shutil
+        src = os.path.join(best_checkpoint, "quantization_params.pth")
+        dst = os.path.join(model_dir, "quantization_params.pth")
+        
+        if os.path.exists(src):
+            shutil.copy(src, dst)
+            print(f"✓ Copied quantization params from: {best_checkpoint}")
+            
+            # Verify the copy
+            quant_params = torch.load(dst)
+            print(f"  {len(quant_params)} quantization parameters")
+        else:
+            print(f"⚠️  Warning: quantization_params.pth not found in best checkpoint")
+            print(f"  Falling back to current model state...")
+            
+            # Fallback: save current state
+            quant_params = {}
+            for name, module in peft_model.named_modules():
+                if isinstance(module, QATW4A4LinearCore):
+                    prefix = f"{name}."
+                    quant_params[f"{prefix}activation_clip"] = module.activation_clip.data.detach().cpu()
+                    quant_params[f"{prefix}smooth_factor"] = module.smooth_factor.data.detach().cpu()
+            
+            torch.save(quant_params, dst)
+            print(f"  ✓ Saved {len(quant_params)} parameters from current state")
+    else:
+        print("⚠️  No best checkpoint found, saving current model state...")
+        
+        # Save current quantization state
+        quant_params = {}
+        for name, module in peft_model.named_modules():
+            if isinstance(module, QATW4A4LinearCore):
+                prefix = f"{name}."
+                quant_params[f"{prefix}activation_clip"] = module.activation_clip.data.detach().cpu()
+                quant_params[f"{prefix}smooth_factor"] = module.smooth_factor.data.detach().cpu()
+        
+        torch.save(quant_params, os.path.join(model_dir, "quantization_params.pth"))
+        print(f"✓ Saved {len(quant_params)} quantization parameters")
+
+
     # Save the model config
     peft_model.config.to_json_file(os.path.join(model_dir, "config.json"))
     

@@ -11,7 +11,7 @@ from fake_quant import QATW4A4LinearCore, _find_quant_params_path
 
 
 parser = argparse.ArgumentParser()
-parser.add_argument("--model_path", type=str, required=True)
+parser.add_argument("--model_path", type=str, required=False, default=None)
 parser.add_argument("--base_model_name", type=str, default="gpt2", help="HF base model to use when model_path is a PEFT adapter dir")
 parser.add_argument("--device", type=str, default=None)
 parser.add_argument("--seq_len", type=int, default=1024)
@@ -24,16 +24,28 @@ def main():
     else:
         device = torch.device('cuda' if torch.cuda.is_available() else ('mps' if torch.backends.mps.is_available() else 'cpu'))
 
-    # Detect if model_path is a PEFT adapters directory
-    is_peft = os.path.isfile(os.path.join(args.model_path, "adapter_config.json"))
+    if args.model_path is None:
+        # Load base full precision model for benchmarking
+        print(f"Loading base full precision model: {args.base_model_name}")
+        model = AutoModelForCausalLM.from_pretrained(args.base_model_name, torch_dtype=torch.float32, device_map=None).to(device)
+        tokenizer = AutoTokenizer.from_pretrained(args.base_model_name)
+        
+        # Ensure tokenizer has pad token
+        if tokenizer.pad_token is None:
+            tokenizer.pad_token = tokenizer.eos_token
+        
+        print(f"Model loaded on {device}")
+    else:
+        # Detect if model_path is a PEFT adapters directory
+        is_peft = os.path.isfile(os.path.join(args.model_path, "adapter_config.json"))
 
-    model, tokenizer = load_peqat_model(args.model_path, args.base_model_name, device)
+        # model, tokenizer = load_peqat_model(args.model_path, args.base_model_name, device)
 
-    # model = AutoModelForCausalLM.from_pretrained(args.model_path, torch_dtype=torch.float32, device_map=None).to(device)
-    # tokenizer = AutoTokenizer.from_pretrained(args.model_path)
+        model = AutoModelForCausalLM.from_pretrained(args.model_path, torch_dtype=torch.float32, device_map=None).to(device)
+        tokenizer = AutoTokenizer.from_pretrained(args.model_path)
 
-    # naive_quantize_model(model)
-    diagnose_model_loading(model, args.model_path)
+        naive_quantize_model(model)
+        # diagnose_model_loading(model, args.model_path)
 
 
     dataset = load_dataset("wikitext", "wikitext-2-raw-v1", split="test")

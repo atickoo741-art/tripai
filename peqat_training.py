@@ -213,9 +213,9 @@ if __name__ == "__main__":
         save_strategy="epoch",
         eval_strategy="epoch",
         logging_dir=os.path.join(output_dir, "tensorboard_logs"),
-        logging_steps=20,
-        learning_rate=5e-5,  # Reduced learning rate for stability
-        weight_decay=0.01,
+        logging_steps=10,
+        learning_rate=1e-4,  # Reduced learning rate for stability
+        weight_decay=0.00,
         warmup_ratio=0.1,
         lr_scheduler_type="cosine",
         fp16=is_cuda,
@@ -286,7 +286,7 @@ if __name__ == "__main__":
     param_groups = []
     # Set learning rates: LoRA uses the TrainingArguments LR; quant params use a higher LR
     lora_lr = training_args.learning_rate 
-    qat_lr = training_args.learning_rate * 2.0 
+    qat_lr = training_args.learning_rate * 1.0 
 
 
     param_groups = []
@@ -294,7 +294,7 @@ if __name__ == "__main__":
         param_groups.append({
             "params": lora_params, 
             "lr": lora_lr, 
-            "weight_decay": 0.01  # Small L2 regularization for LoRA
+            "weight_decay": 0.00  # Small L2 regularization for LoRA
         })
     if clip_params:
         param_groups.append({
@@ -336,8 +336,8 @@ if __name__ == "__main__":
     trainer.add_callback(SaveQuantParamsCallback())
     trainer.add_callback(GradientMonitorCallback(
     log_every_n_steps=10,
-    clip_lora=1.0,   # LoRA can have larger gradients
-    clip_qat=0.5     # QAT should have smaller gradients
+    clip_lora=100.0,   # LoRA can have larger gradients
+    clip_qat=1.0     # QAT should have smaller gradients
     ))
 
     
@@ -377,6 +377,11 @@ if __name__ == "__main__":
     # 7. Train the model (fresh run). Checkpoints will save quant params via callback.
     print("\n--- Starting W4A4 QAT with LoRA Fine-tuning ---")
     trainer.train()
+    import json
+    with open('training_log.json', 'w') as f:
+        json.dump(trainer.state.log_history, f, indent=2)
+
+    print("Loss curve data saved to training_log.json")
 
     # 8. Evaluate and Save
     print("\n--- Evaluating W4A4 QAT LoRA Model ---")

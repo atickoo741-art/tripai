@@ -24,6 +24,7 @@ def main():
     else:
         device = torch.device('cuda' if torch.cuda.is_available() else ('mps' if torch.backends.mps.is_available() else 'cpu'))
 
+        
     if args.model_path is None:
         # Load base full precision model for benchmarking
         print(f"Loading base full precision model: {args.base_model_name}")
@@ -39,12 +40,12 @@ def main():
         # Detect if model_path is a PEFT adapters directory
         is_peft = os.path.isfile(os.path.join(args.model_path, "adapter_config.json"))
 
-        # model, tokenizer = load_peqat_model(args.model_path, args.base_model_name, device)
+        model, tokenizer = load_peqat_model(args.model_path, args.base_model_name, device)
 
-        model = AutoModelForCausalLM.from_pretrained(args.model_path, torch_dtype=torch.float32, device_map=None).to(device)
-        tokenizer = AutoTokenizer.from_pretrained(args.model_path)
+        # model = AutoModelForCausalLM.from_pretrained(args.model_path, torch_dtype=torch.float32, device_map=None).to(device)
+        # tokenizer = AutoTokenizer.from_pretrained(args.model_path)
 
-        naive_quantize_model(model)
+        # naive_quantize_model(model)
         # diagnose_model_loading(model, args.model_path)
 
 

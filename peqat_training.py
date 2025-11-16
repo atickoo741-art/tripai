@@ -58,8 +58,8 @@ if __name__ == "__main__":
     # 3. Prepare the model for LoRA fine-tuning
     print("\n--- Applying LoRA Adapters to quantized model ---")
     lora_config = LoraConfig(
-        r=8,  # Rank of the update matrices (lower = less parameters)
-        lora_alpha=8,  # Alpha parameter for LoRA scaling
+        r=16,  # Rank of the update matrices (lower = less parameters)
+        lora_alpha=32,  # Alpha parameter for LoRA scaling
         target_modules=["c_attn", "c_proj", "c_fc"],  # Target attention and feed-forward layers
         lora_dropout=0.05,
         bias="none",  # Don't train bias parameters

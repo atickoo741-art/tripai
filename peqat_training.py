@@ -189,7 +189,7 @@ if __name__ == "__main__":
     print(f"Model will be saved to: {model_dir}")
 
     # Load and preprocess the WikiText-2 dataset
-    datasets, _ = load_and_preprocess_wikitext2(model_name="gpt2") # Use _ for tokenizer as it\'s already loaded
+    datasets, _ = load_and_preprocess_wikitext2(model_name="gpt2", block_size=512) # Use _ for tokenizer as it\'s already loaded
     train_dataset = datasets["train"]
     eval_dataset = datasets["validation"]
 
@@ -245,7 +245,7 @@ if __name__ == "__main__":
     # per_module_abs = calibrate_activation_clips(peft_model, calib_loader, steps=200, percentile=99.5, device=device)
     # # Initialize SmoothQuant scaling factors using activation percentiles and weight stats
     # calibrate_smooth_factors(peft_model, per_module_abs, alpha=0.5)
-    unified_calibration(peft_model, calib_loader, steps=200, percentile=99.5, alpha=0.5, device=device)
+    unified_calibration(peft_model, calib_loader, steps=200, percentile=99.0, alpha=0.5, device=device)
 
 
     # Build optimizer with parameter groups: LoRA vs PACT clip vs SmoothQuant factors
@@ -396,7 +396,7 @@ if __name__ == "__main__":
     print("\n--- Cross-checking with custom Evaluation class ---")
     from datasets import load_dataset
     val_dataset = load_dataset("wikitext", "wikitext-2-raw-v1", split="validation")
-    custom_eval = Evaluation(tokenizer, val_dataset, device, num_samples=None, block_size=1024)
+    custom_eval = Evaluation(tokenizer, val_dataset, device, num_samples=None, block_size=512)
     custom_ppl = custom_eval.evaluate(peft_model)
 
     print(f"\nComparison:")

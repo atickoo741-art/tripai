@@ -14,7 +14,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument("--model_path", type=str, required=False, default=None)
 parser.add_argument("--base_model_name", type=str, default="gpt2", help="HF base model to use when model_path is a PEFT adapter dir")
 parser.add_argument("--device", type=str, default=None)
-parser.add_argument("--seq_len", type=int, default=1024)
+parser.add_argument("--seq_len", type=int, default=128)
 parser.add_argument("--n_samples", type=int, default=None)
 
 def main():
@@ -49,7 +49,7 @@ def main():
         # diagnose_model_loading(model, args.model_path)
 
 
-    dataset = load_dataset("wikitext", "wikitext-2-raw-v1", split="test")
+    dataset = load_dataset("wikitext", "wikitext-2-raw-v1", split="validation")
     eval_obj = Evaluation(tokenizer, dataset, device, num_samples=args.n_samples, block_size=args.seq_len)
     # eval_obj.evaluate(model, seq_len=args.seq_len, n_samples=args.n_samples)
     eval_obj.evaluate(model)

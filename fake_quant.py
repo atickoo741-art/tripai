@@ -22,24 +22,49 @@ from transformers import TrainerCallback
 class ActSTEQuant(torch.autograd.Function):
     @staticmethod
     def forward(ctx, x, clip_vals, num_bits):
-        # Symmetric per-channel: scale = clip/qmax, zero_point = 0
+        """
+        CHANGED: Per-token quantization instead of per-channel
+        
+        Previously: clip_vals [in_features] used as static clipping threshold
+        Now: clip_vals not used - we compute per-token max dynamically
+        """
         qmin = -(1 << (num_bits - 1))
         qmax = (1 << (num_bits - 1)) - 1
         
-        # Ensure qmax is a float if clip_vals is float to avoid type errors in division
         if isinstance(qmax, int):
             qmax = float(qmax)
 
-        scale = (clip_vals / qmax).clamp(min=1e-8)
-
-        # Right-align broadcast to x rank
-        target_shape = [1] * len(x.shape)
-        target_shape[-1] = scale.shape[-1] 
-        broadcastable_scale = scale.view(target_shape)
-
-        x_q = torch.clamp(torch.round(x / broadcastable_scale), qmin, qmax)
-        x_dq = x_q * broadcastable_scale
+        if x.dim() == 3:  # [batch, seq_len, in_features]
+            batch, seq_len, in_features = x.shape
+            
+            # Flatten to [batch*seq_len, in_features]
+            x_flat = x.view(-1, in_features)
+            
+            # CHANGED: Compute per-token max (one value per token)
+            per_token_max = x_flat.abs().max(dim=1, keepdim=True)[0]  # [batch*seq_len, 1]
+            
+            # Compute scales from per-token max
+            scale = (per_token_max / qmax).clamp(min=1e-8)
+            
+            # Quantize
+            x_q = torch.clamp(torch.round(x_flat / scale), qmin, qmax)
+            x_dq = x_q * scale
+            
+            # Reshape back
+            x_dq = x_dq.view(batch, seq_len, in_features)
+            
+        elif x.dim() == 2:  # [batch, in_features]
+            # Per-sample quantization
+            per_sample_max = x.abs().max(dim=1, keepdim=True)[0]  # [batch, 1]
+            scale = (per_sample_max / qmax).clamp(min=1e-8)
+            
+            x_q = torch.clamp(torch.round(x / scale), qmin, qmax)
+            x_dq = x_q * scale
+        else:
+            raise ValueError(f"Unexpected input shape: {x.shape}")
+        
         return x_dq
+
 
     @staticmethod
     def backward(ctx, grad_output):
@@ -186,13 +211,16 @@ class PEQATLoRAModule(nn.Module):
         
         scaled_input = x / smooth_factor
         scaled_weights = merged_weight * self.qat_core.smooth_factor.unsqueeze(0)
-        
-        # Apply PACT clipping to activations
-        clip_vals = self.qat_core.constrained_clip_val
-        clipped_input = torch.clamp(scaled_input, -clip_vals, clip_vals)
+
+        # CHANGED: Remove clipping step
+        # OLD CODE (REMOVED):
+        # clip_vals = self.qat_core.constrained_clip_val
+        # clipped_input = torch.clamp(scaled_input, -clip_vals, clip_vals)
         
         # Apply fake quantization with STE
-        quant_input = ActSTEQuant.apply(clipped_input, clip_vals, self.num_bits)
+        # quant_input = ActSTEQuant.apply(clipped_input, clip_vals, self.num_bits)
+
+        quant_input = ActSTEQuant.apply(scaled_input, None, self.num_bits)
         quant_weight = WeightSTEQuant.apply(scaled_weights, self.num_bits)
         
         # Final linear operation

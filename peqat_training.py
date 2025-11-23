@@ -198,7 +198,7 @@ if __name__ == "__main__":
     
     # Choose memory-friendly settings based on device
     is_cuda = torch.cuda.is_available() and not torch.backends.mps.is_available()
-    per_device_bs = 128 if is_cuda else 8
+    per_device_bs = 32 if is_cuda else 8
     grad_accum = 1 if is_cuda else 8
 
     training_args = TrainingArguments(

@@ -221,7 +221,9 @@ def unified_calibration(model, dataloader, steps=200, percentile=99.5, alpha=0.5
                 continue
             
             clip = per_module_scaled_pctl[key].to(m.qat_core.activation_clip.device)
-            m.qat_core.activation_clip.data.copy_(clip)
+            clip_constrained = torch.clamp(clip, min=0.1, max=10.0)
+            m.qat_core.activation_clip.data.copy_(clip_constrained) # CLIP THE CLIPS
+            
             
             print(f"  Activation clip: mean={clip.mean().item():.3f}, range=[{clip.min().item():.3f}, {clip.max().item():.3f}]")
 

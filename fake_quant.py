@@ -23,30 +23,43 @@ class ActSTEQuant(torch.autograd.Function):
     @staticmethod
     def forward(ctx, x, clip_vals, num_bits):
         """
-        CHANGED: Per-token quantization instead of per-channel
+        Hybrid per-token + per-channel learnable bounds
         
-        Previously: clip_vals [in_features] used as static clipping threshold
-        Now: clip_vals not used - we compute per-token max dynamically
+        clip_vals: [in_features] learnable clip thresholds (per-channel)
+        
+        Strategy:
+        1. Clip activations to learned per-channel bounds (STABILITY)
+        2. Compute per-token max of clipped activations (ADAPTATION)
+        3. Use per-token max as scale (GRANULARITY)
         """
         qmin = -(1 << (num_bits - 1))
         qmax = (1 << (num_bits - 1)) - 1
-        
+        qmax = float(qmax)
+
         if isinstance(qmax, int):
             qmax = float(qmax)
+
+        # Step 1: CLIPPING with learned per-channel bounds (stability)
+        # This prevents outliers from dominating
+        # clip_vals_constrained = clip_vals.clamp(min=0.1, max=10.0)
+        clip_vals_constrained = clip_vals
+        clipped_x = torch.clamp(x, -clip_vals_constrained, clip_vals_constrained)
 
         if x.dim() == 3:  # [batch, seq_len, in_features]
             batch, seq_len, in_features = x.shape
             
             # Flatten to [batch*seq_len, in_features]
-            x_flat = x.view(-1, in_features)
+            x_flat = clipped_x.view(-1, in_features)
             
-            # CHANGED: Compute per-token max (one value per token)
+            # Step 2: Compute per-token max of CLIPPED values
+            # This gives per-token granularity while respecting clip bounds
             per_token_max = x_flat.abs().max(dim=1, keepdim=True)[0]  # [batch*seq_len, 1]
             
-            # Compute scales from per-token max
+            # Step 3: Compute scales from per-token max
+            # Scale is based on actual token range (after clipping)
             scale = (per_token_max / qmax).clamp(min=1e-8)
             
-            # Quantize
+            # Step 4: Quantize
             x_q = torch.clamp(torch.round(x_flat / scale), qmin, qmax)
             x_dq = x_q * scale
             
@@ -54,16 +67,21 @@ class ActSTEQuant(torch.autograd.Function):
             x_dq = x_dq.view(batch, seq_len, in_features)
             
         elif x.dim() == 2:  # [batch, in_features]
-            # Per-sample quantization
-            per_sample_max = x.abs().max(dim=1, keepdim=True)[0]  # [batch, 1]
+            per_sample_max = clipped_x.abs().max(dim=1, keepdim=True)[0]
             scale = (per_sample_max / qmax).clamp(min=1e-8)
             
-            x_q = torch.clamp(torch.round(x / scale), qmin, qmax)
+            x_q = torch.clamp(torch.round(clipped_x / scale), qmin, qmax)
             x_dq = x_q * scale
         else:
             raise ValueError(f"Unexpected input shape: {x.shape}")
         
         return x_dq
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        # STE: pass gradients unchanged
+        return grad_output, None, None
+
 
 
     @staticmethod
@@ -198,36 +216,36 @@ class PEQATLoRAModule(nn.Module):
     
     def forward(self, x):
         """
-        Single forward pass with merged, quantized computation
+        Forward pass with per-token quantization + per-channel learned clipping
         """
         # Get merged weights (base + LoRA)
         merged_weight = self.get_merged_weight()
         
         # Apply SmoothQuant scaling
-        if x.dim() == 3:  # [batch, seq_len, in_features]
+        if x.dim() == 3:
             smooth_factor = self.qat_core.smooth_factor.view(1, 1, -1)
-        else:  # [batch, in_features]
+        else:
             smooth_factor = self.qat_core.smooth_factor.view(1, -1)
         
         scaled_input = x / smooth_factor
         scaled_weights = merged_weight * self.qat_core.smooth_factor.unsqueeze(0)
-
-        # CHANGED: Remove clipping step
-        # OLD CODE (REMOVED):
-        # clip_vals = self.qat_core.constrained_clip_val
-        # clipped_input = torch.clamp(scaled_input, -clip_vals, clip_vals)
         
-        # Apply fake quantization with STE
-        # quant_input = ActSTEQuant.apply(clipped_input, clip_vals, self.num_bits)
-
-        quant_input = ActSTEQuant.apply(scaled_input, None, self.num_bits)
+        # CHANGED: Pass activation_clip back in
+        # activation_clip acts as learned upper bound for clipping
+        clip_vals = self.qat_core.constrained_clip_val
+        
+        # Per-token quantization with per-channel learned clipping
+        quant_input = ActSTEQuant.apply(scaled_input, clip_vals, self.num_bits)
+        
+        # Quantize weights
         quant_weight = WeightSTEQuant.apply(scaled_weights, self.num_bits)
         
-        # Final linear operation
+        # Linear operation
         bias = self.qat_core.original_linear.bias
         output = F.linear(quant_input, quant_weight, bias)
         
         return output
+
     
     def __repr__(self):
         return (f"PEQATLoRAModule(in_features={self.qat_core.in_features}, "

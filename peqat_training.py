@@ -209,7 +209,8 @@ if __name__ == "__main__":
         per_device_eval_batch_size=per_device_bs * 2,
         gradient_accumulation_steps=grad_accum,
         max_grad_norm=0.0, # DISABLE global clipping, we do it per-group
-        gradient_checkpointing=False,
+        gradient_checkpointing=True,
+        gradient_checkpointing_kwargs={'use_reentrant': False},  # Required for PEFT,
         save_strategy="epoch",
         eval_strategy="epoch",
         logging_dir=os.path.join(output_dir, "tensorboard_logs"),
@@ -348,30 +349,30 @@ if __name__ == "__main__":
     if hasattr(peft_model, 'config'):
         peft_model.config.use_cache = False
 
-    print("\n=== Pre-Training Gradient Check (Detailed) ===")
-    peft_model.train()
-    dummy_batch = next(iter(trainer.get_train_dataloader()))
-    dummy_batch = {k: v.to(device) for k, v in dummy_batch.items()}
+    # print("\n=== Pre-Training Gradient Check (Detailed) ===")
+    # peft_model.train()
+    # dummy_batch = next(iter(trainer.get_train_dataloader()))
+    # dummy_batch = {k: v.to(device) for k, v in dummy_batch.items()}
 
-    # First forward-backward pass
-    outputs = peft_model(**dummy_batch)
-    loss = outputs.loss
-    loss.backward()
+    # # First forward-backward pass
+    # outputs = peft_model(**dummy_batch)
+    # loss = outputs.loss
+    # loss.backward()
 
-    print("\nLoRA A matrices:")
-    for name, param in peft_model.named_parameters():
-        if 'lora_A' in name and param.grad is not None:
-            print(f"  {name}: norm={param.grad.norm().item():.6f}, "
-                f"max={param.grad.abs().max().item():.6f}")
+    # print("\nLoRA A matrices:")
+    # for name, param in peft_model.named_parameters():
+    #     if 'lora_A' in name and param.grad is not None:
+    #         print(f"  {name}: norm={param.grad.norm().item():.6f}, "
+    #             f"max={param.grad.abs().max().item():.6f}")
 
-    print("\nLoRA B matrices:")
-    for name, param in peft_model.named_parameters():
-        if 'lora_B' in name and param.grad is not None:
-            print(f"  {name}: norm={param.grad.norm().item():.6f}, "
-                f"max={param.grad.abs().max().item():.6f}")
+    # print("\nLoRA B matrices:")
+    # for name, param in peft_model.named_parameters():
+    #     if 'lora_B' in name and param.grad is not None:
+    #         print(f"  {name}: norm={param.grad.norm().item():.6f}, "
+    #             f"max={param.grad.abs().max().item():.6f}")
 
-    peft_model.zero_grad()
-    print("=" * 50)
+    # peft_model.zero_grad()
+    # print("=" * 50)
 
 
     # 7. Train the model (fresh run). Checkpoints will save quant params via callback.

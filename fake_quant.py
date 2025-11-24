@@ -75,19 +75,42 @@ class ActSTEQuant(torch.autograd.Function):
         else:
             raise ValueError(f"Unexpected input shape: {x.shape}")
         
+        
+        ctx.save_for_backward(x, clip_vals)
         return x_dq
 
     @staticmethod
     def backward(ctx, grad_output):
-        # STE: pass gradients unchanged
-        return grad_output, None, None
-
-
-
-    @staticmethod
-    def backward(ctx, grad_output):
-        # STE: gradients only to x
-        return grad_output, None, None
+        x, clip_vals = ctx.saved_tensors
+        
+        # 1. Gradient for x (STE)
+        # In true PACT, grad is 0 where clamped. In STE, we often pass through.
+        # Let's stick to your STE: pass unchanged.
+        grad_x = grad_output.clone()
+        
+        # 2. Gradient for clip_vals
+        # Where x > clip, grad flows to clip
+        # Where x < -clip, grad flows to clip
+        # Broadacast handling is tricky, but simple sum works for channel-wise if aligned
+        
+        # Create mask for clamped values
+        # We need to handle the broadcasting of clip_vals (per-channel)
+        # x: [batch, seq, channels], clip: [channels]
+        
+        # Ensure clip_vals is broadcastable
+        if x.dim() == 3:
+            clip_broad = clip_vals.view(1, 1, -1)
+        else:
+            clip_broad = clip_vals.view(1, -1)
+            
+        # Gradients for upper bound (where x > clip)
+        grad_clip = (grad_output * (x > clip_broad).float()).sum(dim=(0, 1))
+        
+        # Gradients for lower bound (where x < -clip)
+        # Note: clip is symmetric, so -clip logic adds to the same parameter
+        grad_clip += (grad_output * (x < -clip_broad).float() * -1.0).sum(dim=(0, 1))
+        
+        return grad_x, grad_clip, None
 
 class WeightSTEQuant(torch.autograd.Function):
     @staticmethod

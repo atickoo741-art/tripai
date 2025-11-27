@@ -22,95 +22,76 @@ from transformers import TrainerCallback
 class ActSTEQuant(torch.autograd.Function):
     @staticmethod
     def forward(ctx, x, clip_vals, num_bits):
-        """
-        Hybrid per-token + per-channel learnable bounds
-        
-        clip_vals: [in_features] learnable clip thresholds (per-channel)
-        
-        Strategy:
-        1. Clip activations to learned per-channel bounds (STABILITY)
-        2. Compute per-token max of clipped activations (ADAPTATION)
-        3. Use per-token max as scale (GRANULARITY)
-        """
-        qmin = -(1 << (num_bits - 1))
         qmax = (1 << (num_bits - 1)) - 1
-        qmax = float(qmax)
-
-        if isinstance(qmax, int):
-            qmax = float(qmax)
-
-        # Step 1: CLIPPING with learned per-channel bounds (stability)
-        # This prevents outliers from dominating
-        # clip_vals_constrained = clip_vals.clamp(min=0.1, max=10.0)
-        clip_vals_constrained = clip_vals
-        clipped_x = torch.clamp(x, -clip_vals_constrained, clip_vals_constrained)
-
-        if x.dim() == 3:  # [batch, seq_len, in_features]
-            batch, seq_len, in_features = x.shape
-            
-            # Flatten to [batch*seq_len, in_features]
-            x_flat = clipped_x.view(-1, in_features)
-            
-            # Step 2: Compute per-token max of CLIPPED values
-            # This gives per-token granularity while respecting clip bounds
-            per_token_max = x_flat.abs().max(dim=1, keepdim=True)[0]  # [batch*seq_len, 1]
-            
-            # Step 3: Compute scales from per-token max
-            # Scale is based on actual token range (after clipping)
-            scale = (per_token_max / qmax).clamp(min=1e-8)
-            
-            # Step 4: Quantize
-            x_q = torch.clamp(torch.round(x_flat / scale), qmin, qmax)
-            x_dq = x_q * scale
-            
-            # Reshape back
-            x_dq = x_dq.view(batch, seq_len, in_features)
-            
-        elif x.dim() == 2:  # [batch, in_features]
-            per_sample_max = clipped_x.abs().max(dim=1, keepdim=True)[0]
-            scale = (per_sample_max / qmax).clamp(min=1e-8)
-            
-            x_q = torch.clamp(torch.round(clipped_x / scale), qmin, qmax)
-            x_dq = x_q * scale
+        clip = clip_vals.abs().clamp(min=1e-4)
+        scale = clip / qmax
+        
+        # Broadcasting
+        if x.dim() == 3:
+            clip_b = clip.view(1, 1, -1)
+            scale_b = scale.view(1, 1, -1)
         else:
-            raise ValueError(f"Unexpected input shape: {x.shape}")
+            clip_b = clip.view(1, -1)
+            scale_b = scale.view(1, -1)
         
+        # PACT clipping
+        x_clipped = torch.clamp(x, -clip_b, clip_b)
         
-        ctx.save_for_backward(x, clip_vals)
+        # Quantize
+        x_q = torch.round(x_clipped / scale_b)
+        x_q = torch.clamp(x_q, -qmax, qmax)
+        x_dq = x_q * scale_b
+        
+        # Save EVERYTHING we need for the full gradient
+        ctx.save_for_backward(x, x_clipped, x_dq, clip, scale)
+        ctx.qmax = qmax
         return x_dq
-
+    
     @staticmethod
     def backward(ctx, grad_output):
-        x, clip_vals = ctx.saved_tensors
+        x, x_clipped, x_dq, clip, scale = ctx.saved_tensors
+        qmax = ctx.qmax
         
-        # 1. Gradient for x (STE)
-        # In true PACT, grad is 0 where clamped. In STE, we often pass through.
-        # Let's stick to your STE: pass unchanged.
-        grad_x = grad_output.clone()
-        
-        # 2. Gradient for clip_vals
-        # Where x > clip, grad flows to clip
-        # Where x < -clip, grad flows to clip
-        # Broadacast handling is tricky, but simple sum works for channel-wise if aligned
-        
-        # Create mask for clamped values
-        # We need to handle the broadcasting of clip_vals (per-channel)
-        # x: [batch, seq, channels], clip: [channels]
-        
-        # Ensure clip_vals is broadcastable
+        # Broadcasting
         if x.dim() == 3:
-            clip_broad = clip_vals.view(1, 1, -1)
+            clip_b = clip.view(1, 1, -1)
         else:
-            clip_broad = clip_vals.view(1, -1)
-            
-        # Gradients for upper bound (where x > clip)
-        grad_clip = (grad_output * (x > clip_broad).float()).sum(dim=(0, 1))
+            clip_b = clip.view(1, -1)
         
-        # Gradients for lower bound (where x < -clip)
-        # Note: clip is symmetric, so -clip logic adds to the same parameter
-        grad_clip += (grad_output * (x < -clip_broad).float() * -1.0).sum(dim=(0, 1))
+        # 1. Gradient to Input (Standard STE)
+        mask_inside = (x.abs() <= clip_b)
+        grad_x = grad_output * mask_inside.float()
         
-        return grad_x, grad_clip, None
+        # 2. Gradient to Clip (THE OPTIMAL FORMULA)
+        # This accounts for BOTH clipping and quantization effects
+        
+        grad_alpha = torch.zeros_like(clip)
+        
+        # Component A: Gradient from CLIPPED values (Outliers)
+        # If x > α, output = α, so ∂output/∂α = 1
+        grad_clip_upper = (grad_output * (x > clip_b).float()).sum(dim=(0, 1))
+        grad_clip_lower = (grad_output * (x < -clip_b).float() * -1.0).sum(dim=(0, 1))
+        
+        # Component B: Gradient from QUANTIZATION ERROR (All in-range values)
+        # The quantization error is (x_dq - x_clipped)
+        # This error is a function of the scale (α/qmax)
+        # Derivation: x_dq = round(x/s)*s where s=α/qmax
+        # For small changes in α, the change in x_dq is proportional to (x_dq - x)/α
+        # This captures: "If I increase α (bigger bins), does my reconstruction error get better or worse?"
+        
+        mask_in_range = (x.abs() <= clip_b)
+        quant_error = x_dq - x_clipped  # The reconstruction error
+        
+        # The gradient contribution from quantization error:
+        # ∂(x_dq)/∂α ≈ (x_dq - x_clipped) / α
+        # This tells α: "Adjust to minimize the reconstruction error"
+        grad_quant = (grad_output * quant_error * mask_in_range.float() / (clip_b + 1e-8)).sum(dim=(0, 1))
+        
+        # COMBINE: Total gradient is clipping loss + quantization loss
+        grad_alpha = grad_clip_upper + grad_clip_lower + grad_quant
+        
+        return grad_x, grad_alpha, None
+
 
 class WeightSTEQuant(torch.autograd.Function):
     @staticmethod

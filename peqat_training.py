@@ -58,8 +58,8 @@ if __name__ == "__main__":
     # 3. Prepare the model for LoRA fine-tuning
     print("\n--- Applying LoRA Adapters to quantized model ---")
     lora_config = LoraConfig(
-        r=16,  # Rank of the update matrices (lower = less parameters)
-        lora_alpha=32,  # Alpha parameter for LoRA scaling
+        r=24,  # Rank of the update matrices (lower = less parameters)
+        lora_alpha=48,  # Alpha parameter for LoRA scaling
         target_modules=["c_attn", "c_proj", "c_fc"],  # Target attention and feed-forward layers
         lora_dropout=0.05,
         bias="none",  # Don't train bias parameters
@@ -189,7 +189,7 @@ if __name__ == "__main__":
     print(f"Model will be saved to: {model_dir}")
 
     # Load and preprocess the WikiText-2 dataset
-    datasets, _ = load_and_preprocess_wikitext2(model_name="gpt2", block_size=512) # Use _ for tokenizer as it\'s already loaded
+    datasets, _ = load_and_preprocess_wikitext2(model_name="gpt2", block_size=768) # Use _ for tokenizer as it\'s already loaded
     train_dataset = datasets["train"]
     eval_dataset = datasets["validation"]
 
@@ -398,7 +398,7 @@ if __name__ == "__main__":
     print("\n--- Cross-checking with custom Evaluation class ---")
     from datasets import load_dataset
     val_dataset = load_dataset("wikitext", "wikitext-2-raw-v1", split="validation")
-    custom_eval = Evaluation(tokenizer, val_dataset, device, num_samples=None, block_size=512)
+    custom_eval = Evaluation(tokenizer, val_dataset, device, num_samples=None, block_size=768)
     custom_ppl = custom_eval.evaluate(peft_model)
 
     print(f"\nComparison:")

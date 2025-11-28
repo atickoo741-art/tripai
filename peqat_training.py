@@ -204,7 +204,7 @@ if __name__ == "__main__":
     training_args = TrainingArguments(
         output_dir=output_dir,
         overwrite_output_dir=False,
-        num_train_epochs=22,
+        num_train_epochs=2,
         per_device_train_batch_size=per_device_bs,
         per_device_eval_batch_size=per_device_bs * 2,
         gradient_accumulation_steps=grad_accum,
@@ -247,7 +247,7 @@ if __name__ == "__main__":
     # per_module_abs = calibrate_activation_clips(peft_model, calib_loader, steps=200, percentile=99.5, device=device)
     # # Initialize SmoothQuant scaling factors using activation percentiles and weight stats
     # calibrate_smooth_factors(peft_model, per_module_abs, alpha=0.5)
-    unified_calibration(peft_model, calib_loader, steps=64, percentile=99.9, alpha=0.6, device=device)
+    unified_calibration(peft_model, calib_loader, steps=64, percentile=99.5, alpha=0.6, device=device)
 
 
     # Build optimizer with parameter groups: LoRA vs PACT clip vs SmoothQuant factors
@@ -288,7 +288,7 @@ if __name__ == "__main__":
     param_groups = []
     # Set learning rates: LoRA uses the TrainingArguments LR; quant params use a higher LR
     lora_lr = training_args.learning_rate 
-    qat_lr = training_args.learning_rate * 3 
+    qat_lr = training_args.learning_rate * 10 
 
 
     param_groups = []
@@ -338,8 +338,8 @@ if __name__ == "__main__":
     trainer.add_callback(SaveQuantParamsCallback())
     trainer.add_callback(GradientMonitorCallback(
     log_every_n_steps=10,
-    clip_lora=5.0,   # LoRA can have larger gradients
-    clip_qat=10.0     # QAT should have smaller gradients
+    # clip_lora=5.0,   # LoRA can have larger gradients
+    # clip_qat=10.0     # QAT should have smaller gradients
     ))
 
     

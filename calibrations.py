@@ -1,87 +1,8 @@
+# calibrations.py
+
 import torch
-# from train_qat import QATW4A4Linear
 from fake_quant import PEQATLoRAModule
-
-
-def calibrate_activation_clips(model, dataloader, steps=200, percentile=99.5, device=None):
-    """Initialize per-channel PACT clips using a short percentile calibration pass.
-    Returns a dict mapping id(module) -> per-channel percentile tensor for use in SmoothQuant init.
-    """
-    model_device = next(model.parameters()).device
-    device = device or model_device
-    model.eval()
-
-    # Collect per-module per-channel absolute percentiles via pre-hooks
-    handles = []
-    per_module_abs_pctl = {}
-
-    def pre_hook(mod, inputs):
-        if not inputs:
-            return
-        x = inputs[0]
-        if not torch.is_tensor(x):
-            return
-        x = x.detach()
-        # Flatten all but last dim (channel)
-        x = x.abs().reshape(-1, x.shape[-1])
-        q = torch.quantile(x, torch.tensor(percentile / 100.0, device=x.device), dim=0)
-        key = id(mod)
-        if key in per_module_abs_pctl:
-            per_module_abs_pctl[key] = torch.maximum(per_module_abs_pctl[key], q)
-        else:
-            per_module_abs_pctl[key] = q
-
-    for m in model.modules():
-        if isinstance(m, PEQATLoRAModule):
-            handles.append(m.register_forward_pre_hook(pre_hook))
-
-    # Run a few batches
-    seen = 0
-    with torch.no_grad():
-        for batch in dataloader:
-            batch_on_device = {}
-            for k, v in batch.items():
-                if torch.is_tensor(v):
-                    batch_on_device[k] = v.to(device)
-                else:
-                    batch_on_device[k] = v
-            _ = model(**batch_on_device)
-            seen += 1
-            if seen >= steps:
-                break
-
-    # Apply initialization
-    for m in model.modules():
-        if isinstance(m, PEQATLoRAModule):
-            key = id(m)
-            if key not in per_module_abs_pctl:
-                continue
-            A = per_module_abs_pctl[key].to(m.qat_core.activation_clip.device)
-            # init_a = torch.clamp(A, min=0.5, max=6.0)
-            with torch.no_grad():
-                m.qat_core.activation_clip.data.copy_(A)
-
-    for h in handles:
-        h.remove()
-    model.train()
-    return per_module_abs_pctl
-
-
-def calibrate_smooth_factors(model, per_module_abs_pctl, alpha: float = 0.5):
-    """Initialize per-channel SmoothQuant scaling factors using activation percentiles and weight stats."""
-    model.eval()
-    with torch.no_grad():
-        for m in model.modules():
-            if isinstance(m, PEQATLoRAModule):
-                key = id(m)
-                if key not in per_module_abs_pctl:
-                    continue
-                A = per_module_abs_pctl[key].to(m.qat_core.smooth_factor.device)
-                # Per-input-channel absmax of merged weights (before any smooth scaling)
-                W = m.get_merged_weight().detach().abs().amax(dim=0)  # [in_features]
-                s = (A.pow(alpha) / (W.pow(1.0 - alpha) + 1e-8))
-                m.qat_core.smooth_factor.data.copy_(s)
-    model.train()
+from tqdm import tqdm  # Add this import at the top
 
 def unified_calibration(model, dataloader, steps=200, percentile=99.5, alpha=0.5, device=None):
     """
@@ -98,7 +19,10 @@ def unified_calibration(model, dataloader, steps=200, percentile=99.5, alpha=0.5
     model.eval()
 
     # Phase 1: Collect raw statistics
-    print("Phase 1: Collecting raw activation/weight statistics...")
+    print("\n" + "="*60)
+    print("Phase 1: Collecting raw activation/weight statistics")
+    print("="*60)
+    
     handles = []
     per_module_stats = {}  # {id(module): {'act_pctl': tensor, 'weight_max': tensor}}
 
@@ -127,25 +51,49 @@ def unified_calibration(model, dataloader, steps=200, percentile=99.5, alpha=0.5
         if isinstance(m, PEQATLoRAModule):
             handles.append(m.register_forward_pre_hook(pre_hook))
 
-    # Run calibration forward passes
-    seen = 0
+    # Run calibration forward passes with progress bar
     with torch.no_grad():
-        for batch in dataloader:
+        pbar = tqdm(
+            enumerate(dataloader),
+            total=steps,
+            desc="Phase 1: Collecting stats",
+            unit="batch",
+            bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]'
+        )
+        
+        for batch_idx, batch in pbar:
+            if batch_idx >= steps:
+                break
+            
             batch_on_device = {k: v.to(device) if torch.is_tensor(v) else v 
                              for k, v in batch.items()}
             _ = model(**batch_on_device)
-            seen += 1
-            if seen >= steps:
-                break
+            
+            # Update progress bar with stats
+            pbar.set_postfix({
+                'modules': len(per_module_stats),
+            })
 
     # Remove hooks
     for h in handles:
         h.remove()
 
+    print(f"✓ Collected statistics from {len(per_module_stats)} modules\n")
+
     # Phase 2: Compute and apply smooth factors
-    print("Phase 2: Computing smooth factors...")
+    print("="*60)
+    print("Phase 2: Computing smooth factors")
+    print("="*60)
+    
+    smooth_factor_stats = []
+    
     with torch.no_grad():
-        for m in model.modules():
+        for m in tqdm(
+            model.modules(),
+            desc="Computing smooth factors",
+            unit="module",
+            bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt}'
+        ):
             if not isinstance(m, PEQATLoRAModule):
                 continue
             
@@ -160,10 +108,24 @@ def unified_calibration(model, dataloader, steps=200, percentile=99.5, alpha=0.5
             s = (A.pow(alpha) / (W.pow(1.0 - alpha) + 1e-8))
             m.qat_core.smooth_factor.data.copy_(s)
             
-            print(f"  Smooth factor: mean={s.mean().item():.3f}, range=[{s.min().item():.3f}, {s.max().item():.3f}]")
+            smooth_factor_stats.append({
+                'mean': s.mean().item(),
+                'min': s.min().item(),
+                'max': s.max().item()
+            })
+    
+    # Print aggregate stats
+    if smooth_factor_stats:
+        avg_mean = sum(x['mean'] for x in smooth_factor_stats) / len(smooth_factor_stats)
+        global_min = min(x['min'] for x in smooth_factor_stats)
+        global_max = max(x['max'] for x in smooth_factor_stats)
+        print(f"✓ Smooth factors computed: mean={avg_mean:.3f}, range=[{global_min:.3f}, {global_max:.3f}]\n")
 
     # Phase 3: Recalibrate activation clips on SCALED activations
-    print("Phase 3: Calibrating activation clips on scaled activations...")
+    print("="*60)
+    print("Phase 3: Calibrating activation clips on scaled activations")
+    print("="*60)
+    
     per_module_scaled_pctl = {}
     
     def scaled_pre_hook(mod, inputs):
@@ -196,23 +158,41 @@ def unified_calibration(model, dataloader, steps=200, percentile=99.5, alpha=0.5
         if isinstance(m, PEQATLoRAModule):
             handles.append(m.register_forward_pre_hook(scaled_pre_hook))
 
-    # Run calibration again
-    seen = 0
+    # Run calibration again with progress bar
     with torch.no_grad():
-        for batch in dataloader:
+        pbar = tqdm(
+            enumerate(dataloader),
+            total=steps,
+            desc="Phase 3: Calibrating clips",
+            unit="batch",
+            bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]'
+        )
+        
+        for batch_idx, batch in pbar:
+            if batch_idx >= steps:
+                break
+            
             batch_on_device = {k: v.to(device) if torch.is_tensor(v) else v 
                              for k, v in batch.items()}
             _ = model(**batch_on_device)
-            seen += 1
-            if seen >= steps:
-                break
+            
+            pbar.set_postfix({
+                'clips_computed': len(per_module_scaled_pctl),
+            })
 
     for h in handles:
         h.remove()
 
     # Apply calibrated clips
+    clip_stats = []
+    
     with torch.no_grad():
-        for m in model.modules():
+        for m in tqdm(
+            model.modules(),
+            desc="Applying activation clips",
+            unit="module",
+            bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt}'
+        ):
             if not isinstance(m, PEQATLoRAModule):
                 continue
             
@@ -221,11 +201,22 @@ def unified_calibration(model, dataloader, steps=200, percentile=99.5, alpha=0.5
                 continue
             
             clip = per_module_scaled_pctl[key].to(m.qat_core.activation_clip.device)
-            clip_constrained = torch.clamp(clip, min=0.1, max=10.0)
-            m.qat_core.activation_clip.data.copy_(clip_constrained) # CLIP THE CLIPS
+            m.qat_core.activation_clip.data.copy_(clip)
             
-            
-            print(f"  Activation clip: mean={clip.mean().item():.3f}, range=[{clip.min().item():.3f}, {clip.max().item():.3f}]")
+            clip_stats.append({
+                'mean': clip.mean().item(),
+                'min': clip.min().item(),
+                'max': clip.max().item()
+            })
+    
+    # Print aggregate stats
+    if clip_stats:
+        avg_mean = sum(x['mean'] for x in clip_stats) / len(clip_stats)
+        global_min = min(x['min'] for x in clip_stats)
+        global_max = max(x['max'] for x in clip_stats)
+        print(f"✓ Activation clips set: mean={avg_mean:.3f}, range=[{global_min:.3f}, {global_max:.3f}]")
 
     model.train()
-    print("✓ unified calibration complete\n")
+    print("\n" + "="*60)
+    print("✓ Unified calibration complete")
+    print("="*60 + "\n")

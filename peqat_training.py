@@ -208,14 +208,14 @@ if __name__ == "__main__":
         per_device_train_batch_size=per_device_bs,
         per_device_eval_batch_size=per_device_bs * 2,
         gradient_accumulation_steps=grad_accum,
-        max_grad_norm=0.0, # DISABLE global clipping, we do it per-group
+        max_grad_norm=1.0, # DISABLE global clipping, we do it per-group
         gradient_checkpointing=True,
         gradient_checkpointing_kwargs={'use_reentrant': False},  # Required for PEFT,
         save_strategy="epoch",
         eval_strategy="epoch",
         logging_dir=os.path.join(output_dir, "tensorboard_logs"),
         logging_steps=10,
-        learning_rate=1e-4,  # Reduced learning rate for stability
+        learning_rate=2e-4,
         weight_decay=0.00,
         warmup_ratio=0.15,
         lr_scheduler_type="cosine",
@@ -247,7 +247,7 @@ if __name__ == "__main__":
     # per_module_abs = calibrate_activation_clips(peft_model, calib_loader, steps=200, percentile=99.5, device=device)
     # # Initialize SmoothQuant scaling factors using activation percentiles and weight stats
     # calibrate_smooth_factors(peft_model, per_module_abs, alpha=0.5)
-    unified_calibration(peft_model, calib_loader, steps=500, percentile=99.9, alpha=0.6, device=device)
+    unified_calibration(peft_model, calib_loader, steps=64, percentile=99.9, alpha=0.6, device=device)
 
 
     # Build optimizer with parameter groups: LoRA vs PACT clip vs SmoothQuant factors
@@ -288,7 +288,7 @@ if __name__ == "__main__":
     param_groups = []
     # Set learning rates: LoRA uses the TrainingArguments LR; quant params use a higher LR
     lora_lr = training_args.learning_rate 
-    qat_lr = training_args.learning_rate * 0.5 
+    qat_lr = training_args.learning_rate * 3 
 
 
     param_groups = []
@@ -321,7 +321,7 @@ if __name__ == "__main__":
     param_groups, 
     betas=(0.9, 0.999),  
     eps=1e-8,
-    fused=False)
+    fused=True)
 
     # Initialize Trainer with custom optimizer (Trainer will create scheduler)
     trainer = Trainer(
@@ -339,7 +339,7 @@ if __name__ == "__main__":
     trainer.add_callback(GradientMonitorCallback(
     log_every_n_steps=10,
     clip_lora=5.0,   # LoRA can have larger gradients
-    clip_qat=2.5     # QAT should have smaller gradients
+    clip_qat=10.0     # QAT should have smaller gradients
     ))
 
     

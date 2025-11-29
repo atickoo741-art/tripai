@@ -14,7 +14,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument("--model_path", type=str, required=False, default=None)
 parser.add_argument("--base_model_name", type=str, default="gpt2", help="HF base model to use when model_path is a PEFT adapter dir")
 parser.add_argument("--device", type=str, default=None)
-parser.add_argument("--seq_len", type=int, default=512)
+parser.add_argument("--seq_len", type=int, default=1024)
 parser.add_argument("--n_samples", type=int, default=None)
 
 def main():

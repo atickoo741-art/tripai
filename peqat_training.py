@@ -58,8 +58,8 @@ if __name__ == "__main__":
     # 3. Prepare the model for LoRA fine-tuning
     print("\n--- Applying LoRA Adapters to quantized model ---")
     lora_config = LoraConfig(
-        r=24,  # Rank of the update matrices (lower = less parameters)
-        lora_alpha=48,  # Alpha parameter for LoRA scaling
+        r=32,  # Rank of the update matrices (lower = less parameters)
+        lora_alpha=64,  # Alpha parameter for LoRA scaling
         target_modules=["c_attn", "c_proj", "c_fc"],  # Target attention and feed-forward layers
         lora_dropout=0.05,
         bias="none",  # Don't train bias parameters
@@ -189,7 +189,7 @@ if __name__ == "__main__":
     print(f"Model will be saved to: {model_dir}")
 
     # Load and preprocess the WikiText-2 dataset
-    datasets, _ = load_and_preprocess_wikitext2(model_name="gpt2", block_size=768) # Use _ for tokenizer as it\'s already loaded
+    datasets, _ = load_and_preprocess_wikitext2(model_name="gpt2", block_size=1024) # Use _ for tokenizer as it\'s already loaded
     train_dataset = datasets["train"]
     eval_dataset = datasets["validation"]
 
@@ -204,7 +204,7 @@ if __name__ == "__main__":
     training_args = TrainingArguments(
         output_dir=output_dir,
         overwrite_output_dir=False,
-        num_train_epochs=22,
+        num_train_epochs=30,
         per_device_train_batch_size=per_device_bs,
         per_device_eval_batch_size=per_device_bs * 2,
         gradient_accumulation_steps=grad_accum,
@@ -216,10 +216,10 @@ if __name__ == "__main__":
         logging_dir=os.path.join(output_dir, "tensorboard_logs"),
         logging_steps=10,
         learning_rate=2e-4,
-        weight_decay=0.00,
+        weight_decay=0.01,
         warmup_ratio=0.15,
         lr_scheduler_type="cosine",
-        lr_scheduler_kwargs={"num_cycles": 2},
+        lr_scheduler_kwargs={"num_cycles": 3},
         fp16=is_cuda,
         bf16=False,
         tf32=False,
@@ -398,7 +398,7 @@ if __name__ == "__main__":
     print("\n--- Cross-checking with custom Evaluation class ---")
     from datasets import load_dataset
     val_dataset = load_dataset("wikitext", "wikitext-2-raw-v1", split="validation")
-    custom_eval = Evaluation(tokenizer, val_dataset, device, num_samples=None, block_size=768)
+    custom_eval = Evaluation(tokenizer, val_dataset, device, num_samples=None, block_size=1024)
     custom_ppl = custom_eval.evaluate(peft_model)
 
     print(f"\nComparison:")

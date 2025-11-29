@@ -204,11 +204,11 @@ if __name__ == "__main__":
     training_args = TrainingArguments(
         output_dir=output_dir,
         overwrite_output_dir=False,
-        num_train_epochs=30,
+        num_train_epochs=2,
         per_device_train_batch_size=per_device_bs,
         per_device_eval_batch_size=per_device_bs * 2,
         gradient_accumulation_steps=grad_accum,
-        max_grad_norm=1.0, # DISABLE global clipping, we do it per-group
+        max_grad_norm=1.0,
         gradient_checkpointing=True,
         gradient_checkpointing_kwargs={'use_reentrant': False},  # Required for PEFT,
         save_strategy="epoch",
@@ -219,7 +219,7 @@ if __name__ == "__main__":
         weight_decay=0.01,
         warmup_ratio=0.15,
         lr_scheduler_type="cosine",
-        lr_scheduler_kwargs={"num_cycles": 3},
+        lr_scheduler_kwargs={"num_cycles": 1},
         fp16=is_cuda,
         bf16=False,
         tf32=False,

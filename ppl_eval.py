@@ -39,8 +39,17 @@ def main():
     else:
         # Detect if model_path is a PEFT adapters directory
         is_peft = os.path.isfile(os.path.join(args.model_path, "adapter_config.json"))
-
-        model, tokenizer = load_peqat_model(args.model_path, args.base_model_name, device)
+        is_peqat = os.path.isfile(os.path.join(args.model_path, "quantization_params.pth"))
+        if is_peqat:
+            model, tokenizer = load_peqat_model(args.model_path, args.base_model_name, device)
+        elif is_peft:
+            print(f"Loading PEFT adapter from {args.model_path} on base model {args.base_model_name}")
+            base_model = AutoModelForCausalLM.from_pretrained(args.base_model_name, torch_dtype=torch.float32, device_map=None).to(device)
+            tokenizer = AutoTokenizer.from_pretrained(args.base_model_name)
+            if tokenizer.pad_token is None:
+                tokenizer.pad_token = tokenizer.eos_token
+            model = PeftModel.from_pretrained(base_model, args.model_path).to(device)
+            print(f"PEFT model loaded on {device}")
 
         # model = AutoModelForCausalLM.from_pretrained(args.model_path, torch_dtype=torch.float32, device_map=None).to(device)
         # tokenizer = AutoTokenizer.from_pretrained(args.model_path)

@@ -87,9 +87,20 @@ if __name__ == "__main__":
 
 
     quantize_model(peft_model)
-    for name, module in peft_model.named_modules():
-        if isinstance(module, PEQATLoRAModule):
-            print(name)
+    # for name, module in peft_model.named_modules():
+    #     if isinstance(module, PEQATLoRAModule):
+    #         print(name)
+    # FREEZE ALL SMOOTH FACTORS AT 1.0
+    use_smooth = False
+    if not use_smooth:
+        print("\n=== ABLATION: Freezing SmoothQuant factors at 1.0 ===")
+        with torch.no_grad():
+            for name, module in peft_model.named_modules():
+                if isinstance(module, QATW4A4LinearCore):
+                    module.smooth_factor.data.fill_(1.0)
+                    module.smooth_factor.requires_grad = False
+        print("✓ All smooth factors frozen\n")
+
 
     print("\n--- LoRA Initialization Check ---")
     for name, module in peft_model.named_modules():
@@ -153,8 +164,9 @@ if __name__ == "__main__":
             print(f"LoRA FOUND: {name} -> {param.numel()} params")
             lora_count += param.numel()
         elif is_qat:
-            print(f"QAT FOUND: {name} -> {param.numel()} params")
-            qat_count += param.numel()
+            if param.requires_grad:
+                print(f"QAT FOUND: {name} -> {param.numel()} params")
+                qat_count += param.numel()
         else:
             print(f"OTHER: {name} -> {param.numel()} params (will be frozen)")
             other_count += param.numel()
@@ -247,7 +259,7 @@ if __name__ == "__main__":
     # per_module_abs = calibrate_activation_clips(peft_model, calib_loader, steps=200, percentile=99.5, device=device)
     # # Initialize SmoothQuant scaling factors using activation percentiles and weight stats
     # calibrate_smooth_factors(peft_model, per_module_abs, alpha=0.5)
-    unified_calibration(peft_model, calib_loader, steps=64, percentile=99.5, alpha=0.6, device=device)
+    unified_calibration(peft_model, calib_loader, steps=64, percentile=99.5, alpha=0.6, device=device, use_smooth = use_smooth)
 
 
     # Build optimizer with parameter groups: LoRA vs PACT clip vs SmoothQuant factors

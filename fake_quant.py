@@ -457,9 +457,9 @@ def load_peqat_model(adapter_dir: str, base_model_name: str = "gpt2", device: to
         peft_model.load_state_dict(saved_state_dict, strict=False)
         missing_keys, unexpected_keys = peft_model.load_state_dict(saved_state_dict, strict=False)
         
-        print(f"\n{'='*60}")
-        print("KEY REMAPPING")
-        print(f"{'='*60}")
+        # print(f"\n{'='*60}")
+        # print("KEY REMAPPING")
+        # print(f"{'='*60}")
 
         # Remap keys: add .default before .weight for lora_A and lora_B
         remapped_state_dict = {}
@@ -470,8 +470,8 @@ def load_peqat_model(adapter_dir: str, base_model_name: str = "gpt2", device: to
                 # To:   base_model.model.transformer.h.0.attn.c_attn.lora_A.default.weight
                 runtime_key = saved_key.replace('.weight', '.default.weight')
                 remapped_state_dict[runtime_key] = value
-                print(f"✓ {saved_key}")
-                print(f"  -> {runtime_key}")
+                # print(f"✓ {saved_key}")
+                # print(f"  -> {runtime_key}")
             else:
                 # Keep other keys as-is
                 remapped_state_dict[saved_key] = value
@@ -525,7 +525,7 @@ def load_peqat_model(adapter_dir: str, base_model_name: str = "gpt2", device: to
                             loaded = quant_params[key].to(device=device, dtype=getattr(module, param_name).dtype)
                             break
                     if loaded is not None:
-                        print(f"Setting {param_name} for {name}")
+                        # print(f"Setting {param_name} for {name}")
                         # print(getattr(module, param_name))
                         getattr(module, param_name).data.copy_(loaded.view_as(getattr(module, param_name)))
                         # print(getattr(module, param_name))

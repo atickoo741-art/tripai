@@ -3,6 +3,7 @@ from torch import nn
 from functools import partial
 import torch.nn.functional as F
 from transformers.models.gpt2.modeling_gpt2 import GPT2Block, Conv1D
+from transformers.models.llama.modeling_llama import LlamaDecoderLayer  # Support Llama
 from peft.peft_model import PeftModel
 from transformers import AutoModelForCausalLM, AutoTokenizer
 import os
@@ -243,14 +244,9 @@ class PEQATLoRAModule(nn.Module):
         
         # Quantize weights
         quant_weight = WeightSTEQuant.apply(scaled_weights, self.num_bits)
-
-        # ensure dtype match
-        quant_weight = quant_weight.to(quant_input.dtype)
-
+        
         # Linear operation
         bias = self.qat_core.original_linear.bias
-        if bias is not None:
-            bias = bias.to(quant_input.dtype)
         output = F.linear(quant_input, quant_weight, bias)
         
         return output
@@ -403,10 +399,12 @@ def quantize_model(model, num_bits=4, init_clip_val=2.0):
     else:
         base = model
 
-    if getattr(base.config, 'model_type', None) == 'gpt2':
-        return quantize_peft_gpt2(model, num_bits=num_bits, init_clip_val=init_clip_val)
-    else:
-        raise ValueError(f"Unsupported model type: {base.config.model_type}")
+    # if getattr(base.config, 'model_type', None) == 'gpt2':
+    #     return quantize_peft_gpt2(model, num_bits=num_bits, init_clip_val=init_clip_val)
+    # else:
+    #     raise ValueError(f"Unsupported model type: {base.config.model_type}")
+
+    return quantize_peft_gpt2(model, num_bits=num_bits, init_clip_val=init_clip_val)
     
 
 
@@ -424,18 +422,6 @@ def _find_quant_params_path(checkpoint_dir: str) -> str | None:
                 return f
     return None
 
-def get_dtype():
-    if torch.cuda.is_available():
-        supports_bf16 = torch.cuda.is_bf16_supported()
-        use_bf16 = supports_bf16  
-        use_fp16 = not supports_bf16  
-        use_tf32 = True
-        model_dtype = torch.bfloat16 if use_bf16 else torch.float16
-    else:
-        use_bf16 = use_fp16 = use_tf32 = False
-        model_dtype = torch.float32
-    # return model_dtype, use_bf16,use_fp16,use_tf32
-    return use_bf16,use_fp16,use_tf32
 
 def load_peqat_model(adapter_dir: str, base_model_name: str = "gpt2", device: torch.device | None = None):
     if device is None:
@@ -445,8 +431,6 @@ def load_peqat_model(adapter_dir: str, base_model_name: str = "gpt2", device: to
     tokenizer = AutoTokenizer.from_pretrained(base_model_name)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
-
-    use_bf16, use_fp16, use_tf32 = get_dtype()
     base_model = AutoModelForCausalLM.from_pretrained(base_model_name, torch_dtype=torch.float32, device_map=None).to(device)
 
     # 1. Load LoraConfig from adapter_config.json

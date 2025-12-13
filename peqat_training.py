@@ -9,29 +9,30 @@ from torch.utils.data import DataLoader
 from typing import List
 from fake_quant import quantize_model, PEQATLoRAModule, find_available_dir, SaveQuantParamsCallback, save_quantization_parameters, Evaluation, GradientMonitorCallback, QATW4A4LinearCore
 import torch.nn as nn
-import multiprocessing
-import triton
-from fake_quant import get_dtype
 
 
-
-
-def get_data_loader():
-    if torch.cuda.is_available():
-        # optimal_workers = min(multiprocessing.cpu_count() // 2, 8)
-        optimal_workers = 8
-        pin_memory = True
-    else:
-        optimal_workers = min(multiprocessing.cpu_count() // 4, 4)
-        pin_memory = False
-    return optimal_workers, pin_memory
 
 
 if __name__ == "__main__":
 
     # 1. Load the GPT-2 small model and tokenizer
-    model_name = "gpt2"
+    model_name = "meta-llama/Llama-2-7b-hf"
     tokenizer = AutoTokenizer.from_pretrained(model_name)
+    # ============================================================================
+    # CONFIGURATION
+    # ============================================================================
+    MODEL_NAME = "meta-llama/Llama-2-7b-hf"
+    BLOCK_SIZE = 2048  # Llama context length
+    NUM_EPOCHS = 10    # Fewer epochs needed for 7B models
+    BATCH_SIZE = 8     # Optimized for DGX Spark (~96GB memory)
+    GRAD_ACCUM = 4     # Effective batch size = 32
+    LEARNING_RATE = 1e-4  # Lower LR for larger models
+    LORA_RANK = 64     # More capacity for 7B model
+
+    # Set this to run different experiments
+    use_smooth = True
+    # ============================================================================
+
 
     # Set up device
     print(torch.cuda.is_available())
@@ -48,23 +49,25 @@ if __name__ == "__main__":
         torch.set_default_dtype(torch.float32)
         print("Using CPU")
 
-    use_bf16,use_fp16,use_tf32 = get_dtype()
-    
-    if use_bf16:
-        print("✓ Using BFloat16 mixed precision training")
-    elif use_fp16:
-        print("✓ Using Float16 mixed precision training")
-    else:
-        print("✓ Using Float32 training")
+    print(f"Loading {model_name}...")
+    tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=False)
 
-    # Load model with appropriate settings
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+        tokenizer.pad_token_id = tokenizer.eos_token_id
+        print(f"Set pad_token to eos_token (ID: {tokenizer.pad_token_id})")
+
+    device = torch.device("cuda")
+    # torch.set_default_dtype(torch.bfloat16) # Use bfloat16 for Llama
+
     model = AutoModelForCausalLM.from_pretrained(
         model_name,
-        torch_dtype= torch.float32, 
-        device_map="auto" if device.type == "cuda" else None,
+        torch_dtype=torch.float32,
+        device_map="auto",
+        low_cpu_mem_usage=True,
     )
-    if device.type != "cuda":  # For MPS and CPU, explicitly move to device
-        model = model.to(device)
+    model.resize_token_embeddings(len(tokenizer))
+    print(f"Model loaded on device: {model.device}")
 
     # Add a pad token to the tokenizer if it doesn't have one
     if tokenizer.pad_token is None:
@@ -79,11 +82,21 @@ if __name__ == "__main__":
 
     # apply_quantization_to_model(model)
     # 3. Prepare the model for LoRA fine-tuning
+
+    LORA_RANK = 32
     print("\n--- Applying LoRA Adapters to quantized model ---")
     lora_config = LoraConfig(
-        r=32,  # Rank of the update matrices (lower = less parameters)
-        lora_alpha=64,  # Alpha parameter for LoRA scaling
-        target_modules=["c_attn", "c_proj", "c_fc"],  # Target attention and feed-forward layers
+        r=LORA_RANK,  # Rank of the update matrices (lower = less parameters)
+        lora_alpha=2*LORA_RANK,  # Alpha parameter for LoRA scaling
+        target_modules=[
+        "q_proj",
+        "k_proj",
+        "v_proj",
+        "o_proj",
+        "gate_proj",
+        "up_proj",
+        "down_proj",
+    ],
         lora_dropout=0.05,
         bias="none",  # Don't train bias parameters
         task_type=TaskType.CAUSAL_LM,
@@ -114,7 +127,7 @@ if __name__ == "__main__":
     #     if isinstance(module, PEQATLoRAModule):
     #         print(name)
     # FREEZE ALL SMOOTH FACTORS AT 1.0
-    use_smooth = False
+    # use_smooth = False
     if not use_smooth:
         print("\n=== ABLATION: Freezing SmoothQuant factors at 1.0 ===")
         with torch.no_grad():
@@ -224,49 +237,43 @@ if __name__ == "__main__":
     print(f"Model will be saved to: {model_dir}")
 
     # Load and preprocess the WikiText-2 dataset
-    datasets, _ = load_and_preprocess_wikitext2(model_name="gpt2", block_size=1024) # Use _ for tokenizer as it\'s already loaded
+    datasets, _ = load_and_preprocess_wikitext2(model_name=model_name, block_size=2048) # Use _ for tokenizer as it\'s already loaded
     train_dataset = datasets["train"]
     eval_dataset = datasets["validation"]
 
     # Set up Training Arguments
+    use_fp16 = torch.cuda.is_available() and not torch.backends.mps.is_available()
     
     # Choose memory-friendly settings based on device
     is_cuda = torch.cuda.is_available() and not torch.backends.mps.is_available()
-    per_device_bs = 32 if is_cuda else 8
-    grad_accum = 1 if is_cuda else 8
-
-    
-    optimal_workers, pin_memory = get_data_loader()
+    per_device_bs = 8 if is_cuda else 8
+    grad_accum = 4 if is_cuda else 8
 
     training_args = TrainingArguments(
-        output_dir=output_dir,
+        output_dir= output_dir,
         overwrite_output_dir=False,
-        num_train_epochs=30,
-        per_device_train_batch_size=per_device_bs,
-        per_device_eval_batch_size=per_device_bs * 2,
-        gradient_accumulation_steps=grad_accum,
+        num_train_epochs=NUM_EPOCHS,
+        per_device_train_batch_size=BATCH_SIZE,
+        per_device_eval_batch_size=BATCH_SIZE * 2,
+        gradient_accumulation_steps=GRAD_ACCUM,
         max_grad_norm=1.0,
-        gradient_checkpointing=False,
-        gradient_checkpointing_kwargs={'use_reentrant': False},  # Required for PEFT,
+        gradient_checkpointing=True,
+        gradient_checkpointing_kwargs={'use_reentrant': False},
         save_strategy="epoch",
         eval_strategy="epoch",
-        logging_dir=os.path.join(output_dir, "tensorboard_logs"),
         logging_steps=10,
-        learning_rate=2.5e-4,
+        learning_rate=LEARNING_RATE,
         weight_decay=0.01,
-        warmup_ratio=0.15,
+        warmup_ratio=0.1,
         lr_scheduler_type="cosine",
-        lr_scheduler_kwargs={"num_cycles": 3},
-        fp16=use_fp16,
-        bf16=use_bf16,
-        tf32=use_tf32,
+        bf16=False, # Enable bfloat16
+        fp16=False,
+        tf32=True, # Enable for Blackwell/Ampere GPUs
         report_to="tensorboard",
-        remove_unused_columns=False,
         load_best_model_at_end=True,
         metric_for_best_model="eval_loss",
-        dataloader_num_workers=optimal_workers,
-        dataloader_pin_memory=pin_memory,
-        dataloader_prefetch_factor=2,  # ✓ Prefetch batches
+        dataloader_pin_memory=False, # Not needed for unified memory
+        dataloader_num_workers=8,
     )
 
     # Define Data Collator
@@ -286,9 +293,6 @@ if __name__ == "__main__":
     # # Initialize SmoothQuant scaling factors using activation percentiles and weight stats
     # calibrate_smooth_factors(peft_model, per_module_abs, alpha=0.5)
     unified_calibration(peft_model, calib_loader, steps=64, percentile=99.5, alpha=0.6, device=device, use_smooth = use_smooth)
-    del calib_loader
-    torch.cuda.empty_cache()
-    print(f"✓ Memory after cleanup: {torch.cuda.memory_allocated()/1e9:.1f} GB")
 
 
     # Build optimizer with parameter groups: LoRA vs PACT clip vs SmoothQuant factors
@@ -312,33 +316,25 @@ if __name__ == "__main__":
         ])
         
         if is_lora:
-            param.requires_grad_(True)
+            param.requires_grad_(True)  # Force enable
             lora_params.append(param)
             print(f"Added LoRA param: {name} ({param.numel()} params)")
-    
-        elif "activation_clip" in name:
-            param.requires_grad_(True)
-            clip_params.append(param)
-            print(f"Added clip param: {name} ({param.numel()} params)")
-        
-        elif "smooth_factor" in name:
-            # CHANGED: Only add if use_smooth is True
-            if use_smooth:
-                param.requires_grad_(True)
+        elif is_qat:
+            param.requires_grad_(True)  # Force enable  
+            if "activation_clip" in name:
+                clip_params.append(param)
+                print(f"Added clip param: {name} ({param.numel()} params)")
+            elif "smooth_factor" in name:
                 smooth_params.append(param)
                 print(f"Added smooth param: {name} ({param.numel()} params)")
-            else:
-                # Keep frozen
-                param.requires_grad_(False)
-                print(f"Skipped smooth param (frozen): {name}")
 
-                
     print(f"Optimizer setup: {len(lora_params)} LoRA, {len(clip_params)} clip, {len(smooth_params)} smooth params")
 
     param_groups = []
     # Set learning rates: LoRA uses the TrainingArguments LR; quant params use a higher LR
     lora_lr = training_args.learning_rate 
-    qat_lr = training_args.learning_rate * 10 
+    qat_lr = training_args.learning_rate * 10
+    smooth_lr = training_args.learning_rate * 5 
 
 
     param_groups = []
@@ -354,10 +350,10 @@ if __name__ == "__main__":
             "lr": qat_lr, 
             "weight_decay": 0.0  # No weight decay on clip values
         })
-    if smooth_params:
+    if smooth_params and use_smooth:
         param_groups.append({
             "params": smooth_params, 
-            "lr": qat_lr, 
+            "lr": smooth_lr, 
             "weight_decay": 0.0  # No weight decay on smooth factors
         })
 
@@ -369,18 +365,9 @@ if __name__ == "__main__":
 
     optimizer = torch.optim.AdamW(
     param_groups, 
-    betas=(0.9, 0.999),  
+    betas=(0.9, 0.95),  
     eps=1e-8,
     fused=True)
-
-    # Verification: Check smooth_factor is actually frozen
-    print("\n=== Smooth Factor Status ===")
-    for name, param in peft_model.named_parameters():
-        if "smooth_factor" in name:
-            print(f"{name}:")
-            print(f"  requires_grad: {param.requires_grad}")
-            print(f"  value: {param.data[0].item():.4f}")
-            print(f"  in optimizer: {any(param is p for group in optimizer.param_groups for p in group['params'])}")
 
     # Initialize Trainer with custom optimizer (Trainer will create scheduler)
     trainer = Trainer(
@@ -436,22 +423,6 @@ if __name__ == "__main__":
 
 
     # 7. Train the model (fresh run). Checkpoints will save quant params via callback.
-    
-    # peft_model = torch.compile(peft_model, mode='reduce-overhead', fullgraph=False)
-    if torch.cuda.is_available() and torch.__version__ >= "2.0":
-        print("\n🚀 Compiling model...")
-        try:
-            peft_model = torch.compile(
-                peft_model,
-                mode='reduce-overhead',
-                fullgraph=False,  # CRITICAL for PEFT!
-                dynamic=True      # Handles variable seq length
-            )
-            print("✓ Compilation successful")
-        except Exception as e:
-            print(f"⚠️  Failed: {e}")
-            # Training continues without it (slower but works)
-
     print("\n--- Starting W4A4 QAT with LoRA Fine-tuning ---")
     trainer.train()
     import json
@@ -473,21 +444,13 @@ if __name__ == "__main__":
     print("\n--- Cross-checking with custom Evaluation class ---")
     from datasets import load_dataset
     val_dataset = load_dataset("wikitext", "wikitext-2-raw-v1", split="validation")
+    custom_eval = Evaluation(tokenizer, val_dataset, device, num_samples=None, block_size=2048)
+    custom_ppl = custom_eval.evaluate(peft_model)
 
-    # # After training completes
-    # print("--- Evaluating W4A4 QAT + LoRA Model ---")
-
-    # # ✓ Disable torch.compile for evaluation
-    # if hasattr(peft_model, '_orig_mod'):
-    #     peft_model = peft_model._orig_mod
-    # print("✓ Unwrapped compiled model for evaluation")
-    # custom_eval = Evaluation(tokenizer, val_dataset, device, num_samples=None, block_size=1024)
-    # custom_ppl = custom_eval.evaluate(peft_model)
-
-    # print(f"\nComparison:")
-    # print(f"  Trainer perplexity: {trainer_ppl:.2f}")
-    # print(f"  Custom eval perplexity: {custom_ppl:.2f}")
-    # print(f"  Difference: {abs(trainer_ppl - custom_ppl):.2f}")
+    print(f"\nComparison:")
+    print(f"  Trainer perplexity: {trainer_ppl:.2f}")
+    print(f"  Custom eval perplexity: {custom_ppl:.2f}")
+    print(f"  Difference: {abs(trainer_ppl - custom_ppl):.2f}")
 
 
     

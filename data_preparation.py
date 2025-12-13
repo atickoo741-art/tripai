@@ -11,7 +11,8 @@ def load_and_preprocess_wikitext2(model_name="gpt2", block_size=128):
 
     if tokenizer.pad_token is None:
         tokenizer.add_special_tokens({'pad_token': tokenizer.eos_token})
-
+        tokenizer.pad_token_id = tokenizer.eos_token_id
+        print(f"Set pad_token to eos_token: {tokenizer.pad_token}")
     def tokenize_function(examples):
         return tokenizer(examples["text"], truncation=True)
 

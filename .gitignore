@@ -1,3 +1,11 @@
+'EOF'
 qatenv/
 output_*/
 qat_lora_model_*/
+*.pt
+*.safetensors
+*.bin
+__pycache__/
+.cache/
+data/
+EOF

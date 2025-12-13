@@ -99,7 +99,7 @@ class WeightSTEQuant(torch.autograd.Function):
         # Symmetric per-row(out) scale from row max (detached); zero_point = 0
         qmin = -(1 << (num_bits - 1))
         qmax = (1 << (num_bits - 1)) - 1
-        row_max = W.detach().abs().amax(dim=1, keepdim=True)
+        row_max = W.detach().abs().amax(dim=0, keepdim=True)
         scale = (row_max / max(qmax, 1)).clamp(min=1e-8)
         W_q = torch.clamp(torch.round(W / scale), qmin, qmax)
         W_dq = W_q * scale

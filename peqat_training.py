@@ -220,6 +220,9 @@ if __name__ == "__main__":
         per_device_train_batch_size=per_device_bs,
         per_device_eval_batch_size=per_device_bs * 2,
         gradient_accumulation_steps=grad_accum,
+        bf16=True if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else False,
+        fp16=use_fp16,
+        fp16_opt_level="O1" if use_fp16 else None,
         max_grad_norm=1.0,
         gradient_checkpointing=True,
         gradient_checkpointing_kwargs={'use_reentrant': False},  # Required for PEFT,
@@ -389,6 +392,9 @@ if __name__ == "__main__":
 
 
     # 7. Train the model (fresh run). Checkpoints will save quant params via callback.
+    
+    peft_model = torch.compile(peft_model, mode='reduce-overhead', fullgraph=False)
+
     print("\n--- Starting W4A4 QAT with LoRA Fine-tuning ---")
     trainer.train()
     import json

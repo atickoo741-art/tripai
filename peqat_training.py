@@ -220,9 +220,6 @@ if __name__ == "__main__":
         per_device_train_batch_size=per_device_bs,
         per_device_eval_batch_size=per_device_bs * 2,
         gradient_accumulation_steps=grad_accum,
-        bf16=True if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else False,
-        fp16=use_fp16,
-        fp16_opt_level="O1" if use_fp16 else None,
         max_grad_norm=1.0,
         gradient_checkpointing=True,
         gradient_checkpointing_kwargs={'use_reentrant': False},  # Required for PEFT,
@@ -243,7 +240,7 @@ if __name__ == "__main__":
         load_best_model_at_end=True,
         metric_for_best_model="eval_loss",
         dataloader_pin_memory=True,
-        dataloader_num_workers=16,
+        dataloader_num_workers=4,
     )
 
     # Define Data Collator
@@ -286,18 +283,27 @@ if __name__ == "__main__":
         ])
         
         if is_lora:
-            param.requires_grad_(True)  # Force enable
+            param.requires_grad_(True)
             lora_params.append(param)
             print(f"Added LoRA param: {name} ({param.numel()} params)")
-        elif is_qat:
-            param.requires_grad_(True)  # Force enable  
-            if "activation_clip" in name:
-                clip_params.append(param)
-                print(f"Added clip param: {name} ({param.numel()} params)")
-            elif "smooth_factor" in name:
+    
+        elif "activation_clip" in name:
+            param.requires_grad_(True)
+            clip_params.append(param)
+            print(f"Added clip param: {name} ({param.numel()} params)")
+        
+        elif "smooth_factor" in name:
+            # CHANGED: Only add if use_smooth is True
+            if use_smooth:
+                param.requires_grad_(True)
                 smooth_params.append(param)
                 print(f"Added smooth param: {name} ({param.numel()} params)")
+            else:
+                # Keep frozen
+                param.requires_grad_(False)
+                print(f"Skipped smooth param (frozen): {name}")
 
+                
     print(f"Optimizer setup: {len(lora_params)} LoRA, {len(clip_params)} clip, {len(smooth_params)} smooth params")
 
     param_groups = []
@@ -393,7 +399,7 @@ if __name__ == "__main__":
 
     # 7. Train the model (fresh run). Checkpoints will save quant params via callback.
     
-    peft_model = torch.compile(peft_model, mode='reduce-overhead', fullgraph=False)
+    # peft_model = torch.compile(peft_model, mode='reduce-overhead', fullgraph=False)
 
     print("\n--- Starting W4A4 QAT with LoRA Fine-tuning ---")
     trainer.train()

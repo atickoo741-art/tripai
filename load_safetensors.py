@@ -1,8 +1,9 @@
 from safetensors import safe_open
 import os
 import torch
-file_path = "/Users/shresthmishra/Documents/Code/w4a4peqat/qat_lora_model_6/adapter_model.safetensors"
+# file_path = "/Users/shresthmishra/Documents/Code/w4a4peqat/qat_lora_model_6/adapter_model.safetensors"
 from safetensors.torch import load_file
+
 
 
 # with safe_open(file_path, framework="pt") as f: # "pt" for PyTorch
@@ -30,7 +31,8 @@ from safetensors.torch import load_file
 #             print(tensor)
 
 
-quant_params = torch.load("qat_lora_model_16/quantization_params.pth")
+# quant_params = torch.load("output_qat_lora_21/checkpoint-2190/quantization_params.pth")
+quant_params = torch.load("qat_lora_model_19/quantization_params.pth")
 # for key in quant_params:
     # print(f"Key: {key}")
     # print(f"Value: {value}")

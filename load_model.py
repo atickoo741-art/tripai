@@ -1,6 +1,6 @@
 from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 import torch
-
+from fake_quant import load_peqat_model
 # 1. Load the GPT-2 small model
 # We'll prepare for 4-bit quantization later by defining the BitsAndBytesConfig now.
 # This will ensure compatibility when we move to the W4A4 quantization step.
@@ -22,6 +22,8 @@ model = AutoModelForCausalLM.from_pretrained(
     torch_dtype=torch.bfloat16, # Use bfloat16 for better precision if not using 4-bit for now
     device_map="auto"
 )
+model_path = "qat_lora_model_19"
+model, tokenizer = load_peqat_model(model_path, "gpt2", "cuda")
 
 # Add a pad token to the tokenizer if it doesn't have one, as it's common for causal LMs
 if tokenizer.pad_token is None:

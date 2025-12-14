@@ -45,7 +45,7 @@ def unified_calibration(model, dataloader, steps=200, percentile=99.5, alpha=0.5
             x = x.detach()
             
             # Raw activation statistics
-            x_flat = x.abs().reshape(-1, x.shape[-1])
+            x_flat = x.abs().reshape(-1, x.shape[-1]).float()
             q = torch.quantile(x_flat, torch.tensor(percentile / 100.0, device=x.device), dim=0)
             
             key = id(mod)
@@ -149,7 +149,7 @@ def unified_calibration(model, dataloader, steps=200, percentile=99.5, alpha=0.5
             x_scaled = x / s
             
             # Get percentile of SCALED activations
-            x_flat = x_scaled.abs().reshape(-1, x_scaled.shape[-1])
+            x_flat = x_scaled.abs().reshape(-1, x_scaled.shape[-1]).float()
             q = torch.quantile(x_flat, torch.tensor(percentile / 100.0, device=x.device), dim=0)
             
             key = id(mod)
@@ -238,7 +238,7 @@ def unified_calibration(model, dataloader, steps=200, percentile=99.5, alpha=0.5
             x = x.detach()
             
             # Get percentile of RAW (unscaled) activations
-            x_flat = x.abs().reshape(-1, x.shape[-1])
+            x_flat = x.abs().reshape(-1, x.shape[-1]).float()
             q = torch.quantile(x_flat, torch.tensor(percentile / 100.0, device=x.device), dim=0)
             
             key = id(mod)

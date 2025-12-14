@@ -9,8 +9,20 @@ from torch.utils.data import DataLoader
 from typing import List
 from fake_quant import quantize_model, PEQATLoRAModule, find_available_dir, SaveQuantParamsCallback, save_quantization_parameters, Evaluation, GradientMonitorCallback, QATW4A4LinearCore
 import torch.nn as nn
+import multiprocessing
+import triton
 
 
+
+
+def get_data_loader():
+    if torch.cuda.is_available():
+        optimal_workers = min(multiprocessing.cpu_count() // 2, 8)
+        pin_memory = True
+    else:
+        optimal_workers = min(multiprocessing.cpu_count() // 4, 4)
+        pin_memory = False
+    return optimal_workers, pin_memory
 
 
 if __name__ == "__main__":
@@ -34,10 +46,20 @@ if __name__ == "__main__":
         torch.set_default_dtype(torch.float32)
         print("Using CPU")
 
+    if torch.cuda.is_available():
+        supports_bf16 = torch.cuda.is_bf16_supported()
+        use_bf16 = supports_bf16  # RTX 30xx/40xx, A100
+        use_fp16 = not supports_bf16  # Older GPUs
+        use_tf32 = True
+        model_dtype = torch.bfloat16 if use_bf16 else torch.float16
+    else:
+        use_bf16 = use_fp16 = use_tf32 = False
+        model_dtype = torch.float32
+    
     # Load model with appropriate settings
     model = AutoModelForCausalLM.from_pretrained(
         model_name,
-        torch_dtype=torch.float32,  # Change from bfloat16 to float32
+        torch_dtype= model_dtype,
         device_map="auto" if device.type == "cuda" else None,
     )
     if device.type != "cuda":  # For MPS and CPU, explicitly move to device
@@ -213,6 +235,9 @@ if __name__ == "__main__":
     per_device_bs = 32 if is_cuda else 8
     grad_accum = 1 if is_cuda else 8
 
+    
+    optimal_workers, pin_memory = get_data_loader()
+
     training_args = TrainingArguments(
         output_dir=output_dir,
         overwrite_output_dir=False,
@@ -221,7 +246,7 @@ if __name__ == "__main__":
         per_device_eval_batch_size=per_device_bs * 2,
         gradient_accumulation_steps=grad_accum,
         max_grad_norm=1.0,
-        gradient_checkpointing=True,
+        gradient_checkpointing=False,
         gradient_checkpointing_kwargs={'use_reentrant': False},  # Required for PEFT,
         save_strategy="epoch",
         eval_strategy="epoch",
@@ -239,8 +264,9 @@ if __name__ == "__main__":
         remove_unused_columns=False,
         load_best_model_at_end=True,
         metric_for_best_model="eval_loss",
-        dataloader_pin_memory=True,
-        dataloader_num_workers=4,
+        dataloader_num_workers=optimal_workers,
+        dataloader_pin_memory=pin_memory,
+        dataloader_prefetch_factor=2,  # ✓ Prefetch batches
     )
 
     # Define Data Collator
@@ -409,6 +435,19 @@ if __name__ == "__main__":
     # 7. Train the model (fresh run). Checkpoints will save quant params via callback.
     
     # peft_model = torch.compile(peft_model, mode='reduce-overhead', fullgraph=False)
+    if torch.cuda.is_available() and torch.__version__ >= "2.0":
+        print("\n🚀 Compiling model...")
+        try:
+            peft_model = torch.compile(
+                peft_model,
+                mode='reduce-overhead',
+                fullgraph=False,  # CRITICAL for PEFT!
+                dynamic=True      # Handles variable seq length
+            )
+            print("✓ Compilation successful")
+        except Exception as e:
+            print(f"⚠️  Failed: {e}")
+            # Training continues without it (slower but works)
 
     print("\n--- Starting W4A4 QAT with LoRA Fine-tuning ---")
     trainer.train()

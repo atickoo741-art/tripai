@@ -112,6 +112,7 @@ def unified_calibration(model, dataloader, steps=200, percentile=99.5, alpha=0.5
                 
                 # SmoothQuant formula: s = A^α / W^(1-α)
                 s = (A.pow(alpha) / (W.pow(1.0 - alpha) + 1e-8))
+                s = s.clamp(min=0.1, max=50.0) # prevent extreme values
                 m.qat_core.smooth_factor.data.copy_(s)
                 
                 smooth_factor_stats.append({

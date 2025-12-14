@@ -424,6 +424,17 @@ def _find_quant_params_path(checkpoint_dir: str) -> str | None:
                 return f
     return None
 
+def get_dtype():
+    if torch.cuda.is_available():
+        supports_bf16 = torch.cuda.is_bf16_supported()
+        use_bf16 = supports_bf16  
+        use_fp16 = not supports_bf16  
+        use_tf32 = True
+        model_dtype = torch.bfloat16 if use_bf16 else torch.float16
+    else:
+        use_bf16 = use_fp16 = use_tf32 = False
+        model_dtype = torch.float32
+    return model_dtype, use_bf16,use_fp16,use_tf32
 
 def load_peqat_model(adapter_dir: str, base_model_name: str = "gpt2", device: torch.device | None = None):
     if device is None:
@@ -433,7 +444,9 @@ def load_peqat_model(adapter_dir: str, base_model_name: str = "gpt2", device: to
     tokenizer = AutoTokenizer.from_pretrained(base_model_name)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
-    base_model = AutoModelForCausalLM.from_pretrained(base_model_name, torch_dtype=torch.float32, device_map=None).to(device)
+
+    model_dtype = get_dtype()
+    base_model = AutoModelForCausalLM.from_pretrained(base_model_name, torch_dtype=model_dtype, device_map=None).to(device)
 
     # 1. Load LoraConfig from adapter_config.json
     adapter_config_path = os.path.join(adapter_dir, "adapter_config.json")

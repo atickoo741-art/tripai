@@ -11,6 +11,7 @@ from fake_quant import quantize_model, PEQATLoRAModule, find_available_dir, Save
 import torch.nn as nn
 import multiprocessing
 import triton
+from fake_quant import get_dtype
 
 
 
@@ -46,15 +47,16 @@ if __name__ == "__main__":
         torch.set_default_dtype(torch.float32)
         print("Using CPU")
 
-    if torch.cuda.is_available():
-        supports_bf16 = torch.cuda.is_bf16_supported()
-        use_bf16 = supports_bf16  # RTX 30xx/40xx, A100
-        use_fp16 = not supports_bf16  # Older GPUs
-        use_tf32 = True
-        model_dtype = torch.bfloat16 if use_bf16 else torch.float16
-    else:
-        use_bf16 = use_fp16 = use_tf32 = False
-        model_dtype = torch.float32
+    # if torch.cuda.is_available():
+    #     supports_bf16 = torch.cuda.is_bf16_supported()
+    #     use_bf16 = supports_bf16  
+    #     use_fp16 = not supports_bf16  
+    #     use_tf32 = True
+    #     model_dtype = torch.bfloat16 if use_bf16 else torch.float16
+    # else:
+    #     use_bf16 = use_fp16 = use_tf32 = False
+    #     model_dtype = torch.float32
+    model_dtype, use_bf16,use_fp16,use_tf32 = get_dtype()
     
     # Load model with appropriate settings
     model = AutoModelForCausalLM.from_pretrained(
@@ -257,9 +259,9 @@ if __name__ == "__main__":
         warmup_ratio=0.15,
         lr_scheduler_type="cosine",
         lr_scheduler_kwargs={"num_cycles": 3},
-        fp16=is_cuda,
-        bf16=False,
-        tf32=False,
+        fp16=use_fp16,
+        bf16=use_bf16,
+        tf32=use_tf32,
         report_to="tensorboard",
         remove_unused_columns=False,
         load_best_model_at_end=True,

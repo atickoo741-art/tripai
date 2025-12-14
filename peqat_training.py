@@ -344,6 +344,15 @@ if __name__ == "__main__":
     eps=1e-8,
     fused=True)
 
+    # Verification: Check smooth_factor is actually frozen
+    print("\n=== Smooth Factor Status ===")
+    for name, param in peft_model.named_parameters():
+        if "smooth_factor" in name:
+            print(f"{name}:")
+            print(f"  requires_grad: {param.requires_grad}")
+            print(f"  value: {param.data[0].item():.4f}")
+            print(f"  in optimizer: {any(param is p for group in optimizer.param_groups for p in group['params'])}")
+
     # Initialize Trainer with custom optimizer (Trainer will create scheduler)
     trainer = Trainer(
         model=peft_model,

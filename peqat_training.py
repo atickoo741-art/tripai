@@ -47,12 +47,19 @@ if __name__ == "__main__":
         torch.set_default_dtype(torch.float32)
         print("Using CPU")
 
-    model_dtype, use_bf16,use_fp16,use_tf32 = get_dtype()
+    use_bf16,use_fp16,use_tf32 = get_dtype()
     
+    if use_bf16:
+        print("✓ Using BFloat16 mixed precision training")
+    elif use_fp16:
+        print("✓ Using Float16 mixed precision training")
+    else:
+        print("✓ Using Float32 training")
+        
     # Load model with appropriate settings
     model = AutoModelForCausalLM.from_pretrained(
         model_name,
-        torch_dtype= model_dtype,
+        torch_dtype= torch.float32, 
         device_map="auto" if device.type == "cuda" else None,
     )
     if device.type != "cuda":  # For MPS and CPU, explicitly move to device

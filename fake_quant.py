@@ -434,7 +434,8 @@ def get_dtype():
     else:
         use_bf16 = use_fp16 = use_tf32 = False
         model_dtype = torch.float32
-    return model_dtype, use_bf16,use_fp16,use_tf32
+    # return model_dtype, use_bf16,use_fp16,use_tf32
+    return use_bf16,use_fp16,use_tf32
 
 def load_peqat_model(adapter_dir: str, base_model_name: str = "gpt2", device: torch.device | None = None):
     if device is None:

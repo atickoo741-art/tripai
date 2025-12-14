@@ -47,15 +47,6 @@ if __name__ == "__main__":
         torch.set_default_dtype(torch.float32)
         print("Using CPU")
 
-    # if torch.cuda.is_available():
-    #     supports_bf16 = torch.cuda.is_bf16_supported()
-    #     use_bf16 = supports_bf16  
-    #     use_fp16 = not supports_bf16  
-    #     use_tf32 = True
-    #     model_dtype = torch.bfloat16 if use_bf16 else torch.float16
-    # else:
-    #     use_bf16 = use_fp16 = use_tf32 = False
-    #     model_dtype = torch.float32
     model_dtype, use_bf16,use_fp16,use_tf32 = get_dtype()
     
     # Load model with appropriate settings
@@ -230,7 +221,6 @@ if __name__ == "__main__":
     eval_dataset = datasets["validation"]
 
     # Set up Training Arguments
-    use_fp16 = torch.cuda.is_available() and not torch.backends.mps.is_available()
     
     # Choose memory-friendly settings based on device
     is_cuda = torch.cuda.is_available() and not torch.backends.mps.is_available()

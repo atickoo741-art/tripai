@@ -243,9 +243,14 @@ class PEQATLoRAModule(nn.Module):
         
         # Quantize weights
         quant_weight = WeightSTEQuant.apply(scaled_weights, self.num_bits)
-        
+
+        # ensure dtype match
+        quant_weight = quant_weight.to(quant_input.dtype)
+
         # Linear operation
         bias = self.qat_core.original_linear.bias
+        if bias is not None:
+            bias = bias.to(quant_input.dtype)
         output = F.linear(quant_input, quant_weight, bias)
         
         return output

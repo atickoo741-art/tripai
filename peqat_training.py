@@ -55,7 +55,7 @@ if __name__ == "__main__":
         print("✓ Using Float16 mixed precision training")
     else:
         print("✓ Using Float32 training")
-        
+
     # Load model with appropriate settings
     model = AutoModelForCausalLM.from_pretrained(
         model_name,
@@ -113,7 +113,7 @@ if __name__ == "__main__":
     #     if isinstance(module, PEQATLoRAModule):
     #         print(name)
     # FREEZE ALL SMOOTH FACTORS AT 1.0
-    use_smooth = False
+    use_smooth = True
     if not use_smooth:
         print("\n=== ABLATION: Freezing SmoothQuant factors at 1.0 ===")
         with torch.no_grad():
@@ -285,6 +285,9 @@ if __name__ == "__main__":
     # # Initialize SmoothQuant scaling factors using activation percentiles and weight stats
     # calibrate_smooth_factors(peft_model, per_module_abs, alpha=0.5)
     unified_calibration(peft_model, calib_loader, steps=64, percentile=99.5, alpha=0.6, device=device, use_smooth = use_smooth)
+    del calib_loader
+    torch.cuda.empty_cache()
+    print(f"✓ Memory after cleanup: {torch.cuda.memory_allocated()/1e9:.1f} GB")
 
 
     # Build optimizer with parameter groups: LoRA vs PACT clip vs SmoothQuant factors
@@ -469,13 +472,21 @@ if __name__ == "__main__":
     print("\n--- Cross-checking with custom Evaluation class ---")
     from datasets import load_dataset
     val_dataset = load_dataset("wikitext", "wikitext-2-raw-v1", split="validation")
-    custom_eval = Evaluation(tokenizer, val_dataset, device, num_samples=None, block_size=1024)
-    custom_ppl = custom_eval.evaluate(peft_model)
 
-    print(f"\nComparison:")
-    print(f"  Trainer perplexity: {trainer_ppl:.2f}")
-    print(f"  Custom eval perplexity: {custom_ppl:.2f}")
-    print(f"  Difference: {abs(trainer_ppl - custom_ppl):.2f}")
+    # # After training completes
+    # print("--- Evaluating W4A4 QAT + LoRA Model ---")
+
+    # # ✓ Disable torch.compile for evaluation
+    # if hasattr(peft_model, '_orig_mod'):
+    #     peft_model = peft_model._orig_mod
+    # print("✓ Unwrapped compiled model for evaluation")
+    # custom_eval = Evaluation(tokenizer, val_dataset, device, num_samples=None, block_size=1024)
+    # custom_ppl = custom_eval.evaluate(peft_model)
+
+    # print(f"\nComparison:")
+    # print(f"  Trainer perplexity: {trainer_ppl:.2f}")
+    # print(f"  Custom eval perplexity: {custom_ppl:.2f}")
+    # print(f"  Difference: {abs(trainer_ppl - custom_ppl):.2f}")
 
 
     

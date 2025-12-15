@@ -446,8 +446,8 @@ def load_peqat_model(adapter_dir: str, base_model_name: str = "gpt2", device: to
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    model_dtype, use_bf16, use_fp16, use_tf32 = get_dtype()
-    base_model = AutoModelForCausalLM.from_pretrained(base_model_name, torch_dtype=model_dtype, device_map=None).to(device)
+    use_bf16, use_fp16, use_tf32 = get_dtype()
+    base_model = AutoModelForCausalLM.from_pretrained(base_model_name, torch_dtype=torch.float32, device_map=None).to(device)
 
     # 1. Load LoraConfig from adapter_config.json
     adapter_config_path = os.path.join(adapter_dir, "adapter_config.json")

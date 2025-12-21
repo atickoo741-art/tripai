@@ -113,7 +113,7 @@ if __name__ == "__main__":
     #     if isinstance(module, PEQATLoRAModule):
     #         print(name)
     # FREEZE ALL SMOOTH FACTORS AT 1.0
-    use_smooth = True
+    use_smooth = False
     if not use_smooth:
         print("\n=== ABLATION: Freezing SmoothQuant factors at 1.0 ===")
         with torch.no_grad():

@@ -32,7 +32,8 @@ from safetensors.torch import load_file
 
 
 # quant_params = torch.load("output_qat_lora_21/checkpoint-2190/quantization_params.pth")
-quant_params = torch.load("output_qat_lora_21/checkpoint-2190/quantization_params.pth")
+# quant_params = torch.load("qat_lora_model_19/quantization_params.pth")
+quant_params = torch.load("qat_lora_model_22/quantization_params.pth")
 # for key in quant_params:
     # print(f"Key: {key}")
     # print(f"Value: {value}")

@@ -18,7 +18,8 @@ from fake_quant import get_dtype
 
 def get_data_loader():
     if torch.cuda.is_available():
-        optimal_workers = min(multiprocessing.cpu_count() // 2, 8)
+        # optimal_workers = min(multiprocessing.cpu_count() // 2, 8)
+        optimal_workers = 8
         pin_memory = True
     else:
         optimal_workers = min(multiprocessing.cpu_count() // 4, 4)

@@ -44,20 +44,23 @@ class ActSTEQuant(torch.autograd.Function):
         x_dq = x_q * scale_b
         
         # Save EVERYTHING we need for the full gradient
-        ctx.save_for_backward(x, x_clipped, x_dq, clip, scale)
+        # ctx.save_for_backward(x, x_clipped, x_dq, clip, scale)
+        ctx.save_for_backward(x, x_clipped, clip, scale)
         ctx.qmax = qmax
         return x_dq
     
     @staticmethod
     def backward(ctx, grad_output):
-        x, x_clipped, x_dq, clip, scale = ctx.saved_tensors
+        # x, x_clipped, x_dq, clip, scale = ctx.saved_tensors
+        x, x_clipped, clip, scale = ctx.saved_tensors
         qmax = ctx.qmax
         
-        # Broadcasting
         if x.dim() == 3:
             clip_b = clip.view(1, 1, -1)
+            scale_b = scale.view(1, 1, -1)
         else:
             clip_b = clip.view(1, -1)
+            scale_b = scale.view(1, -1)
         
         # 1. Gradient to Input (Standard STE)
         mask_inside = (x.abs() <= clip_b)
@@ -79,7 +82,11 @@ class ActSTEQuant(torch.autograd.Function):
         # Derivation: x_dq = round(x/s)*s where s=α/qmax
         # For small changes in α, the change in x_dq is proportional to (x_dq - x)/α
         # This captures: "If I increase α (bigger bins), does my reconstruction error get better or worse?"
-        
+
+        x_q = torch.round(x_clipped / scale_b)
+        x_q = torch.clamp(x_q, -qmax, qmax)
+        x_dq = x_q * scale_b  # ← Recomputed here
+
         mask_in_range = (x.abs() <= clip_b)
         quant_error = x_dq - x_clipped  # The reconstruction error
         

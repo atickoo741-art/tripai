@@ -134,8 +134,8 @@ if __name__ == "__main__":
     MODEL_NAME = "meta-llama/Llama-2-7b-hf"
     BLOCK_SIZE = 2048  # Llama context length
     NUM_EPOCHS = 10    # Fewer epochs needed for 7B models
-    BATCH_SIZE = 16     # Optimized for DGX Spark (~96GB memory)
-    GRAD_ACCUM = 2     # Effective batch size = 32
+    BATCH_SIZE = 32     # Optimized for DGX Spark (~96GB memory)
+    GRAD_ACCUM = 1     # Effective batch size = 32
     LEARNING_RATE = 2.5e-4  # Lower LR for larger models
     LORA_RANK = 32     # More capacity for 7B model
 
@@ -376,8 +376,8 @@ if __name__ == "__main__":
     
     # Choose memory-friendly settings based on device
     is_cuda = torch.cuda.is_available() and not torch.backends.mps.is_available()
-    per_device_bs = 16 if is_cuda else 8
-    grad_accum = 2 if is_cuda else 8
+    # per_device_bs = 16 if is_cuda else 8
+    # grad_accum = 2 if is_cuda else 8
 
     training_args = TrainingArguments(
         output_dir= output_dir,
@@ -388,6 +388,7 @@ if __name__ == "__main__":
         gradient_accumulation_steps=GRAD_ACCUM,
         max_grad_norm=1.0,
         gradient_checkpointing=True,
+        # gradient_checkpointing=False,
         gradient_checkpointing_kwargs={'use_reentrant': True},
         save_strategy="epoch",
         eval_strategy="epoch",
@@ -402,8 +403,8 @@ if __name__ == "__main__":
         report_to="tensorboard",
         load_best_model_at_end=True,
         metric_for_best_model="eval_loss",
-        dataloader_num_workers=4,
-        dataloader_prefetch_factor=2,
+        dataloader_num_workers=8,
+        dataloader_prefetch_factor=4,
         dataloader_pin_memory=True
     )
 

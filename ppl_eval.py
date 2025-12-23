@@ -62,7 +62,7 @@ def main():
     eval_obj = Evaluation(tokenizer, dataset, device, num_samples=args.n_samples, block_size=args.seq_len)
     # eval_obj.evaluate(model, seq_len=args.seq_len, n_samples=args.n_samples)
     eval_obj.evaluate(model)
-
+#test comment for test commit
 
 def diagnose_model_loading(model, adapter_dir):
     """Verify model loaded correctly"""

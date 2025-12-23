@@ -11,76 +11,76 @@ from fake_quant import quantize_model, PEQATLoRAModule, find_available_dir, Save
 import torch.nn as nn
 
 
-def save_model():
-    # Save the model, tokenizer, and quantization parameters
+# def save_model(peft_model, tokenizer, model_dir, model_name, device):
+    # # Save the model, tokenizer, and quantization parameters
     
-    print(f"\n--- Saving W4A4 QAT LoRA model to {model_dir} ---")
-    os.makedirs(model_dir, exist_ok=True)
+    # print(f"\n--- Saving W4A4 QAT LoRA model to {model_dir} ---")
+    # os.makedirs(model_dir, exist_ok=True)
     
-    # Save quantization parameters after training
-    # save_quantization_parameters(peft_model, model_dir)
+    # # Save quantization parameters after training
+    # # save_quantization_parameters(peft_model, model_dir)
     
-    # Save the LoRA adapters
-    print(f"--- Saving W4A4 QAT LoRA adapters to {model_dir} ---")
-    peft_model.save_pretrained(model_dir)
+    # # Save the LoRA adapters
+    # print(f"--- Saving W4A4 QAT LoRA adapters to {model_dir} ---")
+    # peft_model.save_pretrained(model_dir)
 
-    # Save the tokenizer
-    tokenizer.save_pretrained(model_dir)
+    # # Save the tokenizer
+    # tokenizer.save_pretrained(model_dir)
     
-    best_checkpoint = trainer.state.best_model_checkpoint
-    if best_checkpoint and os.path.exists(best_checkpoint):
-        import shutil
-        src = os.path.join(best_checkpoint, "quantization_params.pth")
-        dst = os.path.join(model_dir, "quantization_params.pth")
+    # best_checkpoint = trainer.state.best_model_checkpoint
+    # if best_checkpoint and os.path.exists(best_checkpoint):
+    #     import shutil
+    #     src = os.path.join(best_checkpoint, "quantization_params.pth")
+    #     dst = os.path.join(model_dir, "quantization_params.pth")
         
-        if os.path.exists(src):
-            shutil.copy(src, dst)
-            print(f"✓ Copied quantization params from: {best_checkpoint}")
+    #     if os.path.exists(src):
+    #         shutil.copy(src, dst)
+    #         print(f"✓ Copied quantization params from: {best_checkpoint}")
             
-            # Verify the copy
-            quant_params = torch.load(dst)
-            print(f"  {len(quant_params)} quantization parameters")
-        else:
-            print(f"⚠️  Warning: quantization_params.pth not found in best checkpoint")
-            print(f"  Falling back to current model state...")
+    #         # Verify the copy
+    #         quant_params = torch.load(dst)
+    #         print(f"  {len(quant_params)} quantization parameters")
+    #     else:
+    #         print(f"⚠️  Warning: quantization_params.pth not found in best checkpoint")
+    #         print(f"  Falling back to current model state...")
             
-            # Fallback: save current state
-            quant_params = {}
-            for name, module in peft_model.named_modules():
-                if isinstance(module, QATW4A4LinearCore):
-                    prefix = f"{name}."
-                    quant_params[f"{prefix}activation_clip"] = module.activation_clip.data.detach().cpu()
-                    quant_params[f"{prefix}smooth_factor"] = module.smooth_factor.data.detach().cpu()
+    #         # Fallback: save current state
+    #         quant_params = {}
+    #         for name, module in peft_model.named_modules():
+    #             if isinstance(module, QATW4A4LinearCore):
+    #                 prefix = f"{name}."
+    #                 quant_params[f"{prefix}activation_clip"] = module.activation_clip.data.detach().cpu()
+    #                 quant_params[f"{prefix}smooth_factor"] = module.smooth_factor.data.detach().cpu()
             
-            torch.save(quant_params, dst)
-            print(f"  ✓ Saved {len(quant_params)} parameters from current state")
-    else:
-        print("⚠️  No best checkpoint found, saving current model state...")
+    #         torch.save(quant_params, dst)
+    #         print(f"  ✓ Saved {len(quant_params)} parameters from current state")
+    # else:
+    #     print("⚠️  No best checkpoint found, saving current model state...")
         
-        # Save current quantization state
-        quant_params = {}
-        for name, module in peft_model.named_modules():
-            if isinstance(module, QATW4A4LinearCore):
-                prefix = f"{name}."
-                quant_params[f"{prefix}activation_clip"] = module.activation_clip.data.detach().cpu()
-                quant_params[f"{prefix}smooth_factor"] = module.smooth_factor.data.detach().cpu()
+    #     # Save current quantization state
+    #     quant_params = {}
+    #     for name, module in peft_model.named_modules():
+    #         if isinstance(module, QATW4A4LinearCore):
+    #             prefix = f"{name}."
+    #             quant_params[f"{prefix}activation_clip"] = module.activation_clip.data.detach().cpu()
+    #             quant_params[f"{prefix}smooth_factor"] = module.smooth_factor.data.detach().cpu()
         
-        torch.save(quant_params, os.path.join(model_dir, "quantization_params.pth"))
-        print(f"✓ Saved {len(quant_params)} quantization parameters")
+    #     torch.save(quant_params, os.path.join(model_dir, "quantization_params.pth"))
+    #     print(f"✓ Saved {len(quant_params)} quantization parameters")
 
 
-    # Save the model config
-    peft_model.config.to_json_file(os.path.join(model_dir, "config.json"))
+    # # Save the model config
+    # peft_model.config.to_json_file(os.path.join(model_dir, "config.json"))
     
     
-    print(f"\n--- Model, tokenizer, and quantization config saved to {model_dir} ---")
-    print("To load this model for inference, use:")
-    print(f"model = AutoModelForCausalLM.from_pretrained('{model_name}').to('{device}')")
-    print(f"model = PeftModel.from_pretrained(model, '{model_dir}')")
-    print("# Make sure to apply the same quantization setup when loading")
+    # print(f"\n--- Model, tokenizer, and quantization config saved to {model_dir} ---")
+    # print("To load this model for inference, use:")
+    # print(f"model = AutoModelForCausalLM.from_pretrained('{model_name}').to('{device}')")
+    # print(f"model = PeftModel.from_pretrained(model, '{model_dir}')")
+    # print("# Make sure to apply the same quantization setup when loading")
 
 
-def custom_eval():
+def custom_eval(peft_model, tokenizer, device, trainer_ppl):
     print("\n--- Evaluating with Proper Perplexity Metric (Test Set) ---")
     from datasets import load_dataset
     
@@ -159,7 +159,7 @@ if __name__ == "__main__":
     # Add a pad token to the tokenizer if it doesn't have one
     if tokenizer.pad_token is None:
         tokenizer.add_special_tokens({'pad_token': tokenizer.eos_token})
-        model.resize_token_embeddings(len(tokenizer))
+        # model.resize_token_embeddings(len(tokenizer))
 
     print(f"Model '{model_name}' loaded successfully for QAT.")
     print(f"Model device: {model.device}")
@@ -210,6 +210,10 @@ if __name__ == "__main__":
 
 
     quantize_model(peft_model)
+
+    if torch.__version__ >= "2.0":
+        print("Compiling model with torch.compile...")
+        peft_model = torch.compile(peft_model, mode="reduce-overhead")
     # for name, module in peft_model.named_modules():
     #     if isinstance(module, PEQATLoRAModule):
     #         print(name)
@@ -333,19 +337,19 @@ if __name__ == "__main__":
     
     # Choose memory-friendly settings based on device
     is_cuda = torch.cuda.is_available() and not torch.backends.mps.is_available()
-    per_device_bs = 8 if is_cuda else 8
-    grad_accum = 4 if is_cuda else 8
+    per_device_bs = 16 if is_cuda else 8
+    grad_accum = 2 if is_cuda else 8
 
     training_args = TrainingArguments(
         output_dir= output_dir,
         overwrite_output_dir=False,
         num_train_epochs=NUM_EPOCHS,
         per_device_train_batch_size=BATCH_SIZE,
-        per_device_eval_batch_size=BATCH_SIZE * 2,
+        per_device_eval_batch_size=BATCH_SIZE,
         gradient_accumulation_steps=GRAD_ACCUM,
         max_grad_norm=1.0,
         gradient_checkpointing=True,
-        gradient_checkpointing_kwargs={'use_reentrant': False},
+        gradient_checkpointing_kwargs={'use_reentrant': True},
         save_strategy="epoch",
         eval_strategy="epoch",
         logging_steps=10,
@@ -359,8 +363,9 @@ if __name__ == "__main__":
         report_to="tensorboard",
         load_best_model_at_end=True,
         metric_for_best_model="eval_loss",
-        dataloader_pin_memory=False, # Not needed for unified memory
-        dataloader_num_workers=8,
+        dataloader_num_workers=4,
+        dataloader_prefetch_factor=2,
+        dataloader_pin_memory=True
     )
 
     # Define Data Collator
@@ -379,7 +384,11 @@ if __name__ == "__main__":
     # per_module_abs = calibrate_activation_clips(peft_model, calib_loader, steps=200, percentile=99.5, device=device)
     # # Initialize SmoothQuant scaling factors using activation percentiles and weight stats
     # calibrate_smooth_factors(peft_model, per_module_abs, alpha=0.5)
+    import gc
+    gc.collect()
     unified_calibration(peft_model, calib_loader, steps=64, percentile=99.5, alpha=0.6, device=device, use_smooth = use_smooth)
+    torch.cuda.empty_cache()
+
 
 
     # Build optimizer with parameter groups: LoRA vs PACT clip vs SmoothQuant factors
@@ -477,7 +486,7 @@ if __name__ == "__main__":
 
     
     # Ensure model on device and enable input grads for all devices to allow LoRA/SQ to learn
-    peft_model = peft_model.to(device)
+    # peft_model = peft_model.to(device)
     peft_model.enable_input_require_grads()
     # Disable KV cache to avoid conflicts with potential checkpointing and ensure full backprop
     if hasattr(peft_model, 'config'):
@@ -535,6 +544,73 @@ if __name__ == "__main__":
     # custom_ppl = custom_eval.evaluate(peft_model)
         # Now evaluate with proper sliding window on TEST set
 
-    custom_eval()
+    # Save the model, tokenizer, and quantization parameters
     
-    save_model()
+    print(f"\n--- Saving W4A4 QAT LoRA model to {model_dir} ---")
+    os.makedirs(model_dir, exist_ok=True)
+    
+    # Save quantization parameters after training
+    # save_quantization_parameters(peft_model, model_dir)
+    
+    # Save the LoRA adapters
+    print(f"--- Saving W4A4 QAT LoRA adapters to {model_dir} ---")
+    peft_model.save_pretrained(model_dir)
+
+    # Save the tokenizer
+    tokenizer.save_pretrained(model_dir)
+    
+    best_checkpoint = trainer.state.best_model_checkpoint
+    if best_checkpoint and os.path.exists(best_checkpoint):
+        import shutil
+        src = os.path.join(best_checkpoint, "quantization_params.pth")
+        dst = os.path.join(model_dir, "quantization_params.pth")
+        
+        if os.path.exists(src):
+            shutil.copy(src, dst)
+            print(f"✓ Copied quantization params from: {best_checkpoint}")
+            
+            # Verify the copy
+            quant_params = torch.load(dst)
+            print(f"  {len(quant_params)} quantization parameters")
+        else:
+            print(f"⚠️  Warning: quantization_params.pth not found in best checkpoint")
+            print(f"  Falling back to current model state...")
+            
+            # Fallback: save current state
+            quant_params = {}
+            for name, module in peft_model.named_modules():
+                if isinstance(module, QATW4A4LinearCore):
+                    prefix = f"{name}."
+                    quant_params[f"{prefix}activation_clip"] = module.activation_clip.data.detach().cpu()
+                    quant_params[f"{prefix}smooth_factor"] = module.smooth_factor.data.detach().cpu()
+            
+            torch.save(quant_params, dst)
+            print(f"  ✓ Saved {len(quant_params)} parameters from current state")
+    else:
+        print("⚠️  No best checkpoint found, saving current model state...")
+        
+        # Save current quantization state
+        quant_params = {}
+        for name, module in peft_model.named_modules():
+            if isinstance(module, QATW4A4LinearCore):
+                prefix = f"{name}."
+                quant_params[f"{prefix}activation_clip"] = module.activation_clip.data.detach().cpu()
+                quant_params[f"{prefix}smooth_factor"] = module.smooth_factor.data.detach().cpu()
+        
+        torch.save(quant_params, os.path.join(model_dir, "quantization_params.pth"))
+        print(f"✓ Saved {len(quant_params)} quantization parameters")
+
+
+    # Save the model config
+    peft_model.config.to_json_file(os.path.join(model_dir, "config.json"))
+    
+    
+    print(f"\n--- Model, tokenizer, and quantization config saved to {model_dir} ---")
+    print("To load this model for inference, use:")
+    print(f"model = AutoModelForCausalLM.from_pretrained('{model_name}').to('{device}')")
+    print(f"model = PeftModel.from_pretrained(model, '{model_dir}')")
+    print("# Make sure to apply the same quantization setup when loading")
+
+    custom_eval(peft_model, tokenizer, device, trainer_ppl)
+    
+    # save_model()

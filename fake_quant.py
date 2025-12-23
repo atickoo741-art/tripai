@@ -27,25 +27,23 @@ class ActSTEQuant(torch.autograd.Function):
         clip = clip_vals.abs().clamp(min=1e-4)
         scale = clip / qmax
         
-        # Broadcasting
+        # OPTIMIZED: Fuse broadcasting + clamping
         if x.dim() == 3:
-            clip_b = clip.view(1, 1, -1)
             scale_b = scale.view(1, 1, -1)
         else:
-            clip_b = clip.view(1, -1)
             scale_b = scale.view(1, -1)
         
-        # PACT clipping
-        x_clipped = torch.clamp(x, -clip_b, clip_b)
-        
-        # Quantize
-        x_q = torch.round(x_clipped / scale_b)
-        x_q = torch.clamp(x_q, -qmax, qmax)
+        # Fuse clamp + round + clamp into single operation
+        x_q = torch.clamp(
+            torch.round(torch.clamp(x, -scale_b * qmax, scale_b * qmax) / scale_b),
+            -qmax, qmax
+        )
         x_dq = x_q * scale_b
         
-        # Save EVERYTHING we need for the full gradient
-        ctx.save_for_backward(x, x_clipped, x_dq, clip, scale)
+        # Only save minimal tensors for backward
+        ctx.save_for_backward(x, clip, scale)
         ctx.qmax = qmax
+        ctx.x_dq = x_dq  # Store instead of recomputing
         return x_dq
     
     @staticmethod
@@ -636,78 +634,79 @@ def save_quantization_parameters(model, save_dir):
 
 
 class Evaluation:
-    def __init__(self, tokenizer, dataset, device, num_samples=None, block_size=1024):
+    def __init__(self, tokenizer, dataset, device, num_samples=None):
+        """
+        Proper sliding window evaluation class.
+        
+        Args:
+            tokenizer: Tokenizer for the model
+            dataset: Raw dataset (wikitext-2-raw-v1)
+            device: Device to run on
+            num_samples: Maximum number of windows to evaluate (None = all)
+        """
         self.tokenizer = tokenizer
+        self.dataset = dataset
         self.device = device
-        self.block_size = block_size
-        self.num_samples = num_samples # Max number of samples (batches) to evaluate
+        self.num_samples = num_samples
 
-        # Tokenize and group texts
-        tokenized_datasets = dataset.map(
-            self._tokenize_function,
-            batched=True,
-            num_proc=4, # Use multiple processes for faster tokenization
-            remove_columns=["text"],
-        )
-
-        # Group texts into chunks of block_size
-        self.lm_dataset = tokenized_datasets.map(
-            self._group_texts,
-            batched=True,
-            batch_size=1000,
-            num_proc=4,
-        )
-        # Set format for PyTorch
-        self.lm_dataset.set_format(type="torch", columns=["input_ids", "labels"])
-
-        # Data collator for language modeling will handle padding
-        self.data_collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False)
-
-    def _tokenize_function(self, examples):
-        return self.tokenizer(examples["text"])
-
-    def _group_texts(self, examples):
-        # Concatenate all texts.
-        concatenated_examples = {k: sum(examples[k], []) for k in examples.keys()}
-        total_length = len(concatenated_examples[list(examples.keys())[0]])
-        # We drop the small remainder, we could add padding if the model supported it instead of this drop, you can
-        # customize this part to your needs.
-        total_length = (total_length // self.block_size) * self.block_size
-        # Split by chunks of max_len.
-        result = {
-            k: [t[i : i + self.block_size] for i in range(0, total_length, self.block_size)]
-            for k, t in concatenated_examples.items()
-        }
-        result["labels"] = result["input_ids"].copy()
-        return result
-
-    def evaluate(self, model):
+    def evaluate(self, model, seq_len=2048, stride=512):
+        """
+        Evaluate perplexity using sliding window with stride.
+        This matches the standard academic evaluation protocol.
+        
+        Args:
+            model: Model to evaluate
+            seq_len: Context window size (default 2048 for Llama-2)
+            stride: Stride for sliding window (default 512)
+        """
         model.eval()
-        total_loss = 0.0
-        num_batches = 0
-
-        eval_dataloader = torch.utils.data.DataLoader(
-            self.lm_dataset, 
-            batch_size=8,  # Match training eval batch size
-            collate_fn=self.data_collator
-        )
-
-        if self.num_samples is not None:
-            eval_dataloader = itertools.islice(eval_dataloader, self.num_samples)
-
-        for batch in tqdm.tqdm(eval_dataloader, desc="Evaluating..."):
-            input_ids = batch["input_ids"].to(self.device)
-            labels = batch["labels"].to(self.device)
+        
+        # 1. Concatenate entire dataset into one continuous sequence
+        text = "\n\n".join(self.dataset["text"])
+        encodings = self.tokenizer(text, return_tensors="pt")
+        
+        # 2. Setup sliding window parameters
+        max_length = seq_len
+        stride = stride
+        seq_len_total = encodings.input_ids.size(1)
+        
+        nlls = []
+        prev_end_loc = 0
+        
+        # 3. Slide window across the sequence
+        pbar = tqdm.tqdm(range(0, seq_len_total, stride), desc="Evaluating")
+        
+        for begin_loc in pbar:
+            end_loc = min(begin_loc + max_length, seq_len_total)
+            trg_len = end_loc - prev_end_loc  # Tokens to predict in this window
+            
+            input_ids = encodings.input_ids[:, begin_loc:end_loc].to(self.device)
+            target_ids = input_ids.clone()
+            
+            # CRITICAL: Mask context tokens (only evaluate new tokens)
+            # For first window, evaluate all tokens
+            # For subsequent windows, only evaluate the last `trg_len` tokens
+            if begin_loc > 0:
+                target_ids[:, :-trg_len] = -100
             
             with torch.no_grad():
-                outputs = model(input_ids=input_ids, labels=labels)
-                # outputs.loss is already the mean loss per token in this batch
-                total_loss += outputs.loss.item()
-                num_batches += 1
+                outputs = model(input_ids, labels=target_ids)
+                # outputs.loss is average over valid tokens
+                # Multiply by trg_len to get total NLL for this window
+                neg_log_likelihood = outputs.loss * trg_len
 
-        avg_loss = total_loss / num_batches
-        perplexity = torch.exp(torch.tensor(avg_loss))
+            nlls.append(neg_log_likelihood)
+            prev_end_loc = end_loc
+            
+            if self.num_samples and len(nlls) >= self.num_samples:
+                break
+            
+            if end_loc == seq_len_total:
+                break
 
-        print(f"Average Loss: {avg_loss:.4f}")
-        print(f"Perplexity: {perplexity.item():.2f}")
-        return perplexity.item()
+        # 4. Compute final perplexity
+        total_nll = torch.stack(nlls).sum()
+        ppl = torch.exp(total_nll / prev_end_loc)
+        
+        print(f"\nPerplexity: {ppl.item():.4f}")
+        return ppl.item()

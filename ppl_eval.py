@@ -24,14 +24,13 @@ def main():
     else:
         device = torch.device('cuda' if torch.cuda.is_available() else ('mps' if torch.backends.mps.is_available() else 'cpu'))
 
-        
+    # Load model
     if args.model_path is None:
         # Load base full precision model for benchmarking
         print(f"Loading base full precision model: {args.base_model_name}")
         model = AutoModelForCausalLM.from_pretrained(args.base_model_name, torch_dtype=torch.float32, device_map=None).to(device)
         tokenizer = AutoTokenizer.from_pretrained(args.base_model_name)
         
-        # Ensure tokenizer has pad token
         if tokenizer.pad_token is None:
             tokenizer.pad_token = tokenizer.eos_token
         
@@ -51,17 +50,19 @@ def main():
             model = PeftModel.from_pretrained(base_model, args.model_path).to(device)
             print(f"PEFT model loaded on {device}")
 
-        # model = AutoModelForCausalLM.from_pretrained(args.model_path, torch_dtype=torch.float32, device_map=None).to(device)
-        # tokenizer = AutoTokenizer.from_pretrained(args.model_path)
+    # Load TEST set (standard for reporting)
+    print("Loading WikiText-2 Test Set...")
+    dataset = load_dataset("wikitext", "wikitext-2-raw-v1", split="test")
+    
+    # Create evaluation object
+    eval_obj = Evaluation(tokenizer, dataset, device, num_samples=args.n_samples)
+    
+    # Evaluate with proper sliding window
+    # Use stride=2048 for no-overlap (matches paper baseline of 5.47)
+    # Use stride=512 for overlap (gives lower PPL ~4.86, but not standard)
+    print(f"Evaluating with seq_len={args.seq_len}, stride=2048 (no overlap, standard protocol)")
+    eval_obj.evaluate(model, seq_len=args.seq_len, stride=2048)
 
-        # naive_quantize_model(model)
-        # diagnose_model_loading(model, args.model_path)
-
-
-    dataset = load_dataset("wikitext", "wikitext-2-raw-v1", split="validation")
-    eval_obj = Evaluation(tokenizer, dataset, device, num_samples=args.n_samples, block_size=args.seq_len)
-    # eval_obj.evaluate(model, seq_len=args.seq_len, n_samples=args.n_samples)
-    eval_obj.evaluate(model)
 #test comment for test commit
 
 def diagnose_model_loading(model, adapter_dir):

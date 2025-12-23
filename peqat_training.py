@@ -79,6 +79,29 @@ import torch.nn as nn
     # print(f"model = PeftModel.from_pretrained(model, '{model_dir}')")
     # print("# Make sure to apply the same quantization setup when loading")
 
+def ensure_dtype_consistency(model, target_dtype=torch.bfloat16):
+    """Ensure all model parameters have the same dtype"""
+    print(f"\nEnsuring all parameters are {target_dtype}...")
+    
+    mismatches = []
+    for name, param in model.named_parameters():
+        if param.dtype != target_dtype:
+            mismatches.append((name, param.dtype))
+            param.data = param.data.to(target_dtype)
+    
+    for name, buffer in model.named_buffers():
+        if buffer.dtype != target_dtype and buffer.is_floating_point():
+            buffer.data = buffer.data.to(target_dtype)
+    
+    if mismatches:
+        print(f"Fixed {len(mismatches)} dtype mismatches:")
+        for name, dtype in mismatches[:5]:
+            print(f"  {name}: {dtype} → {target_dtype}")
+    else:
+        print("✓ All parameters already consistent")
+    
+    return model
+
 
 def custom_eval(peft_model, tokenizer, device, trainer_ppl):
     print("\n--- Evaluating with Proper Perplexity Metric (Test Set) ---")
@@ -111,10 +134,10 @@ if __name__ == "__main__":
     MODEL_NAME = "meta-llama/Llama-2-7b-hf"
     BLOCK_SIZE = 2048  # Llama context length
     NUM_EPOCHS = 10    # Fewer epochs needed for 7B models
-    BATCH_SIZE = 8     # Optimized for DGX Spark (~96GB memory)
-    GRAD_ACCUM = 4     # Effective batch size = 32
+    BATCH_SIZE = 16     # Optimized for DGX Spark (~96GB memory)
+    GRAD_ACCUM = 2     # Effective batch size = 32
     LEARNING_RATE = 2.5e-4  # Lower LR for larger models
-    LORA_RANK = 64     # More capacity for 7B model
+    LORA_RANK = 32     # More capacity for 7B model
 
     # Set this to run different experiments
     use_smooth = True
@@ -155,6 +178,10 @@ if __name__ == "__main__":
     )
     model.resize_token_embeddings(len(tokenizer))
     print(f"Model loaded on device: {model.device}")
+
+    model = model.to(torch.bfloat16)
+    print(f"Model dtype: {next(model.parameters()).dtype}")
+
 
     # Add a pad token to the tokenizer if it doesn't have one
     if tokenizer.pad_token is None:
@@ -211,9 +238,9 @@ if __name__ == "__main__":
 
     quantize_model(peft_model)
 
-    if torch.__version__ >= "2.0":
-        print("Compiling model with torch.compile...")
-        peft_model = torch.compile(peft_model, mode="reduce-overhead")
+    # if torch.__version__ >= "2.0":
+    #     print("Compiling model with torch.compile...")
+    #     peft_model = torch.compile(peft_model, mode="reduce-overhead")
     # for name, module in peft_model.named_modules():
     #     if isinstance(module, PEQATLoRAModule):
     #         print(name)
@@ -380,13 +407,15 @@ if __name__ == "__main__":
         # print(name)
 
     peft_model = peft_model.to(device)
-    calib_loader = DataLoader(train_dataset, batch_size=per_device_bs, shuffle=False, collate_fn=data_collator)
+    peft_model = ensure_dtype_consistency(peft_model, torch.bfloat16)
+
+    calib_loader = DataLoader(train_dataset, batch_size=4, shuffle=False, collate_fn=data_collator)
     # per_module_abs = calibrate_activation_clips(peft_model, calib_loader, steps=200, percentile=99.5, device=device)
     # # Initialize SmoothQuant scaling factors using activation percentiles and weight stats
     # calibrate_smooth_factors(peft_model, per_module_abs, alpha=0.5)
     import gc
     gc.collect()
-    unified_calibration(peft_model, calib_loader, steps=64, percentile=99.5, alpha=0.6, device=device, use_smooth = use_smooth)
+    unified_calibration(peft_model, calib_loader, steps=32, percentile=99.5, alpha=0.6, device=device, use_smooth = False) #TO INIT SMOOTH FACTORS AT 1.0
     torch.cuda.empty_cache()
 
 

@@ -27,23 +27,25 @@ class ActSTEQuant(torch.autograd.Function):
         clip = clip_vals.abs().clamp(min=1e-4)
         scale = clip / qmax
         
-        # OPTIMIZED: Fuse broadcasting + clamping
+        # Broadcasting
         if x.dim() == 3:
+            clip_b = clip.view(1, 1, -1)
             scale_b = scale.view(1, 1, -1)
         else:
+            clip_b = clip.view(1, -1)
             scale_b = scale.view(1, -1)
         
-        # Fuse clamp + round + clamp into single operation
-        x_q = torch.clamp(
-            torch.round(torch.clamp(x, -scale_b * qmax, scale_b * qmax) / scale_b),
-            -qmax, qmax
-        )
+        # PACT clipping
+        x_clipped = torch.clamp(x, -clip_b, clip_b)
+        
+        # Quantize
+        x_q = torch.round(x_clipped / scale_b)
+        x_q = torch.clamp(x_q, -qmax, qmax)
         x_dq = x_q * scale_b
         
-        # Only save minimal tensors for backward
-        ctx.save_for_backward(x, clip, scale)
+        # Save EVERYTHING we need for the full gradient
+        ctx.save_for_backward(x, x_clipped, x_dq, clip, scale)
         ctx.qmax = qmax
-        ctx.x_dq = x_dq  # Store instead of recomputing
         return x_dq
     
     @staticmethod

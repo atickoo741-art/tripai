@@ -140,7 +140,9 @@ if __name__ == "__main__":
     LORA_RANK = 32     # More capacity for 7B model
 
     # Set this to run different experiments
-    use_smooth = True
+    # use_smooth = True
+    learn_smooth = True
+    calibrate_smooth = False
     # ============================================================================
 
 
@@ -197,7 +199,7 @@ if __name__ == "__main__":
     # apply_quantization_to_model(model)
     # 3. Prepare the model for LoRA fine-tuning
 
-    LORA_RANK = 32
+    # LORA_RANK = 32
     print("\n--- Applying LoRA Adapters to quantized model ---")
     lora_config = LoraConfig(
         r=LORA_RANK,  # Rank of the update matrices (lower = less parameters)
@@ -246,14 +248,24 @@ if __name__ == "__main__":
     #         print(name)
     # FREEZE ALL SMOOTH FACTORS AT 1.0
     # use_smooth = False
-    if not use_smooth:
-        print("\n=== ABLATION: Freezing SmoothQuant factors at 1.0 ===")
+    if not calibrate_smooth:
+        # print("\n=== ABLATION: Freezing SmoothQuant factors at 1.0 ===")
+        print("\n=== INITIALIZING: Smooth factors at 1.0 ===")
         with torch.no_grad():
             for name, module in peft_model.named_modules():
                 if isinstance(module, QATW4A4LinearCore):
                     module.smooth_factor.data.fill_(1.0)
+                    module.smooth_factor.requires_grad = True
+        print("✓ All smooth factors initialized at 1.0\n")
+
+    if not learn_smooth:
+        print("\n=== FREEZING all Smooth Factors ===")
+        with torch.no_grad():
+            for name, module in peft_model.named_modules():
+                if isinstance(module, QATW4A4LinearCore):
                     module.smooth_factor.requires_grad = False
         print("✓ All smooth factors frozen\n")
+
 
 
     print("\n--- LoRA Initialization Check ---")
@@ -415,7 +427,7 @@ if __name__ == "__main__":
     # calibrate_smooth_factors(peft_model, per_module_abs, alpha=0.5)
     import gc
     gc.collect()
-    unified_calibration(peft_model, calib_loader, steps=32, percentile=99.5, alpha=0.6, device=device, use_smooth = False) #TO INIT SMOOTH FACTORS AT 1.0
+    unified_calibration(peft_model, calib_loader, steps=32, percentile=99.5, alpha=0.6, device=device, use_smooth = calibrate_smooth) #TO INIT SMOOTH FACTORS AT 1.0
     torch.cuda.empty_cache()
 
 
@@ -475,7 +487,7 @@ if __name__ == "__main__":
             "lr": qat_lr, 
             "weight_decay": 0.0  # No weight decay on clip values
         })
-    if smooth_params and use_smooth:
+    if smooth_params and learn_smooth:
         param_groups.append({
             "params": smooth_params, 
             "lr": smooth_lr, 

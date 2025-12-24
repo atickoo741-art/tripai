@@ -583,46 +583,51 @@ class SaveQuantParamsCallback(TrainerCallback):
             print(f"Warning: failed to save quant params at checkpoint: {e}")
 
 class GradientMonitorCallback(TrainerCallback):
-    def __init__(self, log_every_n_steps=50):  # Remove clip thresholds
+    def __init__(self, log_every_n_steps=10):
         self.log_every_n_steps = log_every_n_steps
-        self.step_count = 0
     
-    def on_step_end(self, args, state, control, **kwargs):  # Changed from on_optimizer_step
-        """Monitor gradients BEFORE they're used"""
-        self.step_count += 1
-        
-        if self.step_count % self.log_every_n_steps != 0:
+    def on_step_end(self, args, state, control, model, **kwargs):
+        if state.global_step % self.log_every_n_steps != 0:
             return
         
-        model = kwargs.get("model")
+        # Separate gradient norms by parameter type
+        lora_grad_norm = 0.0
+        clip_grad_norm = 0.0
+        smooth_grad_norm = 0.0
         
-        # Just MONITOR, don't clip
-        lora_grads = []
-        qat_grads = []
+        lora_count = 0
+        clip_count = 0
+        smooth_count = 0
         
         for name, param in model.named_parameters():
-            if not param.requires_grad or param.grad is None:
+            if param.grad is None:
                 continue
             
             grad_norm = param.grad.norm().item()
             
             if 'lora' in name.lower():
-                lora_grads.append((name, grad_norm))
-            elif 'activation_clip' in name or 'smooth_factor' in name:
-                qat_grads.append((name, grad_norm))
+                lora_grad_norm += grad_norm ** 2
+                lora_count += 1
+            elif 'activation_clip' in name:
+                clip_grad_norm += grad_norm ** 2
+                clip_count += 1
+            elif 'smooth_factor' in name:
+                smooth_grad_norm += grad_norm ** 2
+                smooth_count += 1
         
-        # Compute group norms
-        if lora_grads:
-            lora_total_norm = sum(n**2 for _, n in lora_grads) ** 0.5
-            print(f"\nLoRA total norm: {lora_total_norm:.4f}")
-            print(f"  Max individual: {max(n for _, n in lora_grads):.4f}")
-            print(f"  Mean individual: {sum(n for _, n in lora_grads)/len(lora_grads):.4f}")
+        # Compute RMS norms
+        lora_grad_norm = (lora_grad_norm ** 0.5) if lora_count > 0 else 0.0
+        clip_grad_norm = (clip_grad_norm ** 0.5) if clip_count > 0 else 0.0
+        smooth_grad_norm = (smooth_grad_norm ** 0.5) if smooth_count > 0 else 0.0
         
-        if qat_grads:
-            qat_total_norm = sum(n**2 for _, n in qat_grads) ** 0.5
-            print(f"\nQAT total norm: {qat_total_norm:.4f}")
-            print(f"  Max individual: {max(n for _, n in qat_grads):.4f}")
-            print(f"  Mean individual: {sum(n for _, n in qat_grads)/len(qat_grads):.4f}")
+        print(f"\n{'='*60}")
+        print(f"Step {state.global_step} - Gradient Norms by Type:")
+        print(f"{'='*60}")
+        print(f"  LoRA:   {lora_grad_norm:8.4f} ({lora_count} params)")
+        print(f"  Clips:  {clip_grad_norm:8.4f} ({clip_count} params)")
+        print(f"  Smooth: {smooth_grad_norm:8.4f} ({smooth_count} params)")
+        print(f"  Total:  {(lora_grad_norm**2 + clip_grad_norm**2 + smooth_grad_norm**2)**0.5:8.4f}")
+        print(f"{'='*60}\n")
 
 
 def save_quantization_parameters(model, save_dir):

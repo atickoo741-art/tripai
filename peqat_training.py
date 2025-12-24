@@ -136,13 +136,14 @@ if __name__ == "__main__":
     NUM_EPOCHS = 10    # Fewer epochs needed for 7B models
     BATCH_SIZE = 32     # Optimized for DGX Spark (~96GB memory)
     GRAD_ACCUM = 1     # Effective batch size = 32
-    LEARNING_RATE = 2.5e-4  # Lower LR for larger models
+    LEARNING_RATE = 1e-4  # Lower LR for larger models
     LORA_RANK = 32     # More capacity for 7B model
 
     # Set this to run different experiments
     # use_smooth = True
     learn_smooth = True
     calibrate_smooth = False
+    torch.backends.cuda.matmul.allow_tf32 = True
     # ============================================================================
 
 
@@ -403,7 +404,7 @@ if __name__ == "__main__":
         report_to="tensorboard",
         load_best_model_at_end=True,
         metric_for_best_model="eval_loss",
-        dataloader_num_workers=8,
+        dataloader_num_workers=16,
         dataloader_prefetch_factor=4,
         dataloader_pin_memory=True
     )
@@ -472,7 +473,7 @@ if __name__ == "__main__":
     # Set learning rates: LoRA uses the TrainingArguments LR; quant params use a higher LR
     lora_lr = training_args.learning_rate 
     qat_lr = training_args.learning_rate * 10
-    smooth_lr = training_args.learning_rate * 10 
+    smooth_lr = training_args.learning_rate * 5 
 
 
     param_groups = []

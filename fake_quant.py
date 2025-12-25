@@ -20,6 +20,9 @@ import itertools
 import weakref
 from transformers import TrainerCallback
 
+import glob
+import re
+
 class ActSTEQuant(torch.autograd.Function):
     @staticmethod
     def forward(ctx, x, clip_vals, num_bits):
@@ -552,13 +555,33 @@ def load_peqat_model(adapter_dir: str, base_model_name: str = "gpt2", device: to
 
 
 def find_available_dir(base_dir):
-    """Find the next available directory with an index to prevent overwrites."""
-    index = 1
-    while True:
-        dir_name = f"{base_dir}_{index}" if index > 1 else base_dir
-        if not os.path.exists(dir_name):
-            return dir_name
-        index += 1
+    existing_indices = []
+    
+    # Check if base directory (no suffix) exists
+    if os.path.exists(base_dir):
+        existing_indices.append(0)
+    
+    # Find all directories with numeric suffixes
+    pattern = f"{base_dir}_*"
+    for path in glob.glob(pattern):
+        if os.path.isdir(path):
+            match = re.match(rf"{re.escape(base_dir)}_(\d+)$", path)
+            if match:
+                existing_indices.append(int(match.group(1)))
+    
+    # If no directories exist, return base_dir (no suffix)
+    if not existing_indices:
+        return base_dir
+    
+    # Find next index after the largest existing index
+    max_index = max(existing_indices)
+    next_index = max_index + 1
+    
+    # Return base_dir for index 1, base_dir_N for N > 1
+    if next_index == 1:
+        return base_dir
+    else:
+        return f"{base_dir}_{next_index}"
 
 
 class SaveQuantParamsCallback(TrainerCallback):

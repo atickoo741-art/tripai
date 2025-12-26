@@ -134,8 +134,8 @@ if __name__ == "__main__":
     MODEL_NAME = "meta-llama/Llama-2-7b-hf"
     BLOCK_SIZE = 2048  # Llama context length
     NUM_EPOCHS = 10    # Fewer epochs needed for 7B models
-    BATCH_SIZE = 32     # Optimized for DGX Spark (~96GB memory)
-    GRAD_ACCUM = 1     # Effective batch size = 32
+    BATCH_SIZE = 16     # Optimized for DGX Spark (~96GB memory)
+    GRAD_ACCUM = 2     # Effective batch size = 32
     LEARNING_RATE = 1e-4  # Lower LR for larger models
     LORA_RANK = 32     # More capacity for 7B model
 
@@ -151,15 +151,15 @@ if __name__ == "__main__":
     print(torch.cuda.is_available())
     if torch.backends.mps.is_available():
         device = torch.device("mps")
-        torch.set_default_dtype(torch.float32)  # MPS works best with float32
+        # torch.set_default_dtype(torch.float32)  # MPS works best with float32
         print("Using MPS device (Apple Silicon)")
     elif torch.cuda.is_available():
         device = torch.device("cuda")
-        torch.set_default_dtype(torch.float32)  # Change from bfloat16 to float32
+        # torch.set_default_dtype(torch.float32)  # Change from bfloat16 to float32
         print("Using CUDA device")
     else:
         device = torch.device("cpu")
-        torch.set_default_dtype(torch.float32)
+        # torch.set_default_dtype(torch.float32)
         print("Using CPU")
 
     print(f"Loading {model_name}...")
@@ -400,7 +400,7 @@ if __name__ == "__main__":
         lr_scheduler_type="cosine",
         bf16=True, # Enable bfloat16
         fp16=False,
-        tf32=True, # Enable for Blackwell/Ampere GPUs
+        tf32=True, # Enable for Blackwell/Ampere GPUs 
         report_to="tensorboard",
         load_best_model_at_end=True,
         metric_for_best_model="eval_loss",

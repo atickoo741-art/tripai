@@ -142,13 +142,14 @@ class QATW4A4LinearCore(nn.Module):
             self.weight_is_out_in = False
 
         self.device = original_linear_layer.weight.device
-        
+
+        param_dtype = original_linear_layer.weight.dtype
         # Trainable QAT parameters
         self.activation_clip = nn.Parameter(
-            torch.ones(self.in_features, device=self.device) * init_clip_val
+            torch.ones(self.in_features, device=self.device, dtype=param_dtype) * init_clip_val
         )
         self.smooth_factor = nn.Parameter(
-            torch.ones(self.in_features, device=self.device)
+            torch.ones(self.in_features, device=self.device, dtype=param_dtype)
         )
 
     @property 
@@ -709,37 +710,38 @@ class Evaluation:
         
         nlls = []
         prev_end_loc = 0
-        
-        # 3. Slide window across the sequence
-        pbar = tqdm.tqdm(range(0, seq_len_total, stride), desc="Evaluating")
-        
-        for begin_loc in pbar:
-            end_loc = min(begin_loc + max_length, seq_len_total)
-            trg_len = end_loc - prev_end_loc  # Tokens to predict in this window
-            
-            input_ids = encodings.input_ids[:, begin_loc:end_loc].to(self.device)
-            target_ids = input_ids.clone()
-            
-            # CRITICAL: Mask context tokens (only evaluate new tokens)
-            # For first window, evaluate all tokens
-            # For subsequent windows, only evaluate the last `trg_len` tokens
-            if begin_loc > 0:
-                target_ids[:, :-trg_len] = -100
-            
-            with torch.no_grad():
-                outputs = model(input_ids, labels=target_ids)
-                # outputs.loss is average over valid tokens
-                # Multiply by trg_len to get total NLL for this window
-                neg_log_likelihood = outputs.loss * trg_len
 
-            nlls.append(neg_log_likelihood)
-            prev_end_loc = end_loc
+        with torch.no_grad(), torch.cuda.amp.autocast(dtype=torch.bfloat16):
+            # 3. Slide window across the sequence
+            pbar = tqdm.tqdm(range(0, seq_len_total, stride), desc="Evaluating")
             
-            if self.num_samples and len(nlls) >= self.num_samples:
-                break
-            
-            if end_loc == seq_len_total:
-                break
+            for begin_loc in pbar:
+                end_loc = min(begin_loc + max_length, seq_len_total)
+                trg_len = end_loc - prev_end_loc  # Tokens to predict in this window
+                
+                input_ids = encodings.input_ids[:, begin_loc:end_loc].to(self.device)
+                target_ids = input_ids.clone()
+                
+                # CRITICAL: Mask context tokens (only evaluate new tokens)
+                # For first window, evaluate all tokens
+                # For subsequent windows, only evaluate the last `trg_len` tokens
+                if begin_loc > 0:
+                    target_ids[:, :-trg_len] = -100
+                
+                with torch.no_grad():
+                    outputs = model(input_ids, labels=target_ids)
+                    # outputs.loss is average over valid tokens
+                    # Multiply by trg_len to get total NLL for this window
+                    neg_log_likelihood = outputs.loss * trg_len
+
+                nlls.append(neg_log_likelihood)
+                prev_end_loc = end_loc
+                
+                if self.num_samples and len(nlls) >= self.num_samples:
+                    break
+                
+                if end_loc == seq_len_total:
+                    break
 
         # 4. Compute final perplexity
         total_nll = torch.stack(nlls).sum()

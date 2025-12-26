@@ -9,6 +9,7 @@ from torch.utils.data import DataLoader
 from typing import List
 from fake_quant import quantize_model, PEQATLoRAModule, find_available_dir, SaveQuantParamsCallback, save_quantization_parameters, Evaluation, GradientMonitorCallback, QATW4A4LinearCore
 import torch.nn as nn
+from data_preparation import load_wikitext2_sliding_window
 
 
 # def save_model(peft_model, tokenizer, model_dir, model_name, device):
@@ -368,12 +369,20 @@ if __name__ == "__main__":
     print(f"Model will be saved to: {model_dir}")
 
     # Load and preprocess the WikiText-2 dataset
-    datasets, _ = load_and_preprocess_wikitext2(model_name=model_name, block_size=2048) # Use _ for tokenizer as it\'s already loaded
+    # datasets, _ = load_and_preprocess_wikitext2(model_name=model_name, block_size=2048) # Use _ for tokenizer as it\'s already loaded
+    # Load with sliding window (matches eval protocol)
+    datasets, _ = load_wikitext2_sliding_window(
+        model_name=model_name,
+        seq_len=BLOCK_SIZE,     
+        stride=BLOCK_SIZE 
+    )
+
     train_dataset = datasets["train"]
     eval_dataset = datasets["validation"]
 
-    # Set up Training Arguments
-    use_fp16 = torch.cuda.is_available() and not torch.backends.mps.is_available()
+    print(f"✓ Training samples: {len(train_dataset)}")
+    print(f"✓ Validation samples: {len(eval_dataset)}")
+
     
     # Choose memory-friendly settings based on device
     is_cuda = torch.cuda.is_available() and not torch.backends.mps.is_available()

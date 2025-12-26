@@ -20,6 +20,10 @@ import itertools
 import weakref
 from transformers import TrainerCallback
 
+from data_preparation import load_wikitext2_sliding_window, get_concatenated_text
+
+
+
 import glob
 import re
 
@@ -687,65 +691,55 @@ class Evaluation:
         self.device = device
         self.num_samples = num_samples
 
-    def evaluate(self, model, seq_len=2048, stride=512):
+    def evaluate(self, model, seq_len=2048, stride=2048):
         """
-        Evaluate perplexity using sliding window with stride.
-        This matches the standard academic evaluation protocol.
-        
-        Args:
-            model: Model to evaluate
-            seq_len: Context window size (default 2048 for Llama-2)
-            stride: Stride for sliding window (default 512)
+        Evaluate model using sliding window perplexity.
+        Now uses shared data prep function.
         """
         model.eval()
-        
-        # 1. Concatenate entire dataset into one continuous sequence
-        text = "\n\n".join(self.dataset["text"])
-        encodings = self.tokenizer(text, return_tensors="pt")
-        
-        # 2. Setup sliding window parameters
-        max_length = seq_len
-        stride = stride
-        seq_len_total = encodings.input_ids.size(1)
-        
         nlls = []
+        
+        # Use shared concatenation logic
+        input_ids_full = get_concatenated_text(self.dataset, self.tokenizer)
+        seq_len_total = len(input_ids_full)
+        
         prev_end_loc = 0
-
+        
         with torch.no_grad(), torch.cuda.amp.autocast(dtype=torch.bfloat16):
-            # 3. Slide window across the sequence
-            pbar = tqdm.tqdm(range(0, seq_len_total, stride), desc="Evaluating")
+            pbar = tqdm.tqdm(
+                range(0, seq_len_total, stride), 
+                desc="Evaluating"
+            )
             
             for begin_loc in pbar:
-                end_loc = min(begin_loc + max_length, seq_len_total)
-                trg_len = end_loc - prev_end_loc  # Tokens to predict in this window
+                end_loc = min(begin_loc + seq_len, seq_len_total)
+                trg_len = end_loc - prev_end_loc
                 
-                input_ids = encodings.input_ids[:, begin_loc:end_loc].to(self.device)
+                # Extract window
+                input_ids = input_ids_full[begin_loc:end_loc].unsqueeze(0).to(self.device)
                 target_ids = input_ids.clone()
                 
-                # CRITICAL: Mask context tokens (only evaluate new tokens)
-                # For first window, evaluate all tokens
-                # For subsequent windows, only evaluate the last `trg_len` tokens
+                # Mask context tokens (only evaluate new tokens)
                 if begin_loc > 0:
                     target_ids[:, :-trg_len] = -100
                 
-                with torch.no_grad():
-                    outputs = model(input_ids, labels=target_ids)
-                    # outputs.loss is average over valid tokens
-                    # Multiply by trg_len to get total NLL for this window
-                    neg_log_likelihood = outputs.loss * trg_len
-
+                # Forward pass
+                outputs = model(input_ids, labels=target_ids)
+                
+                # Accumulate loss
+                neg_log_likelihood = outputs.loss * trg_len
                 nlls.append(neg_log_likelihood)
+                
                 prev_end_loc = end_loc
                 
                 if self.num_samples and len(nlls) >= self.num_samples:
                     break
-                
-                if end_loc == seq_len_total:
+                if end_loc >= seq_len_total:
                     break
-
-        # 4. Compute final perplexity
+        
+        # Calculate perplexity
         total_nll = torch.stack(nlls).sum()
         ppl = torch.exp(total_nll / prev_end_loc)
         
-        print(f"\nPerplexity: {ppl.item():.4f}")
+        print(f"{ppl.item():.4f}")
         return ppl.item()

@@ -16,6 +16,7 @@ parser.add_argument("--base_model_name", type=str, default="gpt2", help="HF base
 parser.add_argument("--device", type=str, default=None)
 parser.add_argument("--seq_len", type=int, default=2048)
 parser.add_argument("--n_samples", type=int, default=None)
+parser.add_argument("--stride", type=int, default=2048)
 
 def main():
     args = parser.parse_args()
@@ -50,9 +51,13 @@ def main():
             model = PeftModel.from_pretrained(base_model, args.model_path).to(device)
             print(f"PEFT model loaded on {device}")
 
-    # Load TEST set (standard for reporting)
-    print("Loading WikiText-2 Test Set...")
-    dataset = load_dataset("wikitext", "wikitext-2-raw-v1", split="test")
+    # # Load TEST set (standard for reporting)
+    # print("Loading WikiText-2 Test Set...")
+    # dataset = load_dataset("wikitext", "wikitext-2-raw-v1", split="test")
+
+    # Load VALIDATION set (standard for reporting)
+    print("Loading WikiText-2 Validation Set...")
+    dataset = load_dataset("wikitext", "wikitext-2-raw-v1", split="validation")
     
     # Create evaluation object
     eval_obj = Evaluation(tokenizer, dataset, device, num_samples=args.n_samples)
@@ -60,8 +65,8 @@ def main():
     # Evaluate with proper sliding window
     # Use stride=2048 for no-overlap (matches paper baseline of 5.47)
     # Use stride=512 for overlap (gives lower PPL ~4.86, but not standard)
-    print(f"Evaluating with seq_len={args.seq_len}, stride=2048 (no overlap, standard protocol)")
-    eval_obj.evaluate(model, seq_len=args.seq_len, stride=2048)
+    print(f"Evaluating with seq_len={args.seq_len}, stride={args.stride} (no overlap, standard protocol)")
+    eval_obj.evaluate(model, seq_len=args.seq_len, stride=args.stride)
 
 #test comment for test commit
 

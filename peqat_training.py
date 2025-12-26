@@ -1,4 +1,5 @@
 import os
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
 import json
 from data_preparation import load_and_preprocess_wikitext2
 import torch
@@ -134,9 +135,9 @@ if __name__ == "__main__":
     # ============================================================================
     MODEL_NAME = "meta-llama/Llama-2-7b-hf"
     BLOCK_SIZE = 2048  # Llama context length
-    NUM_EPOCHS = 10    # Fewer epochs needed for 7B models
-    BATCH_SIZE = 16     # Optimized for DGX Spark (~96GB memory)
-    GRAD_ACCUM = 2     # Effective batch size = 32
+    NUM_EPOCHS = 1    # Fewer epochs needed for 7B models
+    BATCH_SIZE = 2     # Optimized for DGX Spark (~96GB memory)
+    GRAD_ACCUM = 16     # Effective batch size = 32
     LEARNING_RATE = 1e-4  # Lower LR for larger models
     LORA_RANK = 32     # More capacity for 7B model
 
@@ -397,16 +398,17 @@ if __name__ == "__main__":
         per_device_eval_batch_size=BATCH_SIZE,
         gradient_accumulation_steps=GRAD_ACCUM,
         max_grad_norm=1.0,
-        gradient_checkpointing=True,
-        # gradient_checkpointing=False,
-        gradient_checkpointing_kwargs={'use_reentrant': True},
+        # gradient_checkpointing=True,
+        gradient_checkpointing=False,
+        # gradient_checkpointing_kwargs={'use_reentrant': True},
         save_strategy="epoch",
         eval_strategy="epoch",
         logging_steps=10,
         learning_rate=LEARNING_RATE,
         weight_decay=0.01,
         warmup_ratio=0.1,
-        lr_scheduler_type="cosine",
+        # lr_scheduler_type="cosine",
+        lr_scheduler_type="constant",
         bf16=True, # Enable bfloat16
         fp16=False,
         tf32=True, # Enable for Blackwell/Ampere GPUs 

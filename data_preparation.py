@@ -41,57 +41,63 @@ def load_wikitext2_sliding_window(model_name="gpt2", seq_len=2048, stride=512):
 
     def create_sliding_windows(split_data):
         """
-        Create sliding window samples from a dataset split.
-        This matches the exact evaluation protocol from ppl_eval.py.
+        Create sliding window samples matching EXACT evaluation protocol.
+        
+        With stride=seq_len (e.g., 2048):
+        - No overlap between windows
+        - Each window predicts all tokens
+        - Matches standard perplexity evaluation
+        
+        With stride<seq_len (e.g., stride=512, seq_len=2048):
+        - Windows overlap
+        - Only new tokens beyond stride are predicted
+        - First window predicts all tokens
         """
-        # Step 1: Concatenate all text with \n\n (matches eval)
+        print("Creating sliding window samples...")
+        
         full_text = "\n\n".join(split_data["text"])
-        
-        # Step 2: Tokenize entire concatenated text
         encodings = tokenizer(full_text, return_tensors="pt")
-        input_ids = encodings["input_ids"][0]  # Remove batch dimension
-        
+        input_ids = encodings["input_ids"][0]
         total_length = len(input_ids)
-        samples = []
         
-        # Step 3: Create sliding windows (matches eval loop)
+        samples = []
         prev_end_loc = 0
         
         for begin_loc in range(0, total_length, stride):
             end_loc = min(begin_loc + seq_len, total_length)
+            trg_len = end_loc - prev_end_loc  # New tokens in this window
             
-            # Stop if window would be too small
             if end_loc - begin_loc < stride:
                 break
             
-            # Extract window
             window_input_ids = input_ids[begin_loc:end_loc]
-            
-            # Calculate how many NEW tokens are in this window
-            trg_len = end_loc - prev_end_loc
-            
-            # Create labels (clone of input_ids)
             labels = window_input_ids.clone()
             
-            # Mask context tokens (only predict new tokens)
+            # Masking logic: EXACTLY matches Evaluation.evaluate()
             if begin_loc > 0:
-                # Mask all but the last trg_len tokens
-                labels[:-trg_len] = -100
-            # else: first window, predict all tokens (no prior context)
+                # Mask context: only predict last trg_len tokens
+                context_len = len(labels) - trg_len
+                labels[:context_len] = -100
+            # else: first window predicts all tokens
             
             samples.append({
                 "input_ids": window_input_ids.tolist(),
                 "labels": labels.tolist(),
-                "attention_mask": [1] * len(window_input_ids)  # All tokens are valid
+                "attention_mask": [1] * len(window_input_ids)
             })
             
             prev_end_loc = end_loc
-            
-            # Stop if we've reached the end
-            if end_loc >= total_length:
-                break
+        
+        total_tokens = sum(len(s["input_ids"]) for s in samples)
+        labeled_tokens = sum(sum(1 for l in s["labels"] if l != -100) for s in samples)
+        
+        print(f"  Samples: {len(samples)}")
+        print(f"  Total tokens: {total_tokens}")
+        print(f"  Labeled tokens: {labeled_tokens} ({100*labeled_tokens/total_tokens:.1f}%)")
         
         return samples
+
+
 
     # Process each split
     print("Creating sliding window samples...")

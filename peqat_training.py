@@ -135,7 +135,7 @@ if __name__ == "__main__":
     # ============================================================================
     MODEL_NAME = "meta-llama/Llama-2-7b-hf"
     BLOCK_SIZE = 2048  # Llama context length
-    NUM_EPOCHS = 1    # Fewer epochs needed for 7B models
+    NUM_EPOCHS = 10    # Fewer epochs needed for 7B models
     BATCH_SIZE = 2     # Optimized for DGX Spark (~96GB memory)
     GRAD_ACCUM = 16     # Effective batch size = 32
     LEARNING_RATE = 1e-4  # Lower LR for larger models
@@ -242,10 +242,10 @@ if __name__ == "__main__":
 
 
     quantize_model(peft_model)
-    print("\n--- Converting to Fused Operations ---")
-    from fused_ops import convert_to_fused
-    peft_model = convert_to_fused(peft_model)
-    print("✓ Model ready for accelerated training\n")
+    # print("\n--- Converting to Fused Operations ---")
+    # from fused_ops import convert_to_fused
+    # peft_model = convert_to_fused(peft_model)
+    # print("✓ Model ready for accelerated training\n")
 
 
     # if torch.__version__ >= "2.0":

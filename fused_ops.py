@@ -74,14 +74,10 @@ def _fused_act_quant_forward(
     is_3d: bool
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """
-    Fused operation: SmoothQuant + PACT + Activation quantization
+    Returns: (x_dq, x_original, x_clipped, clip, scale)
     
-    Mathematical steps (MUST match ActSTEQuant):
-    1. x_scaled = x / smooth_factor
-    2. x_clipped = clamp(x_scaled, -clip, clip)  [PACT]
-    3. Quantize symmetric per-channel
-    
-    Returns: (x_dq, x, x_clipped, clip, scale) for backward pass
+    NOTE: x_original is UNSCALED (before smooth_factor division)
+    This is important for backward pass mask computation.
     """
     qmax = (1 << (num_bits - 1)) - 1
     clip = clip_vals.abs().clamp(min=1e-4)
@@ -97,6 +93,9 @@ def _fused_act_quant_forward(
         clip_b = clip.view(1, -1)
         scale_b = scale.view(1, -1)
     
+    # Save ORIGINAL x (before scaling) for backward
+    x_original = x
+    
     # Step 1: SmoothQuant scaling
     x_scaled = x / smooth_b
     
@@ -108,31 +107,20 @@ def _fused_act_quant_forward(
     x_q = torch.clamp(x_q, -qmax, qmax)
     x_dq = x_q * scale_b
     
-    return x_dq, x, x_clipped, clip, scale
+    return x_dq, x_original, x_clipped, clip, scale
 
 
-# ============================================================
-# FUSED AUTOGRAD FUNCTIONS WITH STE GRADIENTS
-# ============================================================
 
 class FusedActSTEQuant(torch.autograd.Function):
-    """
-    Fused activation quantization with STE gradients.
-    
-    Mathematically equivalent to: ActSTEQuant(x / smooth_factor, clip_vals)
-    But executes in single kernel.
-    """
     @staticmethod
     def forward(ctx, x, smooth_factor, clip_vals, num_bits):
         is_3d = (x.dim() == 3)
         
-        # Use fused JIT operation
         x_dq, x_orig, x_clipped, clip, scale = _fused_act_quant_forward(
             x, smooth_factor, clip_vals, num_bits, is_3d
         )
         
-        # Save for backward (same as ActSTEQuant)
-        ctx.save_for_backward(x_orig, x_clipped, clip, scale)
+        ctx.save_for_backward(x_orig, x_clipped, clip, scale, smooth_factor)
         ctx.qmax = (1 << (num_bits - 1)) - 1
         ctx.is_3d = is_3d
         
@@ -141,71 +129,107 @@ class FusedActSTEQuant(torch.autograd.Function):
     @staticmethod
     def backward(ctx, grad_output):
         """
-        CRITICAL: Must match ActSTEQuant.backward() EXACTLY!
-        This ensures learnable clip values receive correct gradients.
+        Backward with dtype handling for bfloat16 training.
         """
-        x, x_clipped, clip, scale = ctx.saved_tensors
+        x, x_clipped, clip, scale, smooth_factor = ctx.saved_tensors
         qmax = ctx.qmax
         is_3d = ctx.is_3d
+        
+        # CRITICAL: Ensure grad_output matches saved tensor dtype
+        if grad_output.dtype != x.dtype:
+            grad_output = grad_output.to(x.dtype)
         
         # Broadcast
         if is_3d:
             clip_b = clip.view(1, 1, -1)
             scale_b = scale.view(1, 1, -1)
+            smooth_b = smooth_factor.view(1, 1, -1)
         else:
             clip_b = clip.view(1, -1)
             scale_b = scale.view(1, -1)
+            smooth_b = smooth_factor.view(1, -1)
         
-        # Recompute quantization for gradient calc
+        # Compute scaled input
+        x_scaled = x / smooth_b
+        
+        # Recompute quantization
         x_q = torch.round(x_clipped / scale_b)
         x_q = torch.clamp(x_q, -qmax, qmax)
         x_dq = x_q * scale_b
         
-        # 1. Gradient to Input (STE)
-        mask_inside = (x.abs() <= clip_b)
-        grad_x = grad_output * mask_inside.float()
+        # Masks
+        mask_inside = (x_scaled.abs() <= clip_b)
         
-        # 2. Gradient to Clip (CRITICAL for PACT learning)
-        # Component A: Clipped outliers
-        grad_clip_upper = (grad_output * (x > clip_b).float()).sum(dim=(0, 1))
-        grad_clip_lower = (grad_output * (x < -clip_b).float() * -1.0).sum(dim=(0, 1))
+        # 1. Gradient to INPUT x
+        grad_x = grad_output * mask_inside.float() / smooth_b
         
-        # Component B: Quantization error
-        mask_in_range = (x.abs() <= clip_b)
+        # 2. Gradient to SMOOTH_FACTOR
+        grad_smooth_from_div = -(grad_output * mask_inside.float() * x / (smooth_b ** 2))
+        grad_smooth_factor = grad_smooth_from_div.sum(dim=(0, 1)) if is_3d else grad_smooth_from_div.sum(dim=0)
+        
+        # 3. Gradient to CLIP VALUES (PACT)
+        grad_clip_upper = (grad_output * (x_scaled > clip_b).float()).sum(dim=(0, 1))
+        grad_clip_lower = (grad_output * (x_scaled < -clip_b).float() * -1.0).sum(dim=(0, 1))
+        
         quant_error = x_dq - x_clipped
-        grad_quant = (grad_output * quant_error * mask_in_range.float() / (clip_b + 1e-8)).sum(dim=(0, 1))
+        grad_quant = (grad_output * quant_error * mask_inside.float() / (clip_b + 1e-8)).sum(dim=(0, 1))
         
         grad_alpha = grad_clip_upper + grad_clip_lower + grad_quant
         
-        # No gradient to smooth_factor or num_bits
-        return grad_x, None, grad_alpha, None
+        # Return: (x, smooth_factor, clip_vals, num_bits)
+        return grad_x, grad_smooth_factor, grad_alpha, None
 
 
 class FusedWeightSTEQuant(torch.autograd.Function):
-    """
-    Fused weight quantization with STE gradients.
-    
-    Mathematically equivalent to: WeightSTEQuant((base + LoRA) * smooth)
-    But executes in single kernel.
-    """
     @staticmethod
     def forward(ctx, base_weight, lora_B, lora_A, scaling, smooth_factor, num_bits):
-        # Use fused JIT operation
         w_dq = _fused_lora_weight_quant_forward(
             base_weight, lora_B, lora_A, scaling, smooth_factor, num_bits
         )
         
-        # No need to save anything (STE passes gradients through)
+        # Save merged_weight BEFORE smooth scaling
+        lora_delta = torch.mm(lora_B, lora_A) * scaling
+        merged_weight = base_weight + lora_delta
+        
+        ctx.save_for_backward(lora_B, lora_A, merged_weight, smooth_factor)
+        ctx.scaling = scaling
+        
         return w_dq
     
     @staticmethod
     def backward(ctx, grad_output):
         """
-        STE: Gradient passes through unchanged to LoRA parameters.
-        Base weight is frozen, so no gradient needed.
+        Backward with dtype handling for bfloat16 training.
+        
+        CRITICAL: All operations must happen in the same dtype as saved tensors.
         """
-        # grad_output flows to: base(frozen), lora_B, lora_A, scaling(constant), smooth, num_bits
-        return None, grad_output, grad_output, None, None, None
+        lora_B, lora_A, merged_weight, smooth_factor = ctx.saved_tensors
+        scaling = ctx.scaling
+        
+        # CRITICAL: Convert grad_output to match saved tensor dtype (bfloat16)
+        target_dtype = lora_B.dtype
+        if grad_output.dtype != target_dtype:
+            grad_output = grad_output.to(target_dtype)
+        
+        # Gradient to smooth_factor: d(m*s)/ds = m
+        # Sum over output dimension (dim=0)
+        grad_smooth_factor = (grad_output * merged_weight).sum(dim=0)
+        
+        # Gradient to merged_weight: d(m*s)/dm = s
+        # Broadcast smooth_factor: [in_features] -> [1, in_features]
+        grad_merged = grad_output * smooth_factor.unsqueeze(0)
+        
+        # Gradient through LoRA: merged = base + lora_delta * scaling
+        grad_lora_delta = grad_merged * scaling
+        
+        # Matrix multiplication backward (now both are same dtype)
+        grad_lora_B = torch.mm(grad_lora_delta, lora_A.t())
+        grad_lora_A = torch.mm(lora_B.t(), grad_lora_delta)
+        
+        # Gradients: (base_weight, lora_B, lora_A, scaling, smooth_factor, num_bits)
+        return None, grad_lora_B, grad_lora_A, None, grad_smooth_factor, None
+
+
 
 
 # ============================================================
@@ -292,6 +316,8 @@ class PEQATLoRAModuleFused(nn.Module):
                 f"num_bits={self.num_bits})")
 
 
+
+
 # ============================================================
 # CONVERSION UTILITY
 # ============================================================
@@ -299,32 +325,25 @@ class PEQATLoRAModuleFused(nn.Module):
 def convert_to_fused(model):
     """
     Convert all PEQATLoRAModule instances to fused version.
-    
-    Usage:
-        peft_model = quantize_model(peft_model)
-        peft_model = convert_to_fused(peft_model)  # ← Add this
-        trainer.train()
     """
+    from fake_quant import QATW4A4LinearCore 
+    
     converted = 0
     
     def get_parent_and_child(model, full_name):
-        """Helper to get parent module and child attribute name"""
         if '.' not in full_name:
             return model, full_name
-        
         parts = full_name.split('.')
         parent = model
         for part in parts[:-1]:
             parent = getattr(parent, part)
         return parent, parts[-1]
     
-    # Collect modules to replace (can't modify dict during iteration)
     to_replace = []
     for name, module in model.named_modules():
         if isinstance(module, PEQATLoRAModule):
             to_replace.append((name, module))
     
-    # Replace with fused versions
     for name, module in to_replace:
         parent, child_name = get_parent_and_child(model, name)
         fused_module = PEQATLoRAModuleFused(module)
@@ -332,4 +351,112 @@ def convert_to_fused(model):
         converted += 1
     
     print(f"✓ Converted {converted} modules to fused operations")
+    
+    # Verify parameters are accessible
+    # verify_fused_parameters(model)
+    
     return model
+
+
+
+# def verify_fused_parameters(model):
+#     """
+#     Verify all parameters are correctly registered and accessible.
+#     Call this after convert_to_fused() to ensure compatibility.
+#     """
+#     print("\n" + "="*70)
+#     print("FUSED OPERATIONS PARAMETER VERIFICATION")
+#     print("="*70)
+    
+#     lora_params = []
+#     clip_params = []
+#     smooth_params = []
+#     other_params = []
+    
+#     for name, param in model.named_parameters():
+#         if 'lora_A.default.weight' in name or 'lora_B.default.weight' in name:
+#             lora_params.append((name, param.shape, param.requires_grad))
+#         elif 'activation_clip' in name:
+#             clip_params.append((name, param.shape, param.requires_grad))
+#         elif 'smooth_factor' in name:
+#             smooth_params.append((name, param.shape, param.requires_grad))
+#         elif param.requires_grad:
+#             other_params.append((name, param.shape))
+    
+#     print(f"\n📊 Parameter Count Summary:")
+#     print(f"  LoRA parameters:    {len(lora_params)}")
+#     print(f"  Clip parameters:    {len(clip_params)}")
+#     print(f"  Smooth parameters:  {len(smooth_params)}")
+#     print(f"  Other trainable:    {len(other_params)}")
+    
+#     # Verify all are trainable
+#     lora_trainable = sum(1 for _, _, grad in lora_params if grad)
+#     clip_trainable = sum(1 for _, _, grad in clip_params if grad)
+#     smooth_trainable = sum(1 for _, _, grad in smooth_params if grad)
+    
+#     print(f"\n✓ Trainable Status:")
+#     print(f"  LoRA:   {lora_trainable}/{len(lora_params)} trainable")
+#     print(f"  Clip:   {clip_trainable}/{len(clip_params)} trainable")
+#     print(f"  Smooth: {smooth_trainable}/{len(smooth_params)} trainable")
+    
+#     # Show first few of each type
+#     if lora_params:
+#         print(f"\n📌 Sample LoRA parameters (first 3):")
+#         for name, shape, grad in lora_params[:3]:
+#             print(f"  {name}")
+#             print(f"    Shape: {shape}, Trainable: {grad}")
+    
+#     if clip_params:
+#         print(f"\n📌 Sample Clip parameters (first 3):")
+#         for name, shape, grad in clip_params[:3]:
+#             print(f"  {name}")
+#             print(f"    Shape: {shape}, Trainable: {grad}")
+    
+#     if smooth_params:
+#         print(f"\n📌 Sample Smooth parameters (first 3):")
+#         for name, shape, grad in smooth_params[:3]:
+#             print(f"  {name}")
+#             print(f"    Shape: {shape}, Trainable: {grad}")
+    
+#     # Check for QATW4A4LinearCore modules
+#     qat_modules = []
+#     for name, module in model.named_modules():
+#         if isinstance(module, QATW4A4LinearCore):
+#             qat_modules.append(name)
+    
+#     print(f"\n📌 QATW4A4LinearCore modules found: {len(qat_modules)}")
+#     if qat_modules:
+#         print(f"  First: {qat_modules[0]}")
+#         print(f"  Last:  {qat_modules[-1]}")
+    
+#     # Check for PEQATLoRAModuleFused modules
+#     fused_modules = []
+#     for name, module in model.named_modules():
+#         if isinstance(module, PEQATLoRAModuleFused):
+#             fused_modules.append(name)
+    
+#     print(f"\n📌 PEQATLoRAModuleFused modules: {len(fused_modules)}")
+    
+#     # Warnings
+#     if other_params:
+#         print(f"\n⚠️  WARNING: Found {len(other_params)} unexpected trainable params:")
+#         for name, shape in other_params[:5]:
+#             print(f"  - {name} {shape}")
+    
+#     if len(lora_params) == 0:
+#         print(f"\n❌ ERROR: No LoRA parameters found!")
+#         return False
+    
+#     if len(clip_params) == 0:
+#         print(f"\n❌ ERROR: No clip parameters found!")
+#         return False
+    
+#     if len(smooth_params) == 0:
+#         print(f"\n❌ ERROR: No smooth parameters found!")
+#         return False
+    
+#     print("\n" + "="*70)
+#     print("✅ ALL PARAMETERS CORRECTLY REGISTERED")
+#     print("="*70 + "\n")
+    
+#     return True

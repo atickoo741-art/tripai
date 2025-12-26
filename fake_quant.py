@@ -614,48 +614,74 @@ class GradientMonitorCallback(TrainerCallback):
     def __init__(self, log_every_n_steps=10):
         self.log_every_n_steps = log_every_n_steps
     
-    def on_step_end(self, args, state, control, model, **kwargs):
+    def on_log(self, args, state, control, model=None, logs=None, **kwargs):
+        """
+        Called when logging happens - gradients still exist at this point
+        """
         if state.global_step % self.log_every_n_steps != 0:
             return
         
-        # Separate gradient norms by parameter type
+        # Unwrap model if using DDP or other wrappers
+        unwrapped_model = model
+        if hasattr(model, 'module'):
+            unwrapped_model = model.module
+        
         lora_grad_norm = 0.0
         clip_grad_norm = 0.0
         smooth_grad_norm = 0.0
-        
         lora_count = 0
         clip_count = 0
         smooth_count = 0
         
-        for name, param in model.named_parameters():
+        for name, param in unwrapped_model.named_parameters():
+            if not param.requires_grad:
+                continue
+                
             if param.grad is None:
                 continue
             
             grad_norm = param.grad.norm().item()
             
-            if 'lora' in name.lower():
+            # Check for LoRA parameters (lora_A or lora_B)
+            if 'lora_a' in name.lower() or 'lora_b' in name.lower():
                 lora_grad_norm += grad_norm ** 2
                 lora_count += 1
+            # Check for activation clip parameters
             elif 'activation_clip' in name:
                 clip_grad_norm += grad_norm ** 2
                 clip_count += 1
+            # Check for smooth factor parameters
             elif 'smooth_factor' in name:
                 smooth_grad_norm += grad_norm ** 2
                 smooth_count += 1
         
         # Compute RMS norms
-        lora_grad_norm = (lora_grad_norm ** 0.5) if lora_count > 0 else 0.0
-        clip_grad_norm = (clip_grad_norm ** 0.5) if clip_count > 0 else 0.0
-        smooth_grad_norm = (smooth_grad_norm ** 0.5) if smooth_count > 0 else 0.0
+        lora_grad_norm = lora_grad_norm ** 0.5 if lora_count > 0 else 0.0
+        clip_grad_norm = clip_grad_norm ** 0.5 if clip_count > 0 else 0.0
+        smooth_grad_norm = smooth_grad_norm ** 0.5 if smooth_count > 0 else 0.0
+        total_grad_norm = (lora_grad_norm**2 + clip_grad_norm**2 + smooth_grad_norm**2)**0.5
         
-        print(f"\n{'='*60}")
+        print("=" * 60)
         print(f"Step {state.global_step} - Gradient Norms by Type:")
-        print(f"{'='*60}")
-        print(f"  LoRA:   {lora_grad_norm:8.4f} ({lora_count} params)")
-        print(f"  Clips:  {clip_grad_norm:8.4f} ({clip_count} params)")
-        print(f"  Smooth: {smooth_grad_norm:8.4f} ({smooth_count} params)")
-        print(f"  Total:  {(lora_grad_norm**2 + clip_grad_norm**2 + smooth_grad_norm**2)**0.5:8.4f}")
-        print(f"{'='*60}\n")
+        print("=" * 60)
+        print(f"  LoRA:     {lora_grad_norm:8.4f} ({lora_count} params)")
+        print(f"  Clips:    {clip_grad_norm:8.4f} ({clip_count} params)")
+        print(f"  Smooth:   {smooth_grad_norm:8.4f} ({smooth_count} params)")
+        print(f"  Total:    {total_grad_norm:8.4f}")
+        print("=" * 60)
+        
+        # Also check that we're actually finding trainable params
+        if lora_count == 0 and clip_count == 0 and smooth_count == 0:
+            print("⚠️  WARNING: No gradients found! Checking trainable params...")
+            trainable = [(n, p.requires_grad, p.grad is not None) 
+                        for n, p in unwrapped_model.named_parameters() 
+                        if p.requires_grad]
+            print(f"  Found {len(trainable)} trainable params")
+            if trainable:
+                print("  First 5 trainable params:")
+                for n, req_grad, has_grad in trainable[:5]:
+                    print(f"    {n}: requires_grad={req_grad}, has_grad={has_grad}")
+
 
 
 def save_quantization_parameters(model, save_dir):

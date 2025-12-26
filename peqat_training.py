@@ -242,6 +242,11 @@ if __name__ == "__main__":
 
 
     quantize_model(peft_model)
+    print("\n--- Converting to Fused Operations ---")
+    from fused_ops import convert_to_fused
+    peft_model = convert_to_fused(peft_model)
+    print("✓ Model ready for accelerated training\n")
+
 
     # if torch.__version__ >= "2.0":
     #     print("Compiling model with torch.compile...")

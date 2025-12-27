@@ -135,10 +135,10 @@ if __name__ == "__main__":
     # ============================================================================
     MODEL_NAME = "meta-llama/Llama-2-7b-hf"
     BLOCK_SIZE = 2048  # Llama context length
-    NUM_EPOCHS = 1    # Fewer epochs needed for 7B models
+    NUM_EPOCHS = 10    # Fewer epochs needed for 7B models
     BATCH_SIZE = 16     # Optimized for DGX Spark (~96GB memory)
     GRAD_ACCUM = 2     # Effective batch size = 32
-    LEARNING_RATE = 1e-4  # Lower LR for larger models
+    LEARNING_RATE = 5e-5  # Lower LR for larger models
     LORA_RANK = 32     # More capacity for 7B model
 
     # Set this to run different experiments
@@ -402,7 +402,7 @@ if __name__ == "__main__":
         per_device_train_batch_size=BATCH_SIZE,
         per_device_eval_batch_size=BATCH_SIZE,
         gradient_accumulation_steps=GRAD_ACCUM,
-        max_grad_norm=1.0,
+        max_grad_norm=5.0,
         gradient_checkpointing=True,
         # gradient_checkpointing=False,
         gradient_checkpointing_kwargs={'use_reentrant': True},
@@ -413,7 +413,7 @@ if __name__ == "__main__":
         weight_decay=0.01,
         warmup_ratio=0.1,
         # lr_scheduler_type="cosine",
-        lr_scheduler_type="constant",
+        lr_scheduler_type="constant_with_warmup",
         bf16=True, # Enable bfloat16
         fp16=False,
         tf32=True, # Enable for Blackwell/Ampere GPUs 
@@ -445,7 +445,7 @@ if __name__ == "__main__":
     # calibrate_smooth_factors(peft_model, per_module_abs, alpha=0.5)
     import gc
     gc.collect()
-    unified_calibration(peft_model, calib_loader, steps=32, percentile=99.5, alpha=0.6, device=device, use_smooth = calibrate_smooth) #TO INIT SMOOTH FACTORS AT 1.0
+    unified_calibration(peft_model, calib_loader, steps=16, percentile=99.5, alpha=0.6, device=device, use_smooth = calibrate_smooth) #TO INIT SMOOTH FACTORS AT 1.0
     torch.cuda.empty_cache()
 
 

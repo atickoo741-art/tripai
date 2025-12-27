@@ -57,16 +57,18 @@ def main():
 
     # Load VALIDATION set (standard for reporting)
     print("Loading WikiText-2 Validation Set...")
-    dataset = load_dataset("wikitext", "wikitext-2-raw-v1", split="validation")
+    dataset = load_dataset("wikitext", "wikitext-2-raw-v1", split="test")
     
     # Create evaluation object
-    eval_obj = Evaluation(tokenizer, dataset, device, num_samples=args.n_samples)
+    # eval_obj = Evaluation(tokenizer, dataset, device, num_samples=args.n_samples)
+    eval_obj = Evaluation(dataset, tokenizer, device, num_samples=args.n_samples)
     
     # Evaluate with proper sliding window
     # Use stride=2048 for no-overlap (matches paper baseline of 5.47)
     # Use stride=512 for overlap (gives lower PPL ~4.86, but not standard)
     print(f"Evaluating with seq_len={args.seq_len}, stride={args.stride} (no overlap, standard protocol)")
-    eval_obj.evaluate(model, seq_len=args.seq_len, stride=args.stride)
+    ppl = eval_obj.evaluate(model, seq_len=args.seq_len, stride=args.stride)
+    print(f"\nFinal Perplexity: {ppl:.4f}")
 
 #test comment for test commit
 

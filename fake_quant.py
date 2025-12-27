@@ -613,11 +613,15 @@ class SaveQuantParamsCallback(TrainerCallback):
 class GradientMonitorCallback(TrainerCallback):
     def __init__(self, log_every_n_steps=10):
         self.log_every_n_steps = log_every_n_steps
+        self.last_unclipped_norm = None
     
-    def on_log(self, args, state, control, model=None, logs=None, **kwargs):
-        """
-        Called when logging happens - gradients still exist at this point
-        """
+    def on_log(self, args, state, control, logs=None, **kwargs):
+        """Capture the unclipped gradient norm from Trainer's logs"""
+        if logs and 'grad_norm' in logs:
+            self.last_unclipped_norm = logs['grad_norm']
+    
+    def on_pre_optimizer_step(self, args, state, control, model=None, logs=None, **kwargs):
+        """Show both unclipped (from logs) and clipped gradients"""
         if state.global_step % self.log_every_n_steps != 0:
             return
         
@@ -655,32 +659,29 @@ class GradientMonitorCallback(TrainerCallback):
                 smooth_grad_norm += grad_norm ** 2
                 smooth_count += 1
         
-        # Compute RMS norms
+        # Compute RMS norms (these are POST-CLIPPING)
         lora_grad_norm = lora_grad_norm ** 0.5 if lora_count > 0 else 0.0
         clip_grad_norm = clip_grad_norm ** 0.5 if clip_count > 0 else 0.0
         smooth_grad_norm = smooth_grad_norm ** 0.5 if smooth_count > 0 else 0.0
-        total_grad_norm = (lora_grad_norm**2 + clip_grad_norm**2 + smooth_grad_norm**2)**0.5
+        total_clipped = (lora_grad_norm**2 + clip_grad_norm**2 + smooth_grad_norm**2)**0.5
         
         print("=" * 60)
-        print(f"Step {state.global_step} - Gradient Norms by Type:")
-        print("=" * 60)
-        print(f"  LoRA:     {lora_grad_norm:8.4f} ({lora_count} params)")
-        print(f"  Clips:    {clip_grad_norm:8.4f} ({clip_count} params)")
-        print(f"  Smooth:   {smooth_grad_norm:8.4f} ({smooth_count} params)")
-        print(f"  Total:    {total_grad_norm:8.4f}")
+        print(f"Step {state.global_step} - Gradient Norms:")
         print("=" * 60)
         
-        # Also check that we're actually finding trainable params
-        if lora_count == 0 and clip_count == 0 and smooth_count == 0:
-            print("⚠️  WARNING: No gradients found! Checking trainable params...")
-            trainable = [(n, p.requires_grad, p.grad is not None) 
-                        for n, p in unwrapped_model.named_parameters() 
-                        if p.requires_grad]
-            print(f"  Found {len(trainable)} trainable params")
-            if trainable:
-                print("  First 5 trainable params:")
-                for n, req_grad, has_grad in trainable[:5]:
-                    print(f"    {n}: requires_grad={req_grad}, has_grad={has_grad}")
+        # Show UNCLIPPED total (from Trainer's internal calculation)
+        if self.last_unclipped_norm is not None:
+            print(f"  UNCLIPPED Total:  {self.last_unclipped_norm:8.4f}")
+            print(f"  Clipping ratio:   {total_clipped / self.last_unclipped_norm:.4f}")
+            print("-" * 60)
+        
+        # Show POST-CLIPPING breakdown by parameter type
+        print(f"  LoRA (clipped):   {lora_grad_norm:8.4f} ({lora_count} params)")
+        print(f"  Clips (clipped):  {clip_grad_norm:8.4f} ({clip_count} params)")
+        print(f"  Smooth (clipped): {smooth_grad_norm:8.4f} ({smooth_count} params)")
+        print(f"  Total (clipped):  {total_clipped:8.4f}")
+        print(f"  max_grad_norm:    {args.max_grad_norm}")
+        print("=" * 60)
 
 
 
@@ -701,71 +702,103 @@ def save_quantization_parameters(model, save_dir):
 
 
 
-class Evaluation:
-    def __init__(self, tokenizer, dataset, device, num_samples=None):
-        """
-        Proper sliding window evaluation class.
+# class Evaluation:
+#     def __init__(self, tokenizer, dataset, device, num_samples=None):
+#         """
+#         Proper sliding window evaluation class.
         
-        Args:
-            tokenizer: Tokenizer for the model
-            dataset: Raw dataset (wikitext-2-raw-v1)
-            device: Device to run on
-            num_samples: Maximum number of windows to evaluate (None = all)
-        """
-        self.tokenizer = tokenizer
-        self.dataset = dataset
-        self.device = device
-        self.num_samples = num_samples
+#         Args:
+#             tokenizer: Tokenizer for the model
+#             dataset: Raw dataset (wikitext-2-raw-v1)
+#             device: Device to run on
+#             num_samples: Maximum number of windows to evaluate (None = all)
+#         """
+#         self.tokenizer = tokenizer
+#         self.dataset = dataset
+#         self.device = device
+#         self.num_samples = num_samples
 
+#     def evaluate(self, model, seq_len=2048, stride=2048):
+#         """
+#         Evaluate model using sliding window perplexity.
+#         Now uses shared data prep function.
+#         """
+#         model.eval()
+#         nlls = []
+        
+#         # Use shared concatenation logic
+#         input_ids_full = get_concatenated_text(self.dataset, self.tokenizer)
+#         seq_len_total = len(input_ids_full)
+        
+#         prev_end_loc = 0
+        
+#         with torch.no_grad(), torch.cuda.amp.autocast(dtype=torch.bfloat16):
+#             pbar = tqdm.tqdm(
+#                 range(0, seq_len_total, stride), 
+#                 desc="Evaluating"
+#             )
+            
+#             for begin_loc in pbar:
+#                 end_loc = min(begin_loc + seq_len, seq_len_total)
+#                 trg_len = end_loc - prev_end_loc
+                
+#                 # Extract window
+#                 input_ids = input_ids_full[begin_loc:end_loc].unsqueeze(0).to(self.device)
+#                 target_ids = input_ids.clone()
+                
+#                 # Mask context tokens (only evaluate new tokens)
+#                 if begin_loc > 0:
+#                     target_ids[:, :-trg_len] = -100
+                
+#                 # Forward pass
+#                 outputs = model(input_ids, labels=target_ids)
+                
+#                 # Accumulate loss
+#                 neg_log_likelihood = outputs.loss * trg_len
+#                 nlls.append(neg_log_likelihood)
+                
+#                 prev_end_loc = end_loc
+                
+#                 if self.num_samples and len(nlls) >= self.num_samples:
+#                     break
+#                 if end_loc >= seq_len_total:
+#                     break
+        
+#         # Calculate perplexity
+#         total_nll = torch.stack(nlls).sum()
+#         ppl = torch.exp(total_nll / prev_end_loc)
+        
+#         print(f"{ppl.item():.4f}")
+#         return ppl.item()
+class Evaluation:
+    def __init__(self, dataset, tokenizer, device, num_samples=40):
+        self.dataset = dataset
+        self.tokenizer = tokenizer
+        self.device = device
+
+        self.dataset = tokenizer(
+            "\n\n".join(dataset["text"]), return_tensors="pt"
+        ).input_ids.to(device)
+
+        self.n_samples = num_samples
+
+    @torch.no_grad()
     def evaluate(self, model, seq_len=2048, stride=2048):
-        """
-        Evaluate model using sliding window perplexity.
-        Now uses shared data prep function.
-        """
+        model.to(torch.bfloat16)
         model.eval()
         nlls = []
-        
-        # Use shared concatenation logic
-        input_ids_full = get_concatenated_text(self.dataset, self.tokenizer)
-        seq_len_total = len(input_ids_full)
-        
-        prev_end_loc = 0
-        
-        with torch.no_grad(), torch.cuda.amp.autocast(dtype=torch.bfloat16):
-            pbar = tqdm.tqdm(
-                range(0, seq_len_total, stride), 
-                desc="Evaluating"
+        n_samples = self.n_samples if self.n_samples else self.dataset.size(1) // 2048
+        for i in tqdm.tqdm(range(n_samples), desc="Evaluating..."):
+            batch = self.dataset[:, (i * 2048) : ((i + 1) * 2048)].to(model.device)
+            with torch.no_grad():
+                lm_logits = model(batch).logits
+            shift_logits = lm_logits[:, :-1, :].contiguous().float()
+            shift_labels = self.dataset[:, (i * 2048) : ((i + 1) * 2048)][:, 1:]
+            loss_fct = nn.CrossEntropyLoss()
+            loss = loss_fct(
+                shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1)
             )
-            
-            for begin_loc in pbar:
-                end_loc = min(begin_loc + seq_len, seq_len_total)
-                trg_len = end_loc - prev_end_loc
-                
-                # Extract window
-                input_ids = input_ids_full[begin_loc:end_loc].unsqueeze(0).to(self.device)
-                target_ids = input_ids.clone()
-                
-                # Mask context tokens (only evaluate new tokens)
-                if begin_loc > 0:
-                    target_ids[:, :-trg_len] = -100
-                
-                # Forward pass
-                outputs = model(input_ids, labels=target_ids)
-                
-                # Accumulate loss
-                neg_log_likelihood = outputs.loss * trg_len
-                nlls.append(neg_log_likelihood)
-                
-                prev_end_loc = end_loc
-                
-                if self.num_samples and len(nlls) >= self.num_samples:
-                    break
-                if end_loc >= seq_len_total:
-                    break
-        
-        # Calculate perplexity
-        total_nll = torch.stack(nlls).sum()
-        ppl = torch.exp(total_nll / prev_end_loc)
-        
-        print(f"{ppl.item():.4f}")
-        return ppl.item()
+            neg_log_likelihood = loss.float() * 2048
+            nlls.append(neg_log_likelihood)
+
+        return torch.exp(torch.stack(nlls).sum() / (n_samples * 2048))

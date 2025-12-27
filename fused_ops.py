@@ -57,8 +57,8 @@ def _fused_lora_weight_quant_forward(
     scaled = merged * smooth_factor.unsqueeze(0)
     
     # Step 4: Per-row symmetric quantization
-    row_max = scaled.abs().amax(dim=1, keepdim=True).clamp(min=1e-8)
-    scale = row_max / qmax
+    row_max = scaled.abs().amax(dim=1, keepdim=True)  # No clamp
+    scale = (row_max / qmax).clamp(min=1e-8)
     w_q = torch.clamp(torch.round(scaled / scale), qmin, qmax)
     w_dq = w_q * scale
     
@@ -300,7 +300,7 @@ class PEQATLoRAModuleFused(nn.Module):
         quant_input = FusedActSTEQuant.apply(
             x,
             self.qat_core.smooth_factor,
-            self.qat_core.activation_clip,
+            self.qat_core.constrained_clip_val,
             self.num_bits
         )
         

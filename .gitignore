@@ -2,6 +2,7 @@
 qatenv/
 output_*/
 qat_lora_model_*/
+qat_lora_model/
 *.pt
 *.safetensors
 *.bin

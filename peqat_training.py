@@ -110,7 +110,8 @@ def custom_eval(peft_model, tokenizer, device, trainer_ppl):
     from datasets import load_dataset
     
     test_dataset = load_dataset("wikitext", "wikitext-2-raw-v1", split="test")
-    proper_eval = Evaluation(tokenizer, test_dataset, device, num_samples=None)
+    # proper_eval = Evaluation(tokenizer, test_dataset, device, num_samples=None)
+    proper_eval = Evaluation(test_dataset, tokenizer, device, num_samples=None)
     
     # Use stride=2048 (no overlap) to match paper baseline
     custom_ppl = proper_eval.evaluate(peft_model, seq_len=2048, stride=2048)
@@ -127,21 +128,19 @@ def custom_eval(peft_model, tokenizer, device, trainer_ppl):
 
 if __name__ == "__main__":
 
-    # 1. Load the GPT-2 small model and tokenizer
     model_name = "meta-llama/Llama-2-7b-hf"
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     # ============================================================================
     # CONFIGURATION
     # ============================================================================
     MODEL_NAME = "meta-llama/Llama-2-7b-hf"
-    BLOCK_SIZE = 2048  # Llama context length
-    NUM_EPOCHS = 10    # Fewer epochs needed for 7B models
-    BATCH_SIZE = 16     # Optimized for DGX Spark (~96GB memory)
-    GRAD_ACCUM = 2     # Effective batch size = 32
-    LEARNING_RATE = 5e-5  # Lower LR for larger models
-    LORA_RANK = 32     # More capacity for 7B model
+    BLOCK_SIZE = 2048
+    NUM_EPOCHS = 10 
+    BATCH_SIZE = 16 
+    GRAD_ACCUM = 2 
+    LEARNING_RATE = 5e-5
+    LORA_RANK = 32     
 
-    # Set this to run different experiments
     # use_smooth = True
     learn_smooth = True
     calibrate_smooth = False
@@ -411,9 +410,11 @@ if __name__ == "__main__":
         logging_steps=10,
         learning_rate=LEARNING_RATE,
         weight_decay=0.01,
-        warmup_ratio=0.1,
-        # lr_scheduler_type="cosine",
-        lr_scheduler_type="constant_with_warmup",
+        warmup_ratio=0.3,
+        lr_scheduler_type="cosine_with_min_lr",
+        lr_scheduler_kwargs={"min_lr_rate": 0.1},
+        # lr_scheduler_kwargs={"num_cycles": 2},
+        # lr_scheduler_type="constant_with_warmup",
         bf16=True, # Enable bfloat16
         fp16=False,
         tf32=True, # Enable for Blackwell/Ampere GPUs 
@@ -445,7 +446,7 @@ if __name__ == "__main__":
     # calibrate_smooth_factors(peft_model, per_module_abs, alpha=0.5)
     import gc
     gc.collect()
-    unified_calibration(peft_model, calib_loader, steps=16, percentile=99.5, alpha=0.6, device=device, use_smooth = calibrate_smooth) #TO INIT SMOOTH FACTORS AT 1.0
+    unified_calibration(peft_model, calib_loader, steps=50, percentile=99.5, alpha=0.6, device=device, use_smooth = calibrate_smooth) #TO INIT SMOOTH FACTORS AT 1.0
     torch.cuda.empty_cache()
 
 
@@ -488,8 +489,8 @@ if __name__ == "__main__":
     param_groups = []
     # Set learning rates: LoRA uses the TrainingArguments LR; quant params use a higher LR
     lora_lr = training_args.learning_rate 
-    qat_lr = training_args.learning_rate * 10
-    smooth_lr = training_args.learning_rate * 5 
+    clip_lr = training_args.learning_rate * 5
+    smooth_lr = training_args.learning_rate * 3 
 
 
     param_groups = []
@@ -497,12 +498,12 @@ if __name__ == "__main__":
         param_groups.append({
             "params": lora_params, 
             "lr": lora_lr, 
-            "weight_decay": 0.00  # Small L2 regularization for LoRA
+            "weight_decay": 0.01  # Small L2 regularization for LoRA
         })
     if clip_params:
         param_groups.append({
             "params": clip_params, 
-            "lr": qat_lr, 
+            "lr": clip_lr, 
             "weight_decay": 0.0  # No weight decay on clip values
         })
     if smooth_params and learn_smooth:

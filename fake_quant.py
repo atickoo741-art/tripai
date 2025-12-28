@@ -58,55 +58,67 @@ class ActSTEQuant(torch.autograd.Function):
     
     @staticmethod
     def backward(ctx, grad_output):
-        # x, x_clipped, x_dq, clip, scale = ctx.saved_tensors
-        x, x_clipped, clip, scale = ctx.saved_tensors
-        qmax = ctx.qmax
+        # # x, x_clipped, x_dq, clip, scale = ctx.saved_tensors
+        # x, x_clipped, clip, scale = ctx.saved_tensors
+        # qmax = ctx.qmax
         
-        if x.dim() == 3:
-            clip_b = clip.view(1, 1, -1)
-            scale_b = scale.view(1, 1, -1)
-        else:
-            clip_b = clip.view(1, -1)
-            scale_b = scale.view(1, -1)
+        # if x.dim() == 3:
+        #     clip_b = clip.view(1, 1, -1)
+        #     scale_b = scale.view(1, 1, -1)
+        # else:
+        #     clip_b = clip.view(1, -1)
+        #     scale_b = scale.view(1, -1)
         
-        # 1. Gradient to Input (Standard STE)
+        # # 1. Gradient to Input (Standard STE)
+        # mask_inside = (x.abs() <= clip_b)
+        # grad_x = grad_output * mask_inside.float()
+        
+        # # 2. Gradient to Clip (THE OPTIMAL FORMULA)
+        # # This accounts for BOTH clipping and quantization effects
+        
+        # grad_alpha = torch.zeros_like(clip)
+        
+        # # Component A: Gradient from CLIPPED values (Outliers)
+        # # If x > α, output = α, so ∂output/∂α = 1
+        # grad_clip_upper = (grad_output * (x > clip_b).float()).sum(dim=(0, 1))
+        # grad_clip_lower = (grad_output * (x < -clip_b).float() * -1.0).sum(dim=(0, 1))
+        
+        # # Component B: Gradient from QUANTIZATION ERROR (All in-range values)
+        # # The quantization error is (x_dq - x_clipped)
+        # # This error is a function of the scale (α/qmax)
+        # # Derivation: x_dq = round(x/s)*s where s=α/qmax
+        # # For small changes in α, the change in x_dq is proportional to (x_dq - x)/α
+        # # This captures: "If I increase α (bigger bins), does my reconstruction error get better or worse?"
+
+        # x_q = torch.round(x_clipped / scale_b)
+        # x_q = torch.clamp(x_q, -qmax, qmax)
+        # x_dq = x_q * scale_b  # ← Recomputed here
+
+        # mask_in_range = (x.abs() <= clip_b)
+        # quant_error = x_dq - x_clipped  # The reconstruction error
+        
+        # # The gradient contribution from quantization error:
+        # # ∂(x_dq)/∂α ≈ (x_dq - x_clipped) / α
+        # # This tells α: "Adjust to minimize the reconstruction error"
+        # clip_safe = torch.clamp(clip_b, min=0.1)
+        # grad_quant = (grad_output * quant_error * mask_in_range.float() / (clip_safe)).sum(dim=(0, 1))
+        
+        # # COMBINE: Total gradient is clipping loss + quantization loss
+        # grad_alpha = grad_clip_upper + grad_clip_lower + grad_quant
+        
+        # return grad_x, grad_alpha, None
+        x, clip_b, scale_b = ctx.saved_tensors
+    
+        # Input gradient (unchanged)
         mask_inside = (x.abs() <= clip_b)
         grad_x = grad_output * mask_inside.float()
         
-        # 2. Gradient to Clip (THE OPTIMAL FORMULA)
-        # This accounts for BOTH clipping and quantization effects
-        
-        grad_alpha = torch.zeros_like(clip)
-        
-        # Component A: Gradient from CLIPPED values (Outliers)
-        # If x > α, output = α, so ∂output/∂α = 1
+        # Clip gradient (simplified - ONLY boundary signals)
         grad_clip_upper = (grad_output * (x > clip_b).float()).sum(dim=(0, 1))
         grad_clip_lower = (grad_output * (x < -clip_b).float() * -1.0).sum(dim=(0, 1))
+        grad_alpha = grad_clip_upper + grad_clip_lower
         
-        # Component B: Gradient from QUANTIZATION ERROR (All in-range values)
-        # The quantization error is (x_dq - x_clipped)
-        # This error is a function of the scale (α/qmax)
-        # Derivation: x_dq = round(x/s)*s where s=α/qmax
-        # For small changes in α, the change in x_dq is proportional to (x_dq - x)/α
-        # This captures: "If I increase α (bigger bins), does my reconstruction error get better or worse?"
-
-        x_q = torch.round(x_clipped / scale_b)
-        x_q = torch.clamp(x_q, -qmax, qmax)
-        x_dq = x_q * scale_b  # ← Recomputed here
-
-        mask_in_range = (x.abs() <= clip_b)
-        quant_error = x_dq - x_clipped  # The reconstruction error
-        
-        # The gradient contribution from quantization error:
-        # ∂(x_dq)/∂α ≈ (x_dq - x_clipped) / α
-        # This tells α: "Adjust to minimize the reconstruction error"
-        grad_quant = (grad_output * quant_error * mask_in_range.float() / (clip_b + 1e-8)).sum(dim=(0, 1))
-        
-        # COMBINE: Total gradient is clipping loss + quantization loss
-        grad_alpha = grad_clip_upper + grad_clip_lower + grad_quant
-        
-        return grad_x, grad_alpha, None
-
+        return grad_x, grad_alpha, None, None
 
 class WeightSTEQuant(torch.autograd.Function):
     @staticmethod

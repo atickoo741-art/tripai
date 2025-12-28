@@ -107,7 +107,10 @@ class ActSTEQuant(torch.autograd.Function):
         # grad_alpha = grad_clip_upper + grad_clip_lower + grad_quant
         
         # return grad_x, grad_alpha, None
-        x, clip_b, scale_b = ctx.saved_tensors
+        # x, clip_b, scale_b = ctx.saved_tensors
+        saved = ctx.saved_tensors
+        x = saved[0]
+        clip_b = saved[1]
     
         # Input gradient (unchanged)
         mask_inside = (x.abs() <= clip_b)

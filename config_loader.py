@@ -98,7 +98,7 @@ class Config:
             "timestamp": datetime.now().isoformat(),
             "notes": self.get('experiment.notes'),
             "tags": self.get('experiment.tags', []),
-            "git_commit": self._get_git_commit(),  # Optional: track code version
+            # "git_commit": self._get_git_commit(),  # Optional: track code version
         }
         metadata_path = output_path / f"metadata_{self.run_id}.json"
         with open(metadata_path, 'w') as f:

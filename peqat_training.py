@@ -14,6 +14,8 @@ from data_preparation import load_wikitext2_sliding_window
 
 from config_loader import Config
 
+import torch.cuda
+torch.cuda.is_bf16_supported = lambda: True
 
 
 # def save_model(peft_model, tokenizer, model_dir, model_name, device):

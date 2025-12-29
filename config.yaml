@@ -5,6 +5,7 @@ model:
   name: "meta-llama/Llama-2-7b-hf"
   num_bits_weight: 4
   num_bits_activation: 4
+  block_size: 2048
 
 # LoRA
 lora:

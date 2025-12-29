@@ -183,7 +183,7 @@ if __name__ == "__main__":
     model.resize_token_embeddings(len(tokenizer))
     print(f"Model loaded on device: {model.device}")
 
-    model = model.to(torch.bfloat16)
+    model = model.to(torch.bfloat16 if config.get('system.bf16') else torch.float32)
     print(f"Model dtype: {next(model.parameters()).dtype}")
 
 
@@ -375,8 +375,8 @@ if __name__ == "__main__":
     # Load with sliding window (matches eval protocol)
     datasets, _ = load_wikitext2_sliding_window(
         model_name=model_name,
-        seq_len=BLOCK_SIZE,     
-        stride=BLOCK_SIZE 
+        seq_len=config.get('model.block_size'),     
+        stride=config.get('model.block_size')
     )
 
     train_dataset = datasets["train"]

@@ -12,6 +12,9 @@ from fake_quant import quantize_model, PEQATLoRAModule, find_available_dir, Save
 import torch.nn as nn
 from data_preparation import load_wikitext2_sliding_window
 
+from config_loader import Config
+
+
 
 # def save_model(peft_model, tokenizer, model_dir, model_name, device):
     # # Save the model, tokenizer, and quantization parameters
@@ -127,6 +130,16 @@ def custom_eval(peft_model, tokenizer, device, trainer_ppl):
 
 
 if __name__ == "__main__":
+    config = Config("config.yaml")
+    print("=" * 60)
+    print(f"Experiment: {config.get('experiment.name')}")
+    print(f"Run ID: {config.run_id}")
+    print(f"Notes: {config.get('experiment.notes')}")
+    print("=" * 60)
+
+    torch.manual_seed(config.get('system.seed'))
+
+
 
     model_name = "meta-llama/Llama-2-7b-hf"
     tokenizer = AutoTokenizer.from_pretrained(model_name)
@@ -142,26 +155,13 @@ if __name__ == "__main__":
     LORA_RANK = 32     
 
     # use_smooth = True
-    learn_smooth = True
-    calibrate_smooth = False
-    torch.backends.cuda.matmul.allow_tf32 = True
+    learn_smooth = config.get('calibration.learn_smooth', True)
+    calibrate_smooth = config.get('calibration.calibrate_smooth', False)
+    torch.backends.cuda.matmul.allow_tf32 = config.get('system.tf32', True)
     # ============================================================================
 
-
-    # Set up device
-    print(torch.cuda.is_available())
-    if torch.backends.mps.is_available():
-        device = torch.device("mps")
-        # torch.set_default_dtype(torch.float32)  # MPS works best with float32
-        print("Using MPS device (Apple Silicon)")
-    elif torch.cuda.is_available():
-        device = torch.device("cuda")
-        # torch.set_default_dtype(torch.float32)  # Change from bfloat16 to float32
-        print("Using CUDA device")
-    else:
-        device = torch.device("cpu")
-        # torch.set_default_dtype(torch.float32)
-        print("Using CPU")
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Using device: {device}")
 
     print(f"Loading {model_name}...")
     tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=False)
@@ -176,7 +176,7 @@ if __name__ == "__main__":
 
     model = AutoModelForCausalLM.from_pretrained(
         model_name,
-        torch_dtype=torch.bfloat16,
+        torch_dtype=torch.bfloat16 if config.get('system.bf16') else torch.float32,
         device_map="auto",
         low_cpu_mem_usage=True,
     )
@@ -204,21 +204,13 @@ if __name__ == "__main__":
     # LORA_RANK = 32
     print("\n--- Applying LoRA Adapters to quantized model ---")
     lora_config = LoraConfig(
-        r=LORA_RANK,  # Rank of the update matrices (lower = less parameters)
-        lora_alpha=2*LORA_RANK,  # Alpha parameter for LoRA scaling
-        target_modules=[
-        "q_proj",
-        "k_proj",
-        "v_proj",
-        "o_proj",
-        "gate_proj",
-        "up_proj",
-        "down_proj",
-    ],
-        lora_dropout=0.05,
-        bias="none",  # Don't train bias parameters
-        task_type=TaskType.CAUSAL_LM,
-    )
+    r=config.get('lora.rank'),
+    lora_alpha=config.get('lora.alpha'),
+    target_modules=config.get('lora.target_modules'),
+    lora_dropout=config.get('lora.dropout'),
+    bias="none",
+    task_type="CAUSAL_LM"
+)
 
 
     
@@ -366,14 +358,17 @@ if __name__ == "__main__":
     # Create unique output directories
     # base_output_dir = "./output_qat_lora"
     # base_model_dir = "./qat_lora_model"
-    base_output_dir = "./cloud_output_qat_lora"
-    base_model_dir = "./cloud_qat_lora_model"
+    # base_output_dir = "./cloud_output_qat_lora"
+    # base_model_dir = "./cloud_qat_lora_model"
     
-    output_dir = find_available_dir(base_output_dir)
-    model_dir = find_available_dir(base_model_dir)
+    # output_dir = find_available_dir(base_output_dir)
+    # model_dir = find_available_dir(base_model_dir)
+
+    output_dir = f"{config.get('training.output_dir')}_{config.run_id}"
+    
     
     print(f"Using output directory: {output_dir}")
-    print(f"Model will be saved to: {model_dir}")
+    # print(f"Model will be saved to: {model_dir}")
 
     # Load and preprocess the WikiText-2 dataset
     # datasets, _ = load_and_preprocess_wikitext2(model_name=model_name, block_size=2048) # Use _ for tokenizer as it\'s already loaded
@@ -396,37 +391,59 @@ if __name__ == "__main__":
     # per_device_bs = 16 if is_cuda else 8
     # grad_accum = 2 if is_cuda else 8
 
+    # training_args = TrainingArguments(
+    #     output_dir= output_dir,
+    #     overwrite_output_dir=False,
+    #     num_train_epochs=NUM_EPOCHS,
+    #     per_device_train_batch_size=BATCH_SIZE,
+    #     per_device_eval_batch_size=BATCH_SIZE,
+    #     gradient_accumulation_steps=GRAD_ACCUM,
+    #     max_grad_norm=5.0,
+    #     gradient_checkpointing=True,
+    #     # gradient_checkpointing=False,
+    #     gradient_checkpointing_kwargs={'use_reentrant': True},
+    #     save_strategy="epoch",
+    #     eval_strategy="epoch",
+    #     logging_steps=10,
+    #     learning_rate=LEARNING_RATE,
+    #     weight_decay=0.01,
+    #     warmup_ratio=0.3,
+    #     lr_scheduler_type="cosine_with_min_lr",
+    #     lr_scheduler_kwargs={"min_lr_rate": 0.1},
+    #     # lr_scheduler_kwargs={"num_cycles": 2},
+    #     # lr_scheduler_type="constant_with_warmup",
+    #     bf16=True, # Enable bfloat16
+    #     fp16=False,
+    #     tf32=True, # Enable for Blackwell/Ampere GPUs 
+    #     report_to="tensorboard",
+    #     load_best_model_at_end=True,
+    #     metric_for_best_model="eval_loss",
+    #     dataloader_num_workers=16,
+    #     dataloader_prefetch_factor=4,
+    #     dataloader_pin_memory=True
+    # )
+
+    config.save_to_output(output_dir)
+
     training_args = TrainingArguments(
-        output_dir= output_dir,
-        overwrite_output_dir=False,
-        num_train_epochs=NUM_EPOCHS,
-        per_device_train_batch_size=BATCH_SIZE,
-        per_device_eval_batch_size=BATCH_SIZE,
-        gradient_accumulation_steps=GRAD_ACCUM,
-        max_grad_norm=5.0,
-        gradient_checkpointing=True,
-        # gradient_checkpointing=False,
-        gradient_checkpointing_kwargs={'use_reentrant': True},
-        save_strategy="epoch",
-        eval_strategy="epoch",
-        logging_steps=10,
-        learning_rate=LEARNING_RATE,
-        weight_decay=0.01,
-        warmup_ratio=0.3,
-        lr_scheduler_type="cosine_with_min_lr",
-        lr_scheduler_kwargs={"min_lr_rate": 0.1},
-        # lr_scheduler_kwargs={"num_cycles": 2},
-        # lr_scheduler_type="constant_with_warmup",
-        bf16=True, # Enable bfloat16
-        fp16=False,
-        tf32=True, # Enable for Blackwell/Ampere GPUs 
-        report_to="tensorboard",
-        load_best_model_at_end=True,
-        metric_for_best_model="eval_loss",
-        dataloader_num_workers=16,
-        dataloader_prefetch_factor=4,
-        dataloader_pin_memory=True
-    )
+    output_dir=output_dir,
+    num_train_epochs=config.get('training.num_epochs'),
+    per_device_train_batch_size=config.get('training.batch_size'),
+    per_device_eval_batch_size=config.get('training.batch_size'),
+    gradient_accumulation_steps=config.get('training.gradient_accumulation_steps'),
+    learning_rate=config.get('training.learning_rate'),
+    warmup_ratio=config.get('training.warmup_ratio'),
+    lr_scheduler_type=config.get('training.lr_scheduler_type'),
+    lr_scheduler_kwargs={'min_lr_rate': config.get('training.min_lr_rate')},
+    max_grad_norm=config.get('training.max_grad_norm'),
+    logging_steps=config.get('training.logging_steps'),
+    save_strategy=config.get('training.save_strategy'),
+    eval_strategy=config.get('training.eval_strategy'),
+    bf16=config.get('system.bf16'),
+    dataloader_num_workers=config.get('system.dataloader_num_workers'),
+    report_to="tensorboard",
+)
+
 
     # Define Data Collator
     data_collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False)
@@ -448,7 +465,7 @@ if __name__ == "__main__":
     # calibrate_smooth_factors(peft_model, per_module_abs, alpha=0.5)
     import gc
     gc.collect()
-    unified_calibration(peft_model, calib_loader, steps=50, percentile=99.5, alpha=0.6, device=device, use_smooth = calibrate_smooth) #TO INIT SMOOTH FACTORS AT 1.0
+    unified_calibration(peft_model, calib_loader, steps=config.get('calibration.steps'), percentile=config.get('calibration.percentile'), alpha=config.get('calibration.alpha'), device=device, use_smooth=config.get('calibration.learn_smooth'))  # TO INIT SMOOTH FACTORS AT 1.0
     torch.cuda.empty_cache()
 
 
@@ -488,44 +505,75 @@ if __name__ == "__main__":
 
     print(f"Optimizer setup: {len(lora_params)} LoRA, {len(clip_params)} clip, {len(smooth_params)} smooth params")
 
-    param_groups = []
-    # Set learning rates: LoRA uses the TrainingArguments LR; quant params use a higher LR
-    lora_lr = training_args.learning_rate 
-    clip_lr = training_args.learning_rate * 5
-    smooth_lr = training_args.learning_rate * 3 
+
+    # base_lr = config.get('training.learning_rate')
+    # param_groups = []
+    # # Set learning rates: LoRA uses the TrainingArguments LR; quant params use a higher LR
+    # lora_lr = training_args.learning_rate 
+    # clip_lr = training_args.learning_rate * 5
+    # smooth_lr = training_args.learning_rate * 3 
 
 
-    param_groups = []
-    if lora_params:
-        param_groups.append({
-            "params": lora_params, 
-            "lr": lora_lr, 
-            "weight_decay": 0.01  # Small L2 regularization for LoRA
-        })
-    if clip_params:
-        param_groups.append({
-            "params": clip_params, 
-            "lr": clip_lr, 
-            "weight_decay": 0.0  # No weight decay on clip values
-        })
-    if smooth_params and learn_smooth:
-        param_groups.append({
-            "params": smooth_params, 
-            "lr": smooth_lr, 
-            "weight_decay": 0.0  # No weight decay on smooth factors
-        })
+    # param_groups = []
+    # if lora_params:
+    #     param_groups.append({
+    #         "params": lora_params, 
+    #         "lr": lora_lr, 
+    #         "weight_decay": 0.01  # Small L2 regularization for LoRA
+    #     })
+    # if clip_params:
+    #     param_groups.append({
+    #         "params": clip_params, 
+    #         "lr": clip_lr, 
+    #         "weight_decay": 0.0  # No weight decay on clip values
+    #     })
+    # if smooth_params and learn_smooth:
+    #     param_groups.append({
+    #         "params": smooth_params, 
+    #         "lr": smooth_lr, 
+    #         "weight_decay": 0.0  # No weight decay on smooth factors
+    #     })
+
+    # Optimizer setup
+    base_lr = config.get('training.learning_rate')
+    optimizer = torch.optim.AdamW([
+        {
+            'params': lora_params, 
+            'lr': base_lr * config.get('training.optimizer.lora_lr_multiplier'),
+            'weight_decay': config.get('training.optimizer.weight_decay')
+        },
+        {
+            'params': clip_params, 
+            'lr': base_lr * config.get('training.optimizer.clip_lr_multiplier'),
+            'weight_decay': 0.0
+        },
+        {
+            'params': smooth_params, 
+            'lr': base_lr * config.get('training.optimizer.smooth_lr_multiplier'),
+            'weight_decay': 0.0
+        }
+    ], 
+    betas=(config.get('training.optimizer.adam_beta1'), 
+        config.get('training.optimizer.adam_beta2')),
+    eps=config.get('training.optimizer.adam_eps'))
 
 
-    # Fallback: if for some reason groups are empty, include all trainable params
-    if not param_groups:
-        all_trainable = [p for p in peft_model.parameters() if p.requires_grad]
-        param_groups = [{"params": all_trainable, "lr": lora_lr, "weight_decay": 0.0}]
+    # # Fallback: if for some reason groups are empty, include all trainable params
+    # if not param_groups:
+    #     all_trainable = [p for p in peft_model.parameters() if p.requires_grad]
+    #     param_groups = [{"params": all_trainable, "lr": lora_lr, "weight_decay": 0.0}]
 
-    optimizer = torch.optim.AdamW(
-    param_groups, 
-    betas=(0.9, 0.95),  
-    eps=1e-8,
-    fused=True)
+    # optimizer = torch.optim.AdamW(
+    # param_groups, 
+    # betas=(0.9, 0.95),  
+    # eps=1e-8,
+    # fused=True)
+
+    
+    
+    config.save_to_output(output_dir)
+
+    print(f"\n--- Starting W4A4 QAT Training (Run ID: {config.run_id}) ---\n")
 
     # Initialize Trainer with custom optimizer (Trainer will create scheduler)
     trainer = Trainer(
@@ -608,24 +656,24 @@ if __name__ == "__main__":
 
     # Save the model, tokenizer, and quantization parameters
     
-    print(f"\n--- Saving W4A4 QAT LoRA model to {model_dir} ---")
-    os.makedirs(model_dir, exist_ok=True)
+    print(f"\n--- Saving W4A4 QAT LoRA model to {output_dir} ---")
+    os.makedirs(output_dir, exist_ok=True)
     
     # Save quantization parameters after training
     # save_quantization_parameters(peft_model, model_dir)
     
     # Save the LoRA adapters
-    print(f"--- Saving W4A4 QAT LoRA adapters to {model_dir} ---")
-    peft_model.save_pretrained(model_dir)
+    print(f"--- Saving W4A4 QAT LoRA adapters to {output_dir} ---")
+    peft_model.save_pretrained(output_dir)
 
     # Save the tokenizer
-    tokenizer.save_pretrained(model_dir)
+    tokenizer.save_pretrained(output_dir)
     
     best_checkpoint = trainer.state.best_model_checkpoint
     if best_checkpoint and os.path.exists(best_checkpoint):
         import shutil
         src = os.path.join(best_checkpoint, "quantization_params.pth")
-        dst = os.path.join(model_dir, "quantization_params.pth")
+        dst = os.path.join(output_dir, "quantization_params.pth")
         
         if os.path.exists(src):
             shutil.copy(src, dst)
@@ -659,18 +707,18 @@ if __name__ == "__main__":
                 quant_params[f"{prefix}activation_clip"] = module.activation_clip.data.detach().cpu()
                 quant_params[f"{prefix}smooth_factor"] = module.smooth_factor.data.detach().cpu()
         
-        torch.save(quant_params, os.path.join(model_dir, "quantization_params.pth"))
+        torch.save(quant_params, os.path.join(output_dir, "quantization_params.pth"))
         print(f"✓ Saved {len(quant_params)} quantization parameters")
 
 
     # Save the model config
-    peft_model.config.to_json_file(os.path.join(model_dir, "config.json"))
+    peft_model.config.to_json_file(os.path.join(output_dir, "config.json"))
     
     
-    print(f"\n--- Model, tokenizer, and quantization config saved to {model_dir} ---")
+    print(f"\n--- Model, tokenizer, and quantization config saved to {output_dir} ---")
     print("To load this model for inference, use:")
     print(f"model = AutoModelForCausalLM.from_pretrained('{model_name}').to('{device}')")
-    print(f"model = PeftModel.from_pretrained(model, '{model_dir}')")
+    print(f"model = PeftModel.from_pretrained(model, '{output_dir}')")
     print("# Make sure to apply the same quantization setup when loading")
 
     custom_eval(peft_model, tokenizer, device, trainer_ppl)

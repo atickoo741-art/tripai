@@ -1,0 +1,75 @@
+# config.yaml - QAT Training Configuration
+
+# Model
+model:
+  name: "meta-llama/Llama-2-7b-hf"
+  num_bits_weight: 4
+  num_bits_activation: 4
+
+# LoRA
+lora:
+  rank: 32
+  alpha: 64
+  dropout: 0.05
+  target_modules: ["q_proj", "k_proj", "v_proj", "o_proj", 
+                   "gate_proj", "up_proj", "down_proj"]
+
+# Calibration
+calibration:
+  num_samples: 128
+  percentile: 99.5
+  steps: 50
+  alpha: 0.5
+  learn_smooth: True
+  calibrate_smooth: False
+
+# Training
+training:
+  output_dir: "./output_qat_lora"
+  num_epochs: 10
+  batch_size: 2
+  gradient_accumulation_steps: 16
+  max_grad_norm: 5.0
+  
+  # Learning Rate Schedule
+  learning_rate: 4.0e-5
+  warmup_ratio: 0.2
+  lr_scheduler_type: "cosine_with_min_lr"
+  min_lr_rate: 0.1
+  
+  # Optimizer (per-parameter group)
+  optimizer:
+    lora_lr_multiplier: 1.0      # base_lr * 1.0
+    clip_lr_multiplier: 5.0      # base_lr * 5.0
+    smooth_lr_multiplier: 2.0    # base_lr * 2.0
+    weight_decay: 0.01
+    adam_beta1: 0.9
+    adam_beta2: 0.95
+    adam_eps: 1.0e-8
+  
+  # Logging
+  logging_steps: 10
+  save_strategy: "epoch"
+  eval_strategy: "epoch"
+
+# Dataset
+dataset:
+  name: "wikitext"
+  subset: "wikitext-2-raw-v1"
+  train_split: "train"
+  eval_split: "validation"
+  max_length: 512
+
+# System
+system:
+  seed: 42
+  bf16: true
+  tf32: true
+  fp16: false
+  dataloader_num_workers: 16
+
+# Experiment tracking
+experiment:
+  name: "qat_w4a4_llama2_7b"
+  notes: "Baseline run with simplified PACT gradients"
+  tags: ["qat", "w4a4", "llama2", "pact-simplified"]

@@ -57,7 +57,7 @@ def main():
 
     # Load VALIDATION set (standard for reporting)
     print("Loading WikiText-2 Validation Set...")
-    dataset = load_dataset("wikitext", "wikitext-2-raw-v1", split="test")
+    dataset = load_dataset("wikitext", "wikitext-2-raw-v1", split="validation")
     
     # Create evaluation object
     # eval_obj = Evaluation(tokenizer, dataset, device, num_samples=args.n_samples)

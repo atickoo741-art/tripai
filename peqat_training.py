@@ -364,7 +364,9 @@ if __name__ == "__main__":
     # output_dir = find_available_dir(base_output_dir)
     # model_dir = find_available_dir(base_model_dir)
 
-    output_dir = f"{config.get('training.output_dir')}_{config.run_id}"
+    # output_dir = f"{config.get('training.output_dir')}_{config.run_id}"
+    output_dir = f"{config.get('training.output_dir')}/{config.run_id}"
+
     
     
     print(f"Using output directory: {output_dir}")

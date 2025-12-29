@@ -1,5 +1,10 @@
 # config.yaml - QAT Training Configuration
 
+
+experiment:
+  name: "const_with_warmup_lr"
+  notes: "after simplifying clip gradients"
+  tags: ["const_warmup"]
 # Model
 model:
   name: "meta-llama/Llama-2-7b-hf"
@@ -28,21 +33,21 @@ calibration:
 training:
   output_dir: "./output_qat_lora"
   num_epochs: 10
-  batch_size: 2
-  gradient_accumulation_steps: 16
+  batch_size: 16
+  gradient_accumulation_steps: 2
   max_grad_norm: 5.0
   
   # Learning Rate Schedule
-  learning_rate: 4.0e-5
-  warmup_ratio: 0.2
-  lr_scheduler_type: "cosine_with_min_lr"
-  min_lr_rate: 0.1
+  learning_rate: 1e-4
+  warmup_ratio: 0.1
+  lr_scheduler_type: "constant_with_warmup"
+  # min_lr_rate: 0.1
   
   # Optimizer (per-parameter group)
   optimizer:
     lora_lr_multiplier: 1.0      # base_lr * 1.0
-    clip_lr_multiplier: 5.0      # base_lr * 5.0
-    smooth_lr_multiplier: 2.0    # base_lr * 2.0
+    clip_lr_multiplier: 10.0      # base_lr * 5.0
+    smooth_lr_multiplier: 10.0    # base_lr * 2.0
     weight_decay: 0.01
     adam_beta1: 0.9
     adam_beta2: 0.95
@@ -59,7 +64,6 @@ dataset:
   subset: "wikitext-2-raw-v1"
   train_split: "train"
   eval_split: "validation"
-  max_length: 512
 
 # System
 system:
@@ -68,9 +72,3 @@ system:
   tf32: true
   fp16: false
   dataloader_num_workers: 16
-
-# Experiment tracking
-experiment:
-  name: "qat_w4a4_llama2_7b"
-  notes: "Baseline run with simplified PACT gradients"
-  tags: ["qat", "w4a4", "llama2", "pact-simplified"]

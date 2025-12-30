@@ -540,7 +540,7 @@ if __name__ == "__main__":
     #     })
 
     # Optimizer setup
-    base_lr = config.get('training.learning_rate')
+    base_lr = float(config.get('training.learning_rate')) 
     optimizer = torch.optim.AdamW([
         {
             'params': lora_params, 
@@ -560,7 +560,7 @@ if __name__ == "__main__":
     ], 
     betas=(config.get('training.optimizer.adam_beta1'), 
         config.get('training.optimizer.adam_beta2')),
-    eps=config.get('training.optimizer.adam_eps'))
+    eps=float(config.get('training.optimizer.adam_eps')))
 
 
     # # Fallback: if for some reason groups are empty, include all trainable params

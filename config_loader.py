@@ -115,3 +115,44 @@ class Config:
     
     def __repr__(self):
         return f"Config(run_id={self.run_id}, keys={list(self.config.keys())})"
+    
+
+if __name__ == "__main__":
+    # Example usage
+    from peft import LoraConfig, get_peft_model
+
+    config = Config("config.yaml")
+    from transformers import AutoModelForCausalLM
+    import torch
+    model_name = config.get('model.name', 'gpt2')
+    model = AutoModelForCausalLM.from_pretrained(
+        model_name,
+        torch_dtype=torch.bfloat16 if bool(config.get('system.bf16')) else torch.float32,
+        device_map="auto",
+        low_cpu_mem_usage=True,
+    )
+    # p0 = next(model.parameters())
+    # print(f"First param dtype: {p0.dtype}")
+    # print(f"First param device: {p0.device}")  # works when model has parameters [web:183]
+    # for name, param in model.named_parameters():
+    #     print(f"* Parameter: {name}, dtype: {param.dtype}")
+
+    lora_config = LoraConfig(
+    r=config.get('lora.rank'),
+    lora_alpha=config.get('lora.alpha'),
+    target_modules=config.get('lora.target_modules'),
+    lora_dropout=config.get('lora.dropout'),
+    bias="none",
+    task_type="CAUSAL_LM"
+)
+    peft_model = get_peft_model(model, lora_config)
+
+    target_dtype = torch.bfloat16 if bool(config.get('system.bf16')) else torch.float32
+    peft_model = peft_model.to(target_dtype)
+
+    print("\n--- LoRA Dtype Verification ---")
+    for name, param in peft_model.named_parameters():
+        if 'lora' in name.lower():
+            print(f"✓ {name}: {param.dtype}")
+            assert param.dtype == target_dtype, f"❌ LoRA param {name} is {param.dtype}, expected {target_dtype}!"
+            break  # Just check first one

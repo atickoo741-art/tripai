@@ -178,7 +178,7 @@ if __name__ == "__main__":
 
     model = AutoModelForCausalLM.from_pretrained(
         model_name,
-        torch_dtype=torch.bfloat16 if config.get('system.bf16') else torch.float32,
+        torch_dtype=torch.bfloat16 if bool(config.get('system.bf16')) else torch.float32,
         device_map="auto",
         low_cpu_mem_usage=True,
     )
@@ -221,6 +221,9 @@ if __name__ == "__main__":
     # After creating peft_model but BEFORE quantization
     peft_model = get_peft_model(model, lora_config)
 
+    target_dtype = torch.bfloat16 if bool(config.get('system.bf16')) else torch.float32
+    peft_model = peft_model.to(target_dtype)
+
     for name, module in peft_model.named_modules():
         print(name)
 
@@ -235,6 +238,9 @@ if __name__ == "__main__":
 
 
     quantize_model(peft_model)
+
+    target_dtype = torch.bfloat16 if bool(config.get('system.bf16')) else torch.float32
+    peft_model = peft_model.to(target_dtype)
     # print("\n--- Converting to Fused Operations ---")
     # from fused_ops import convert_to_fused
     # peft_model = convert_to_fused(peft_model)
@@ -269,25 +275,25 @@ if __name__ == "__main__":
 
 
 
-    print("\n--- LoRA Initialization Check ---")
-    for name, module in peft_model.named_modules():
-        if isinstance(module, PEQATLoRAModule):
-            adapter_name = module.active_adapter[0]
-            lora_A = module.lora_A[adapter_name].weight
-            lora_B = module.lora_B[adapter_name].weight
+    # print("\n--- LoRA Initialization Check ---")
+    # for name, module in peft_model.named_modules():
+    #     if isinstance(module, PEQATLoRAModule):
+    #         adapter_name = module.active_adapter[0]
+    #         lora_A = module.lora_A[adapter_name].weight
+    #         lora_B = module.lora_B[adapter_name].weight
             
-            print(f"{name}:")
-            print(f"  lora_A: norm={lora_A.norm().item():.4f}, "
-                f"mean={lora_A.mean().item():.6f}, "
-                f"std={lora_A.std().item():.6f}")
-            print(f"  lora_B: norm={lora_B.norm().item():.4f}, "
-                f"mean={lora_B.mean().item():.6f}, "
-                f"std={lora_B.std().item():.6f}")
-            print(f"  scaling: {module.scaling[adapter_name]}")
+    #         print(f"{name}:")
+    #         print(f"  lora_A: norm={lora_A.norm().item():.4f}, "
+    #             f"mean={lora_A.mean().item():.6f}, "
+    #             f"std={lora_A.std().item():.6f}")
+    #         print(f"  lora_B: norm={lora_B.norm().item():.4f}, "
+    #             f"mean={lora_B.mean().item():.6f}, "
+    #             f"std={lora_B.std().item():.6f}")
+    #         print(f"  scaling: {module.scaling[adapter_name]}")
             
-            # Check if B is actually zero
-            if lora_B.abs().max().item() < 1e-6:
-                print(f"  ⚠️  lora_B is zero-initialized (PEFT default)")
+    #         # Check if B is actually zero
+    #         # if lora_B.abs().max().item() < 1e-6:
+            #     print(f"  ⚠️  lora_B is zero-initialized (PEFT default)")
 
 
     # # FIX: Reinitialize lora_B to break the zero-gradient deadlock
@@ -328,14 +334,14 @@ if __name__ == "__main__":
         
         # DEBUG: Print what's happening
         if is_lora:
-            print(f"LoRA FOUND: {name} -> {param.numel()} params")
+            # print(f"LoRA FOUND: {name} -> {param.numel()} params")
             lora_count += param.numel()
         elif is_qat:
             if param.requires_grad:
-                print(f"QAT FOUND: {name} -> {param.numel()} params")
+                # print(f"QAT FOUND: {name} -> {param.numel()} params")
                 qat_count += param.numel()
         else:
-            print(f"OTHER: {name} -> {param.numel()} params (will be frozen)")
+            # print(f"OTHER: {name} -> {param.numel()} params (will be frozen)")
             other_count += param.numel()
         
         param.requires_grad = bool(is_lora or is_qat)
@@ -432,23 +438,50 @@ if __name__ == "__main__":
 
     training_args = TrainingArguments(
     output_dir=output_dir,
+    overwrite_output_dir=bool(config.get('training.overwrite_output_dir', False)),
     num_train_epochs=config.get('training.num_epochs'),
     per_device_train_batch_size=config.get('training.batch_size'),
     per_device_eval_batch_size=config.get('training.batch_size'),
     gradient_accumulation_steps=config.get('training.gradient_accumulation_steps'),
-    learning_rate=config.get('training.learning_rate'),
-    warmup_ratio=config.get('training.warmup_ratio'),
-    lr_scheduler_type=config.get('training.lr_scheduler_type'),
-    lr_scheduler_kwargs={'min_lr_rate': config.get('training.min_lr_rate')},
-    max_grad_norm=config.get('training.max_grad_norm'),
-    logging_steps=config.get('training.logging_steps'),
+    max_grad_norm=float(config.get('training.max_grad_norm')),
+    gradient_checkpointing=bool(config.get('training.gradient_checkpointing', True)),
+    gradient_checkpointing_kwargs={'use_reentrant': True},
     save_strategy=config.get('training.save_strategy'),
     eval_strategy=config.get('training.eval_strategy'),
-    bf16=config.get('system.bf16'),
-    dataloader_num_workers=config.get('system.dataloader_num_workers'),
+    logging_steps=config.get('training.logging_steps'),
+    learning_rate=float(config.get('training.learning_rate')),
+    warmup_ratio=float(config.get('training.warmup_ratio')),
+    lr_scheduler_type=config.get('training.lr_scheduler_type'),
+    lr_scheduler_kwargs={'min_lr_rate': float(config.get('training.min_lr_rate'))},
+    bf16=bool(config.get('system.bf16', True)),
+    fp16=bool(config.get('system.fp16', False)),
+    tf32=bool(config.get('system.tf32', True)),
     report_to="tensorboard",
+    load_best_model_at_end=bool(config.get('training.load_best_model_at_end', True)),
+    metric_for_best_model=config.get('training.metric_for_best_model', 'eval_loss'),
+    dataloader_num_workers=config.get('system.dataloader_num_workers'),
+    dataloader_prefetch_factor=config.get('system.dataloader_prefetch_factor', 4),
+    dataloader_pin_memory=bool(config.get('system.dataloader_pin_memory', True)),
 )
 
+
+
+    
+
+    # DEBUG: Print what TrainingArguments actually got
+    print("\n" + "="*60)
+    print("TRAINING ARGS DIAGNOSTIC")
+    print("="*60)
+    print(f"training_args.bf16 = {training_args.bf16}")
+    print(f"training_args.fp16 = {training_args.fp16}")
+    print(f"training_args.fp16_full_eval = {training_args.fp16_full_eval}")
+    print(f"config.get('system.bf16') = {config.get('system.bf16')}")
+    print(f"type(config.get('system.bf16')) = {type(config.get('system.bf16'))}")
+    print("="*60 + "\n")
+
+    # If bf16 is False but should be True, something is wrong
+    if not training_args.bf16 and config.get('system.bf16'):
+        raise RuntimeError("❌ bf16 not enabled in TrainingArguments despite config!")
 
     # Define Data Collator
     data_collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False)
@@ -456,9 +489,9 @@ if __name__ == "__main__":
     # Percentile-based calibration of activation clips (short pass)
     print("\n--- Calibrating activation clips (percentile init) ---")
 
-    for name, module in peft_model.named_modules():
-        if isinstance(module, PEQATLoRAModule):
-            print(name)
+    # for name, module in peft_model.named_modules():
+    #     if isinstance(module, PEQATLoRAModule):
+            # print(name)
         # print(name)
 
     peft_model = peft_model.to(device)
@@ -470,7 +503,7 @@ if __name__ == "__main__":
     # calibrate_smooth_factors(peft_model, per_module_abs, alpha=0.5)
     import gc
     gc.collect()
-    unified_calibration(peft_model, calib_loader, steps=config.get('calibration.steps'), percentile=config.get('calibration.percentile'), alpha=config.get('calibration.alpha'), device=device, use_smooth=config.get('calibration.learn_smooth'))  # TO INIT SMOOTH FACTORS AT 1.0
+    unified_calibration(peft_model, calib_loader, steps=config.get('calibration.steps'), percentile=config.get('calibration.percentile'), alpha=config.get('calibration.alpha'), device=device, use_smooth=config.get('calibration.calibrate_smooth'))  # TO INIT SMOOTH FACTORS AT 1.0
     torch.cuda.empty_cache()
 
 
@@ -498,15 +531,15 @@ if __name__ == "__main__":
         if is_lora:
             param.requires_grad_(True)  # Force enable
             lora_params.append(param)
-            print(f"Added LoRA param: {name} ({param.numel()} params)")
+            # print(f"Added LoRA param: {name} ({param.numel()} params)")
         elif is_qat:
             param.requires_grad_(True)  # Force enable  
             if "activation_clip" in name:
                 clip_params.append(param)
-                print(f"Added clip param: {name} ({param.numel()} params)")
+                # print(f"Added clip param: {name} ({param.numel()} params)")
             elif "smooth_factor" in name:
                 smooth_params.append(param)
-                print(f"Added smooth param: {name} ({param.numel()} params)")
+                # print(f"Added smooth param: {name} ({param.numel()} params)")
 
     print(f"Optimizer setup: {len(lora_params)} LoRA, {len(clip_params)} clip, {len(smooth_params)} smooth params")
 

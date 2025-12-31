@@ -24,7 +24,7 @@ lora:
 calibration:
   num_samples: 128
   percentile: 99.5
-  steps: 50
+  steps: 15
   alpha: 0.5
   learn_smooth: True
   calibrate_smooth: False
@@ -36,12 +36,17 @@ training:
   batch_size: 16
   gradient_accumulation_steps: 2
   max_grad_norm: 5.0
-  
+
+  gradient_checkpointing: true
+  load_best_model_at_end: true
+  metric_for_best_model: "eval_loss"
+  overwrite_output_dir: false
+
   # Learning Rate Schedule
   learning_rate: 1e-4
   warmup_ratio: 0.1
   lr_scheduler_type: "constant_with_warmup"
-  # min_lr_rate: 0.1
+  min_lr_rate: 0.1
   
   # Optimizer (per-parameter group)
   optimizer:
@@ -72,3 +77,5 @@ system:
   tf32: true
   fp16: false
   dataloader_num_workers: 16
+  dataloader_prefetch_factor: 4 
+  dataloader_pin_memory: true 

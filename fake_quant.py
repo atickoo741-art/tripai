@@ -302,7 +302,7 @@ class NaiveW4A4Linear(nn.Module):
             self.weight_is_out_in = True
         elif hasattr(original_linear_layer, 'weight'):
             # Conv1D-like (GPT-2)
-            print(original_linear_layer.weight)
+            # print(original_linear_layer.weight)
             weight_shape = original_linear_layer.weight.shape
             # Conv1D stores weight as [in_features, out_features]
             self.in_features = weight_shape[0]

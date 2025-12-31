@@ -364,16 +364,16 @@ if __name__ == "__main__":
     print("\n--- Setting up Training Loop for W4A4 QAT ---")
     
     # Create unique output directories
-    # base_output_dir = "./output_qat_lora"
+    base_output_dir = "./cloud_qat_lora"
     # base_model_dir = "./qat_lora_model"
     # base_output_dir = "./cloud_output_qat_lora"
     # base_model_dir = "./cloud_qat_lora_model"
     
-    # output_dir = find_available_dir(base_output_dir)
+    output_dir = find_available_dir(base_output_dir)
     # model_dir = find_available_dir(base_model_dir)
 
     # output_dir = f"{config.get('training.output_dir')}_{config.run_id}"
-    output_dir = f"{config.get('training.output_dir')}/{config.run_id}"
+    # output_dir = f"{config.get('training.output_dir')}/{config.run_id}"
 
     
     

@@ -24,7 +24,7 @@ lora:
 calibration:
   num_samples: 128
   percentile: 99.5
-  steps: 15
+  steps: 50
   alpha: 0.5
   learn_smooth: True
   calibrate_smooth: False
@@ -32,7 +32,7 @@ calibration:
 # Training
 training:
   output_dir: "./output_qat_lora"
-  num_epochs: 15
+  num_epochs: 10
   batch_size: 16
   gradient_accumulation_steps: 2
   max_grad_norm: 5.0

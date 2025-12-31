@@ -2,9 +2,9 @@
 
 
 experiment:
-  name: "const_with_warmup_lr"
-  notes: "after simplifying clip gradients"
-  tags: ["const_warmup"]
+  name: "cosine_lr_extended_training"
+  notes: "extended training to 30 epochs. increased lr to 2.5e-4. cosine scheduler with 3 cycles. added use_reentrant=False for gradient checkpointing."
+  tags: ["cosine_lr", "extended_training", "use_reentrant_false", "high_lr"]
 # Model
 model:
   name: "meta-llama/Llama-2-7b-hf"

@@ -447,7 +447,7 @@ if __name__ == "__main__":
     gradient_checkpointing=bool(config.get('training.gradient_checkpointing', True)),
     gradient_checkpointing_kwargs={'use_reentrant': True},
     save_strategy=config.get('training.save_strategy'),
-    evaluation_strategy=config.get('training.eval_strategy'),
+    eval_strategy=config.get('training.eval_strategy'),
     logging_steps=config.get('training.logging_steps'),
     learning_rate=float(config.get('training.learning_rate')),
     warmup_ratio=float(config.get('training.warmup_ratio')),

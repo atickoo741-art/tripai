@@ -32,7 +32,7 @@ calibration:
 # Training
 training:
   output_dir: "./output_qat_lora"
-  num_epochs: 10
+  num_epochs: 30
   batch_size: 16
   gradient_accumulation_steps: 2
   max_grad_norm: 5.0
@@ -43,10 +43,12 @@ training:
   overwrite_output_dir: false
 
   # Learning Rate Schedule
-  learning_rate: 1e-4
-  warmup_ratio: 0.1
-  lr_scheduler_type: "constant_with_warmup"
+  learning_rate: 2.5e-4
+  warmup_ratio: 0.15
+  lr_scheduler_type: "cosine"
   min_lr_rate: 0.1
+  num_cycles: 3
+  use_reentrant: False
   
   # Optimizer (per-parameter group)
   optimizer:

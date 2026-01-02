@@ -149,6 +149,69 @@ def get_concatenated_text(dataset_split, tokenizer):
     return input_ids
 
 
+def load_alpaca_instruct(model_name="meta-llama/Llama-2-7b-hf", max_length=2048):
+    """
+    Load Alpaca dataset formatted for instruction tuning
+    """
+    print(f"Loading Alpaca dataset for instruction tuning...")
+    from datasets import load_dataset
+    
+    # Load Alpaca
+    dataset = load_dataset("tatsu-lab/alpaca", split="train")
+    tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=False)
+    
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+        tokenizer.pad_token_id = tokenizer.eos_token_id
+    
+    def format_instruction(example):
+        """Format as: Instruction\nInput\nResponse"""
+        if example.get('input', '').strip():
+            prompt = f"### Instruction:\n{example['instruction']}\n\n### Input:\n{example['input']}\n\n### Response:\n{example['output']}"
+        else:
+            prompt = f"### Instruction:\n{example['instruction']}\n\n### Response:\n{example['output']}"
+        return {"text": prompt}
+    
+    # Format all examples
+    dataset = dataset.map(format_instruction, remove_columns=dataset.column_names)
+    
+    # Tokenize
+    def tokenize_function(examples):
+        outputs = tokenizer(
+            examples["text"],
+            truncation=True,
+            max_length=max_length,
+            padding=False,
+            return_tensors=None
+        )
+        outputs["labels"] = outputs["input_ids"].copy()
+        return outputs
+    
+    tokenized_dataset = dataset.map(
+        tokenize_function,
+        batched=True,
+        remove_columns=["text"],
+        desc="Tokenizing Alpaca"
+    )
+    
+    # Split train/val (95/5)
+    split = tokenized_dataset.train_test_split(test_size=0.05, seed=42)
+    
+    from datasets import DatasetDict
+    final_dataset = DatasetDict({
+        "train": split["train"],
+        "validation": split["test"]
+    })
+    
+    print(f"✓ Alpaca loaded:")
+    print(f"  Train: {len(final_dataset['train'])} examples")
+    print(f"  Validation: {len(final_dataset['validation'])} examples")
+    
+    return final_dataset, tokenizer
+
+
+
+
 if __name__ == "__main__":
     # Test the new function
     datasets, tokenizer = load_wikitext2_sliding_window(

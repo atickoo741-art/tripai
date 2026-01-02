@@ -380,13 +380,33 @@ if __name__ == "__main__":
     print(f"Using output directory: {output_dir}")
     # print(f"Model will be saved to: {model_dir}")
 
+
     # Load and preprocess the WikiText-2 dataset
     # datasets, _ = load_and_preprocess_wikitext2(model_name=model_name, block_size=2048) # Use _ for tokenizer as it\'s already loaded
     # Load with sliding window (matches eval protocol)
-    datasets, _ = load_wikitext2_sliding_window(
-        model_name=model_name,
-        seq_len=config.get('model.block_size'),     
-        stride=config.get('model.block_size')
+    # datasets, _ = load_wikitext2_sliding_window(
+    #     model_name=model_name,
+    #     seq_len=config.get('model.block_size'),     
+    #     stride=config.get('model.block_size')
+    # )
+
+    # train_dataset = datasets["train"]
+    # eval_dataset = datasets["validation"]
+
+    dataset_name = config.get('dataset.name', 'wikitext')
+
+    if dataset_name == "alpaca":
+        from data_preparation import load_alpaca_instruct
+        datasets, _ = load_alpaca_instruct(
+            model_name=model_name,
+            max_length=config.get('model.block_size', 2048)
+        )
+    else:
+        # Keep WikiText-2 for backward compatibility
+        datasets, _ = load_wikitext2_sliding_window(
+            model_name=model_name,
+            seq_len=config.get('model.block_size'),     
+            stride=config.get('model.block_size')
     )
 
     train_dataset = datasets["train"]

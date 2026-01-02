@@ -394,26 +394,33 @@ if __name__ == "__main__":
     # eval_dataset = datasets["validation"]
 
     dataset_name = config.get('dataset.name', 'wikitext')
+    print(f"\nDataset selected: {dataset_name}")
 
     if dataset_name == "alpaca":
+        # Load Alpaca for instruction tuning (MMLU preparation)
         from data_preparation import load_alpaca_instruct
         datasets, _ = load_alpaca_instruct(
             model_name=model_name,
             max_length=config.get('model.block_size', 2048)
         )
-    else:
-        # Keep WikiText-2 for backward compatibility
+        
+    elif dataset_name == "wikitext":
+        # Load WikiText-2 for perplexity benchmarking (original setup)
+        from data_preparation import load_wikitext2_sliding_window
         datasets, _ = load_wikitext2_sliding_window(
             model_name=model_name,
             seq_len=config.get('model.block_size'),     
             stride=config.get('model.block_size')
-    )
+        )
+        
+    else:
+        raise ValueError(f"Unknown dataset: {dataset_name}. Use 'wikitext' or 'alpaca'")
 
     train_dataset = datasets["train"]
     eval_dataset = datasets["validation"]
 
-    print(f"✓ Training samples: {len(train_dataset)}")
-    print(f"✓ Validation samples: {len(eval_dataset)}")
+    print(f"✓ Train samples: {len(train_dataset):,}")
+    print(f"✓ Eval samples:  {len(eval_dataset):,}")
 
     
     # Choose memory-friendly settings based on device

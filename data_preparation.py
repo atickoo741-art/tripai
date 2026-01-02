@@ -151,10 +151,15 @@ def get_concatenated_text(dataset_split, tokenizer):
 
 def load_alpaca_instruct(model_name="meta-llama/Llama-2-7b-hf", max_length=2048):
     """
-    Load Alpaca dataset formatted for instruction tuning
+    Load Alpaca dataset formatted for instruction tuning.
+    Pads to fixed length to match WikiText-2 format.
     """
-    print(f"Loading Alpaca dataset for instruction tuning...")
-    from datasets import load_dataset
+    print(f"\n{'='*60}")
+    print(f"Loading Alpaca Instruction Dataset")
+    print(f"{'='*60}")
+    
+    from datasets import load_dataset, DatasetDict
+    from transformers import AutoTokenizer
     
     # Load Alpaca
     dataset = load_dataset("tatsu-lab/alpaca", split="train")
@@ -165,49 +170,90 @@ def load_alpaca_instruct(model_name="meta-llama/Llama-2-7b-hf", max_length=2048)
         tokenizer.pad_token_id = tokenizer.eos_token_id
     
     def format_instruction(example):
-        """Format as: Instruction\nInput\nResponse"""
-        if example.get('input', '').strip():
-            prompt = f"### Instruction:\n{example['instruction']}\n\n### Input:\n{example['input']}\n\n### Response:\n{example['output']}"
+        """Format as Alpaca instruction template"""
+        instruction = example['instruction'].strip()
+        input_text = example.get('input', '').strip()
+        output = example['output'].strip()
+        
+        if input_text:
+            prompt = f"""Below is an instruction that describes a task, paired with an input that provides further context. Write a response that appropriately completes the request.
+
+### Instruction:
+{instruction}
+
+### Input:
+{input_text}
+
+### Response:
+{output}"""
         else:
-            prompt = f"### Instruction:\n{example['instruction']}\n\n### Response:\n{example['output']}"
+            prompt = f"""Below is an instruction that describes a task. Write a response that appropriately completes the request.
+
+### Instruction:
+{instruction}
+
+### Response:
+{output}"""
         return {"text": prompt}
     
     # Format all examples
+    print("Formatting instructions...")
     dataset = dataset.map(format_instruction, remove_columns=dataset.column_names)
     
-    # Tokenize
+    # Tokenize with FIXED LENGTH (like WikiText-2)
     def tokenize_function(examples):
-        outputs = tokenizer(
+        # Pad to max_length to create fixed-length sequences
+        # This matches WikiText-2's fixed-window approach
+        result = tokenizer(
             examples["text"],
             truncation=True,
             max_length=max_length,
-            padding=False,
+            padding="max_length",  # KEY: Pad to fixed length
             return_tensors=None
         )
-        outputs["labels"] = outputs["input_ids"].copy()
-        return outputs
+        # Labels = input_ids for causal LM
+        result["labels"] = result["input_ids"].copy()
+        return result
     
+    print(f"Tokenizing dataset (padding to {max_length} tokens)...")
     tokenized_dataset = dataset.map(
         tokenize_function,
         batched=True,
+        batch_size=1000,
         remove_columns=["text"],
         desc="Tokenizing Alpaca"
     )
     
     # Split train/val (95/5)
+    print("Splitting train/validation...")
     split = tokenized_dataset.train_test_split(test_size=0.05, seed=42)
     
-    from datasets import DatasetDict
     final_dataset = DatasetDict({
         "train": split["train"],
         "validation": split["test"]
     })
     
-    print(f"✓ Alpaca loaded:")
-    print(f"  Train: {len(final_dataset['train'])} examples")
-    print(f"  Validation: {len(final_dataset['validation'])} examples")
+    print(f"\n✓ Alpaca Dataset Ready:")
+    print(f"  Training:   {len(final_dataset['train']):,} examples")
+    print(f"  Validation: {len(final_dataset['validation']):,} examples")
+    print(f"  Format:     Instruction → Response (fixed {max_length} tokens)")
+    print(f"  Compatible with: WikiText-2 training pipeline")
+    
+    # Verify data structure matches WikiText-2
+    sample = final_dataset["train"][0]
+    print(f"\n✓ Data structure check:")
+    print(f"  input_ids type:  {type(sample['input_ids'])}")
+    print(f"  input_ids len:   {len(sample['input_ids'])} (fixed)")
+    print(f"  labels len:      {len(sample['labels'])} (fixed)")
+    print(f"  Matches WikiText-2: ✓")
+    
+    print(f"{'='*60}\n")
     
     return final_dataset, tokenizer
+
+
+
+
 
 
 

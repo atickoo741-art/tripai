@@ -2,9 +2,9 @@
 
 
 experiment:
-  name: "old_clip_backward_cosine_lr_extended_training"
-  notes: "brought back 3 component activation clip backward. using cos lr with 1e-4 lr. trying to recreate and extend qat_lora_26"
-  tags: ["cosine_lr", "extended_training"]
+  name: "old_clip_backward_cosine_lr_extended_calibrate_smooth"
+  notes: "extending previous old clip backward experiment but trying out smooth calibration"
+  tags: ["calibrate_smooth","cosine_lr", "extended_training"]
 # Model
 model:
   name: "meta-llama/Llama-2-7b-hf"
@@ -27,12 +27,12 @@ calibration:
   steps: 50
   alpha: 0.5
   learn_smooth: True
-  calibrate_smooth: False
+  calibrate_smooth: True
 
 # Training
 training:
   output_dir: "./output_qat_lora"
-  num_epochs: 30
+  num_epochs: 20
   batch_size: 16
   gradient_accumulation_steps: 2
   max_grad_norm: 5.0

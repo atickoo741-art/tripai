@@ -2,9 +2,9 @@
 
 
 experiment:
-  name: "old_clip_backward_cosine_lr_extended_calibrate_smooth"
-  notes: "extending previous old clip backward experiment but trying out smooth calibration"
-  tags: ["calibrate_smooth","cosine_lr", "extended_training"]
+  name: "alpaca_first_try"
+  notes: "trying alpaca dataset for training for other tasks"
+  tags: ["alpaca","cosine_lr"]
 # Model
 model:
   name: "meta-llama/Llama-2-7b-hf"

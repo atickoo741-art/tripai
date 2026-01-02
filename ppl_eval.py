@@ -51,13 +51,13 @@ def main():
             model = PeftModel.from_pretrained(base_model, args.model_path).to(device)
             print(f"PEFT model loaded on {device}")
 
-    # # Load TEST set (standard for reporting)
-    # print("Loading WikiText-2 Test Set...")
-    # dataset = load_dataset("wikitext", "wikitext-2-raw-v1", split="test")
+    # Load TEST set (standard for reporting)
+    print("Loading WikiText-2 Test Set...")
+    dataset = load_dataset("wikitext", "wikitext-2-raw-v1", split="test")
 
-    # Load VALIDATION set (standard for reporting)
-    print("Loading WikiText-2 Validation Set...")
-    dataset = load_dataset("wikitext", "wikitext-2-raw-v1", split="validation")
+    # # Load VALIDATION set (standard for reporting)
+    # print("Loading WikiText-2 Validation Set...")
+    # dataset = load_dataset("wikitext", "wikitext-2-raw-v1", split="validation")
     
     # Create evaluation object
     # eval_obj = Evaluation(tokenizer, dataset, device, num_samples=args.n_samples)

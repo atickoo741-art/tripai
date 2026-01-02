@@ -1,0 +1,84 @@
+# config.yaml - QAT Training Configuration
+
+
+experiment:
+  name: "old_clip_backward_cosine_lr_extended_calibrate_smooth"
+  notes: "extending previous old clip backward experiment but trying out smooth calibration"
+  tags: ["calibrate_smooth","cosine_lr", "extended_training"]
+# Model
+model:
+  name: "meta-llama/Llama-2-7b-hf"
+  num_bits_weight: 4
+  num_bits_activation: 4
+  block_size: 2048
+
+# LoRA
+lora:
+  rank: 32
+  alpha: 64
+  dropout: 0.05
+  target_modules: ["q_proj", "k_proj", "v_proj", "o_proj", 
+                   "gate_proj", "up_proj", "down_proj"]
+
+# Calibration
+calibration:
+  num_samples: 128
+  percentile: 99.5
+  steps: 50
+  alpha: 0.5
+  learn_smooth: True
+  calibrate_smooth: False
+
+# Training
+training:
+  output_dir: "./output_qat_lora"
+  num_epochs: 6
+  batch_size: 16
+  gradient_accumulation_steps: 2
+  max_grad_norm: 5.0
+
+  gradient_checkpointing: true
+  load_best_model_at_end: true
+  metric_for_best_model: "eval_loss"
+  overwrite_output_dir: false
+
+  # Learning Rate Schedule
+  learning_rate: 1e-4
+  warmup_ratio: 0.15
+  lr_scheduler_type: "cosine"
+  min_lr_rate: 0.1
+  num_cycles: 3
+  use_reentrant: False
+  
+  # Optimizer (per-parameter group)
+  optimizer:
+    lora_lr_multiplier: 1.0      
+    clip_lr_multiplier: 10.0      
+    smooth_lr_multiplier: 10.0   
+    weight_decay: 0.01
+    adam_beta1: 0.9
+    adam_beta2: 0.95
+    adam_eps: 1.0e-8
+  
+  # Logging
+  logging_steps: 10
+  save_strategy: "epoch"
+  eval_strategy: "epoch"
+
+# Dataset
+dataset:
+  name: "alpaca"  # Options: "alpaca" or "wikitext"
+  # uncoment rest for wikitext
+  # subset: "wikitext-2-raw-v1"
+  # train_split: "train"
+  # eval_split: "validation"
+
+# System
+system:
+  seed: 42
+  bf16: true
+  tf32: true
+  fp16: false
+  dataloader_num_workers: 16
+  dataloader_prefetch_factor: 4 
+  dataloader_pin_memory: true 

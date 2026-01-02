@@ -149,107 +149,156 @@ def get_concatenated_text(dataset_split, tokenizer):
     return input_ids
 
 
-def load_alpaca_instruct(model_name="meta-llama/Llama-2-7b-hf", max_length=2048):
-    """
-    Load Alpaca dataset formatted for instruction tuning.
-    Pads to fixed length to match WikiText-2 format.
-    """
-    print(f"\n{'='*60}")
-    print(f"Loading Alpaca Instruction Dataset")
-    print(f"{'='*60}")
-    
-    from datasets import load_dataset, DatasetDict
-    from transformers import AutoTokenizer
-    
-    # Load Alpaca
-    dataset = load_dataset("tatsu-lab/alpaca", split="train")
-    tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=False)
-    
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
-        tokenizer.pad_token_id = tokenizer.eos_token_id
-    
-    def format_instruction(example):
-        """Format as Alpaca instruction template"""
-        instruction = example['instruction'].strip()
-        input_text = example.get('input', '').strip()
-        output = example['output'].strip()
-        
-        if input_text:
-            prompt = f"""Below is an instruction that describes a task, paired with an input that provides further context. Write a response that appropriately completes the request.
+from datasets import load_dataset, DatasetDict
+from transformers import AutoTokenizer
+
+ALPACA_PROMPT_WITH_INPUT = """Below is an instruction that describes a task, \
+paired with an input that provides further context. Write a response that appropriately completes the request.
 
 ### Instruction:
 {instruction}
 
 ### Input:
-{input_text}
+{input}
 
 ### Response:
-{output}"""
-        else:
-            prompt = f"""Below is an instruction that describes a task. Write a response that appropriately completes the request.
+"""
+
+ALPACA_PROMPT_NO_INPUT = """Below is an instruction that describes a task. \
+Write a response that appropriately completes the request.
 
 ### Instruction:
 {instruction}
 
 ### Response:
-{output}"""
-        return {"text": prompt}
-    
-    # Format all examples
-    print("Formatting instructions...")
-    dataset = dataset.map(format_instruction, remove_columns=dataset.column_names)
-    
-    # Tokenize with FIXED LENGTH (like WikiText-2)
-    def tokenize_function(examples):
-        # Pad to max_length to create fixed-length sequences
-        # This matches WikiText-2's fixed-window approach
-        result = tokenizer(
-            examples["text"],
+"""
+
+def load_alpaca_instruct(
+    model_name: str = "meta-llama/Llama-2-7b-hf",
+    max_length: int = 2048,
+):
+    """
+    Prepare Stanford Alpaca for instruction tuning, in the standard way:
+
+    - Use the original Alpaca prompt template.
+    - Construct prompt (instruction + optional input) and response separately.
+    - Concatenate [prompt + response] as input_ids.
+    - Mask prompt tokens in labels with -100 so loss is only on response.
+    - Let the trainer handle padding (we still respect max_length truncation).
+    """
+    print("\n" + "=" * 60)
+    print("Loading Stanford Alpaca for instruction tuning (DL-QAT style)")
+    print("=" * 60)
+
+    raw = load_dataset("tatsu-lab/alpaca", split="train")
+
+    tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=False)
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+        tokenizer.pad_token_id = tokenizer.eos_token_id
+
+    def build_prompt_and_response(example):
+        instruction = example["instruction"].strip()
+        inp = example.get("input", "").strip()
+        output = example["output"].strip()
+
+        if inp:
+            prompt = ALPACA_PROMPT_WITH_INPUT.format(
+                instruction=instruction,
+                input=inp,
+            )
+        else:
+            prompt = ALPACA_PROMPT_NO_INPUT.format(
+                instruction=instruction,
+            )
+
+        response = output
+        return {"prompt": prompt, "response": response}
+
+    print("Formatting Alpaca examples with standard template...")
+    formatted = raw.map(
+        build_prompt_and_response,
+        remove_columns=raw.column_names,
+        desc="Applying Alpaca template",
+    )
+
+    def tokenize_and_mask(examples):
+        prompts = examples["prompt"]
+        responses = examples["response"]
+
+        # Tokenize prompts and responses separately
+        prompt_batch = tokenizer(
+            prompts,
+            add_special_tokens=False,
             truncation=True,
             max_length=max_length,
-            padding="max_length",  # KEY: Pad to fixed length
-            return_tensors=None
         )
-        # Labels = input_ids for causal LM
-        result["labels"] = result["input_ids"].copy()
-        return result
-    
-    print(f"Tokenizing dataset (padding to {max_length} tokens)...")
-    tokenized_dataset = dataset.map(
-        tokenize_function,
+        response_batch = tokenizer(
+            responses,
+            add_special_tokens=False,
+            truncation=True,
+            max_length=max_length,
+        )
+
+        input_ids_batch = []
+        labels_batch = []
+
+        for p_ids, r_ids in zip(prompt_batch["input_ids"], response_batch["input_ids"]):
+            # Concatenate prompt + response
+            input_ids = p_ids + r_ids
+            if len(input_ids) > max_length:
+                input_ids = input_ids[:max_length]
+
+            # Labels: -100 over the prompt span, actual ids over response span
+            # (truncated consistently with input_ids)
+            prompt_len = min(len(p_ids), len(input_ids))
+            labels = [-100] * prompt_len + input_ids[prompt_len:]
+
+            # Safety: if padding is later added, those positions will be -100 by the DataCollator
+            input_ids_batch.append(input_ids)
+            labels_batch.append(labels)
+
+        return {
+            "input_ids": input_ids_batch,
+            "labels": labels_batch,
+        }
+
+    print(f"Tokenizing (max_length={max_length}) and masking prompt tokens...")
+    tokenized = formatted.map(
+        tokenize_and_mask,
         batched=True,
-        batch_size=1000,
-        remove_columns=["text"],
-        desc="Tokenizing Alpaca"
+        remove_columns=["prompt", "response"],
+        desc="Tokenizing + masking",
     )
-    
-    # Split train/val (95/5)
-    print("Splitting train/validation...")
-    split = tokenized_dataset.train_test_split(test_size=0.05, seed=42)
-    
-    final_dataset = DatasetDict({
-        "train": split["train"],
-        "validation": split["test"]
-    })
-    
-    print(f"\n✓ Alpaca Dataset Ready:")
-    print(f"  Training:   {len(final_dataset['train']):,} examples")
-    print(f"  Validation: {len(final_dataset['validation']):,} examples")
-    print(f"  Format:     Instruction → Response (fixed {max_length} tokens)")
-    print(f"  Compatible with: WikiText-2 training pipeline")
-    
-    # Verify data structure matches WikiText-2
-    sample = final_dataset["train"][0]
-    print(f"\n✓ Data structure check:")
-    print(f"  input_ids type:  {type(sample['input_ids'])}")
-    print(f"  input_ids len:   {len(sample['input_ids'])} (fixed)")
-    print(f"  labels len:      {len(sample['labels'])} (fixed)")
-    print(f"  Matches WikiText-2: ✓")
-    
-    print(f"{'='*60}\n")
-    
-    return final_dataset, tokenizer
+
+    # Split 95/5 like typical Alpaca usage
+    print("Creating train/validation split (95/5)...")
+    split = tokenized.train_test_split(test_size=0.05, seed=42)
+
+    dataset = DatasetDict(
+        {
+            "train": split["train"],
+            "validation": split["test"],
+        }
+    )
+
+    # Quick sanity check
+    ex = dataset["train"][0]
+    n_tokens = len(ex["input_ids"])
+    n_masked = sum(1 for x in ex["labels"] if x == -100)
+    n_unmasked = n_tokens - n_masked
+
+    print("\n✓ Alpaca dataset ready (DL-QAT-style):")
+    print(f"  Train examples:      {len(dataset['train']):,}")
+    print(f"  Validation examples: {len(dataset['validation']):,}")
+    print(f"  Max length:          {max_length}")
+    print(f"  Example[0] tokens:   {n_tokens}")
+    print(f"    Prompt masked:     {n_masked}")
+    print(f"    Response trained:  {n_unmasked}")
+    print("=" * 60 + "\n")
+
+    return dataset, tokenizer
+
 
 
 

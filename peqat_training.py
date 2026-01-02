@@ -514,7 +514,11 @@ if __name__ == "__main__":
         raise RuntimeError("❌ bf16 not enabled in TrainingArguments despite config!")
 
     # Define Data Collator
-    data_collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False)
+    data_collator = DataCollatorForLanguageModeling(
+    tokenizer=tokenizer, 
+    mlm=False, 
+    pad_to_multiple_of=8 
+)
 
     # Percentile-based calibration of activation clips (short pass)
     print("\n--- Calibrating activation clips (percentile init) ---")

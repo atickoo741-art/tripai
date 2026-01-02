@@ -1,7 +1,7 @@
 from datasets import load_dataset, Dataset, DatasetDict
 from transformers import AutoTokenizer
 import torch
-
+from transformers import DataCollatorForLanguageModeling
 
 
 def load_and_preprocess_wikitext2(model_name="gpt2", block_size=128):
@@ -175,105 +175,91 @@ ALPACA_PROMPT_NO_INPUT = """Below is an instruction that describes a task. Write
 
 def load_alpaca_instruct(model_name="meta-llama/Llama-2-7b-hf", max_length=2048):
     """
-    Load Alpaca dataset formatted for instruction tuning.
-    Pads to fixed length to match WikiText-2 format.
+    DYNAMIC PADDING version: Let DataCollator handle padding/labels.
+    ~4x faster training.
     """
-    print(f"\n{'='*60}")
-    print(f"Loading Alpaca Instruction Dataset")
-    print(f"{'='*60}")
-    
-    from datasets import load_dataset, DatasetDict
-    from transformers import AutoTokenizer
-    
-    # Load Alpaca
-    dataset = load_dataset("tatsu-lab/alpaca", split="train")
+    print("\n" + "=" * 60)
+    print("Loading Alpaca (DYNAMIC padding - FAST)")
+    print("=" * 60)
+
+    raw = load_dataset("tatsu-lab/alpaca", split="train")
     tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=False)
     
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
-        tokenizer.pad_token_id = tokenizer.eos_token_id
-    
-    def format_instruction(example):
-        """Format as Alpaca instruction template"""
-        instruction = example['instruction'].strip()
-        input_text = example.get('input', '').strip()
-        output = example['output'].strip()
-        
-        if input_text:
-            prompt = f"""Below is an instruction that describes a task, paired with an input that provides further context. Write a response that appropriately completes the request.
 
-### Instruction:
-{instruction}
+    def format_prompts(examples):
+        """Batch format Alpaca prompts"""
+        texts = []
+        for instruction, inp, output in zip(
+            examples["instruction"], 
+            examples["input"], 
+            examples["output"]
+        ):
+            instruction = instruction.strip()
+            inp = inp.strip() if inp else ""
+            output = output.strip()
+            
+            if inp:
+                prompt = ALPACA_PROMPT_WITH_INPUT.format(
+                    instruction=instruction,
+                    input=inp
+                )
+            else:
+                prompt = ALPACA_PROMPT_NO_INPUT.format(
+                    instruction=instruction
+                )
+            
+            texts.append(prompt + output)
+        return {"text": texts}
 
-### Input:
-{input_text}
+    # 1. Format prompts (batched)
+    print("Formatting Alpaca prompts...")
+    formatted = raw.map(
+        format_prompts,
+        batched=True,
+        remove_columns=raw.column_names,
+        desc="Formatting prompts"
+    )
 
-### Response:
-{output}"""
-        else:
-            prompt = f"""Below is an instruction that describes a task. Write a response that appropriately completes the request.
-
-### Instruction:
-{instruction}
-
-### Response:
-{output}"""
-        return {"text": prompt}
-    
-    # Format all examples
-    print("Formatting instructions...")
-    dataset = dataset.map(format_instruction, remove_columns=dataset.column_names)
-    
-    # Tokenize with FIXED LENGTH (like WikiText-2)
-    def tokenize_function(examples):
-        # Pad to max_length to create fixed-length sequences
-        # This matches WikiText-2's fixed-window approach
-        result = tokenizer(
+    # 2. Tokenize ONLY input_ids (no labels, no padding)
+    def tokenize_prompts(examples):
+        return tokenizer(
             examples["text"],
             truncation=True,
             max_length=max_length,
-            padding="max_length",  # KEY: Pad to fixed length
-            return_tensors=None
+            padding=False,  # CRITICAL: No padding here
         )
-        # Labels = input_ids for causal LM
-        result["labels"] = result["input_ids"].copy()
-        return result
-    
-    print(f"Tokenizing dataset (padding to {max_length} tokens)...")
-    tokenized_dataset = dataset.map(
-        tokenize_function,
+
+    print("Tokenizing (dynamic padding)...")
+    tokenized = formatted.map(
+        tokenize_prompts,
         batched=True,
-        batch_size=1000,
         remove_columns=["text"],
-        desc="Tokenizing Alpaca"
+        desc="Tokenizing"
     )
-    
-    # Split train/val (95/5)
-    print("Splitting train/validation...")
-    split = tokenized_dataset.train_test_split(test_size=0.05, seed=42)
-    
-    final_dataset = DatasetDict({
+
+    # 3. Split
+    split = tokenized.train_test_split(test_size=0.05, seed=42)
+    dataset = DatasetDict({
         "train": split["train"],
         "validation": split["test"]
     })
-    
-    print(f"\n✓ Alpaca Dataset Ready:")
-    print(f"  Training:   {len(final_dataset['train']):,} examples")
-    print(f"  Validation: {len(final_dataset['validation']):,} examples")
-    print(f"  Format:     Instruction → Response (fixed {max_length} tokens)")
-    print(f"  Compatible with: WikiText-2 training pipeline")
-    
-    # Verify data structure matches WikiText-2
-    sample = final_dataset["train"][0]
-    print(f"\n✓ Data structure check:")
-    print(f"  input_ids type:  {type(sample['input_ids'])}")
-    print(f"  input_ids len:   {len(sample['input_ids'])} (fixed)")
-    print(f"  labels len:      {len(sample['labels'])} (fixed)")
-    print(f"  Matches WikiText-2: ✓")
-    
-    print(f"{'='*60}\n")
-    
-    return final_dataset, tokenizer
+
+    # 4. Verify structure (input_ids only, variable length)
+    ex_lengths = []
+    for i in range(min(10, len(dataset["train"]))):
+        ex = dataset["train"][i]
+        ex_lengths.append(len(ex["input_ids"]))
+    print(f"\n✓ Dynamic padding dataset ready:")
+    print(f"  Train examples:      {len(dataset['train']):,}")
+    print(f"  Validation examples: {len(dataset['validation']):,}")
+    print(f"  Example lengths:     {ex_lengths[:5]}... (variable ✓)")
+    print(f"  DataCollator will pad within batches")
+    print("=" * 60 + "\n")
+
+    return dataset, tokenizer
+
 
 
 
@@ -286,30 +272,38 @@ def load_alpaca_instruct(model_name="meta-llama/Llama-2-7b-hf", max_length=2048)
 
 
 if __name__ == "__main__":
-    # Test the new function
-    datasets, tokenizer = load_wikitext2_sliding_window(
-        model_name="meta-llama/Llama-2-7b-hf",
-        seq_len=2048,
-        stride=2048
-    )
+    # # Test the new function
+    # datasets, tokenizer = load_wikitext2_sliding_window(
+    #     model_name="meta-llama/Llama-2-7b-hf",
+    #     seq_len=2048,
+    #     stride=2048
+    # )
 
-    # Show example
-    train_dataset = datasets["train"]
-    print("\n" + "="*60)
-    print("Example training sample:")
-    print("="*60)
-    sample = train_dataset[0]
-    print(f"Input length: {len(sample['input_ids'])}")
-    print(f"Labels length: {len(sample['labels'])}")
-    print(f"Masked tokens: {sum(1 for l in sample['labels'] if l == -100)}")
-    print(f"Labeled tokens: {sum(1 for l in sample['labels'] if l != -100)}")
+    # # Show example
+    # train_dataset = datasets["train"]
+    # print("\n" + "="*60)
+    # print("Example training sample:")
+    # print("="*60)
+    # sample = train_dataset[0]
+    # print(f"Input length: {len(sample['input_ids'])}")
+    # print(f"Labels length: {len(sample['labels'])}")
+    # print(f"Masked tokens: {sum(1 for l in sample['labels'] if l == -100)}")
+    # print(f"Labeled tokens: {sum(1 for l in sample['labels'] if l != -100)}")
     
-    # print("\nFirst 50 tokens:")
-    # print(tokenizer.decode(sample['input_ids'][:50]))
-    # from transformers import DataCollatorForLanguageModeling
-    # dataset, tokenizer = load_alpaca_instruct() 
+    
 
-    # collator = DataCollatorForLanguageModeling(tokenizer, mlm=False)
-    # batch = collator([dataset["train"][i] for i in range(8)])
-    # print("Collator works:", batch["input_ids"].shape)
+    dataset, tokenizer = load_alpaca_instruct()  # Your dynamic function
+
+    print("\nTesting DataCollator...")
+    collator = DataCollatorForLanguageModeling(tokenizer, mlm=False)
+    batch = collator([dataset["train"][i] for i in range(8)])
+
+    print(f"✅ SUCCESS - Dynamic padding works:")
+    print(f"  input_ids shape:     {batch['input_ids'].shape}")
+    print(f"  labels shape:        {batch['labels'].shape}")
+    print(f"  attention_mask:      {batch.get('attention_mask', 'N/A').shape}")
+    print(f"  Max length in batch: {batch['input_ids'].shape[1]}")
+    print("\n🚀 Ready for calibration/training!")
+
+
 

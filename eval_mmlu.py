@@ -74,11 +74,25 @@ def run_lm_eval(checkpoint_path: str,
     print(f"   Few-shot: {num_fewshot}")
     print(f"   Output: {output_path}\n")
     
+    is_peft = os.path.isdir(checkpoint_path) or "checkpoint" in checkpoint_path
+    is_peft = os.path.isdir(checkpoint_path) or "checkpoint" in checkpoint_path
+
+    if is_peft:
+        print(f"Type: PEFT Adapter (Local path)")
+        model_args = f"pretrained={base_model},peft={checkpoint_path},dtype=bfloat16"
+    else:
+        # It's a baseline HF model (e.g. meta-llama/Llama-2-7b-hf)
+        print(f"Type: Base Model (HF Hub)")
+        model_args = f"pretrained={checkpoint_path},dtype=bfloat16"
+    
+    print(f"Model Args: {model_args}")  # Debug print
+
+
     # Build lm_eval command
     cmd = [
         "lm_eval",
         "--model", "hf",
-        "--model_args", f"pretrained={base_model},peft={checkpoint_path},dtype=bfloat16",
+        "--model_args", model_args,
         "--tasks", tasks,
         "--num_fewshot", str(num_fewshot),
         "--device", "cuda",

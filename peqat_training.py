@@ -612,17 +612,17 @@ if __name__ == "__main__":
         {
             'params': lora_params, 
             'lr': base_lr * config.get('training.optimizer.lora_lr_multiplier'),
-            'weight_decay': config.get('training.optimizer.weight_decay')
+            'weight_decay': 15*config.get('training.optimizer.weight_decay')
         },
         {
             'params': clip_params, 
             'lr': base_lr * config.get('training.optimizer.clip_lr_multiplier'),
-            'weight_decay': 0.0
+            'weight_decay': config.get('training.optimizer.weight_decay')
         },
         {
             'params': smooth_params, 
             'lr': base_lr * config.get('training.optimizer.smooth_lr_multiplier'),
-            'weight_decay': 0.0
+            'weight_decay': config.get('training.optimizer.weight_decay')
         }
     ], 
     betas=(config.get('training.optimizer.adam_beta1'), 

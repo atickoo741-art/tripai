@@ -67,11 +67,12 @@ training:
 
 # Dataset
 dataset:
-  name: "alpaca"  # Options: "alpaca" or "wikitext"
+  # name: "alpaca"  # Options: "alpaca" or "wikitext"
   # uncoment rest for wikitext
-  # subset: "wikitext-2-raw-v1"
-  # train_split: "train"
-  # eval_split: "validation"
+  name: "wikitext"
+  subset: "wikitext-2-raw-v1"
+  train_split: "train"
+  eval_split: "validation"
 
 # System
 system:

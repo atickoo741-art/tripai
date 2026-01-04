@@ -2,9 +2,9 @@
 
 
 experiment:
-  name: "alpaca_first_try"
-  notes: "trying alpaca dataset for training for other tasks"
-  tags: ["alpaca","cosine_lr"]
+  name: "alpaca_with_smooth_calib"
+  notes: "alpaca with smooth calibration on"
+  tags: ["alpaca","cosine_lr", "smooth_calibration"]
 # Model
 model:
   name: "meta-llama/Llama-2-7b-hf"
@@ -24,10 +24,10 @@ lora:
 calibration:
   num_samples: 128
   percentile: 99.5
-  steps: 50
+  steps: 200
   alpha: 0.5
   learn_smooth: True
-  calibrate_smooth: False
+  calibrate_smooth: True
 
 # Training
 training:

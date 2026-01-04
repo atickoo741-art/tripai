@@ -132,8 +132,8 @@ def custom_eval(peft_model, tokenizer, device, trainer_ppl):
 
 
 if __name__ == "__main__":
-    config = Config("config.yaml")
-    # config = Config("alpaca_config.yaml")
+    # config = Config("config.yaml")
+    config = Config("alpaca_config.yaml")
     print("=" * 60)
     print(f"Experiment: {config.get('experiment.name')}")
     print(f"Run ID: {config.run_id}")
@@ -612,17 +612,17 @@ if __name__ == "__main__":
         {
             'params': lora_params, 
             'lr': base_lr * config.get('training.optimizer.lora_lr_multiplier'),
-            'weight_decay': 15*config.get('training.optimizer.weight_decay')
+            'weight_decay': config.get('training.optimizer.weight_decay')
         },
         {
             'params': clip_params, 
             'lr': base_lr * config.get('training.optimizer.clip_lr_multiplier'),
-            'weight_decay': config.get('training.optimizer.weight_decay')
+            'weight_decay': 0.0
         },
         {
             'params': smooth_params, 
             'lr': base_lr * config.get('training.optimizer.smooth_lr_multiplier'),
-            'weight_decay': config.get('training.optimizer.weight_decay')
+            'weight_decay': 0.0
         }
     ], 
     betas=(config.get('training.optimizer.adam_beta1'), 

@@ -90,6 +90,27 @@ def unified_calibration(model, dataloader, steps=200, percentile=99.5, alpha=0.5
             h.remove()
 
         print(f"✓ Collected statistics from {len(per_module_stats)} modules\n")
+        
+        # Collect weight statistics for all modules found in Phase 1
+        print("\n--- Collecting weight statistics ---")
+        with torch.no_grad():
+            for m in tqdm(model.modules(), desc="Collecting weight stats", unit="module"):
+                if not isinstance(m, PEQATLoRAModule):
+                    continue
+                
+                key = id(m)
+                if key not in per_module_stats:
+                    continue
+                
+                # Get base weight (before LoRA)
+                W = m.qat_core.get_base_weight()
+                weight_max = W.abs().amax(dim=1, keepdim=True)  # Per output channel max
+                
+                # Add to existing stats dict
+                per_module_stats[key]['weight_max'] = weight_max
+
+        print(f"✓ Collected weight statistics for {len(per_module_stats)} modules")
+
 
         # Phase 2: Compute and apply smooth factors
         print("="*60)

@@ -44,18 +44,23 @@ def unified_calibration(model, dataloader, steps=200, percentile=99.5, alpha=0.5
                 return
             x = x.detach()
             
-            # Raw activation statistics
+            # Collect TWO statistics:
+            # 1. Max for SmoothQuant smooth factor initialization
+            act_max = x.abs().amax(dim=(0, 1))  # Max across batch and sequence
+            
+            # 2. 99.5th percentile for activation clip initialization (PACT)
             x_flat = x.abs().reshape(-1, x.shape[-1]).float()
-            q = torch.quantile(x_flat, torch.tensor(percentile / 100.0, device=x.device), dim=0)
+            act_pctl = torch.quantile(x_flat, torch.tensor(percentile / 100.0, device=x.device), dim=0)
             
             key = id(mod)
             if key in per_module_stats:
-                per_module_stats[key]['act_pctl'] = torch.maximum(per_module_stats[key]['act_pctl'], q)
+                per_module_stats[key]['act_max'] = torch.maximum(per_module_stats[key]['act_max'], act_max)
+                per_module_stats[key]['act_pctl'] = torch.maximum(per_module_stats[key]['act_pctl'], act_pctl)
             else:
-                # Get base weight statistics
-                base_weight = mod.qat_core.get_base_weight().detach()
-                W_max = base_weight.abs().amax(dim=0)
-                per_module_stats[key] = {'act_pctl': q, 'weight_max': W_max}
+                per_module_stats[key] = {
+                    'act_max': act_max,      # For smooth factor
+                    'act_pctl': act_pctl     # For activation clips
+                }
 
         for m in model.modules():
             if isinstance(m, PEQATLoRAModule):
@@ -107,7 +112,8 @@ def unified_calibration(model, dataloader, steps=200, percentile=99.5, alpha=0.5
                 if key not in per_module_stats:
                     continue
                 
-                A = per_module_stats[key]['act_pctl'].to(m.qat_core.smooth_factor.device)
+                # A = per_module_stats[key]['act_pctl'].to(m.qat_core.smooth_factor.device)
+                A = per_module_stats[key]['act_max'].to(m.qat_core.smooth_factor.device)
                 W = per_module_stats[key]['weight_max'].to(m.qat_core.smooth_factor.device)
                 
                 # SmoothQuant formula: s = A^α / W^(1-α)

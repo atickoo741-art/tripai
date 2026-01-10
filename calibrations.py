@@ -44,23 +44,20 @@ def unified_calibration(model, dataloader, steps=200, percentile=99.5, alpha=0.5
                 return
             x = x.detach()
             
-            # Collect TWO statistics:
-            # 1. Max for SmoothQuant smooth factor initialization
-            act_max = x.abs().amax(dim=(0, 1))  # Max across batch and sequence
-            
-            # 2. 99.5th percentile for activation clip initialization (PACT)
+            # Raw activation statistics
             x_flat = x.abs().reshape(-1, x.shape[-1]).float()
-            act_pctl = torch.quantile(x_flat, torch.tensor(percentile / 100.0, device=x.device), dim=0)
+            # q = torch.quantile(x_flat, torch.tensor(percentile / 100.0, device=x.device), dim=0)
+            # act_max = x.abs().amax(dim=(0, 1))
+            q = x.abs().amax(dim=(0, 1))
             
             key = id(mod)
             if key in per_module_stats:
-                per_module_stats[key]['act_max'] = torch.maximum(per_module_stats[key]['act_max'], act_max)
-                per_module_stats[key]['act_pctl'] = torch.maximum(per_module_stats[key]['act_pctl'], act_pctl)
+                per_module_stats[key]['act_pctl'] = torch.maximum(per_module_stats[key]['act_pctl'], q)
             else:
-                per_module_stats[key] = {
-                    'act_max': act_max,      # For smooth factor
-                    'act_pctl': act_pctl     # For activation clips
-                }
+                # Get base weight statistics
+                base_weight = mod.qat_core.get_base_weight().detach()
+                W_max = base_weight.abs().amax(dim=0)
+                per_module_stats[key] = {'act_pctl': q, 'weight_max': W_max}
 
         for m in model.modules():
             if isinstance(m, PEQATLoRAModule):
@@ -91,26 +88,6 @@ def unified_calibration(model, dataloader, steps=200, percentile=99.5, alpha=0.5
 
         print(f"✓ Collected statistics from {len(per_module_stats)} modules\n")
         
-        # Collect weight statistics for all modules found in Phase 1
-        print("\n--- Collecting weight statistics ---")
-        with torch.no_grad():
-            for m in tqdm(model.modules(), desc="Collecting weight stats", unit="module"):
-                if not isinstance(m, PEQATLoRAModule):
-                    continue
-                
-                key = id(m)
-                if key not in per_module_stats:
-                    continue
-                
-                # Get base weight (before LoRA)
-                W = m.qat_core.get_base_weight()
-                weight_max = W.abs().amax(dim=1, keepdim=True)  # Per output channel max
-                
-                # Add to existing stats dict
-                per_module_stats[key]['weight_max'] = weight_max
-
-        print(f"✓ Collected weight statistics for {len(per_module_stats)} modules")
-
 
         # Phase 2: Compute and apply smooth factors
         print("="*60)
@@ -133,8 +110,8 @@ def unified_calibration(model, dataloader, steps=200, percentile=99.5, alpha=0.5
                 if key not in per_module_stats:
                     continue
                 
-                # A = per_module_stats[key]['act_pctl'].to(m.qat_core.smooth_factor.device)
-                A = per_module_stats[key]['act_max'].to(m.qat_core.smooth_factor.device)
+                A = per_module_stats[key]['act_pctl'].to(m.qat_core.smooth_factor.device)
+                # A = per_module_stats[key]['act_max'].to(m.qat_core.smooth_factor.device)
                 W = per_module_stats[key]['weight_max'].to(m.qat_core.smooth_factor.device)
                 
                 # SmoothQuant formula: s = A^α / W^(1-α)

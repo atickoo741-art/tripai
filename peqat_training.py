@@ -4,6 +4,9 @@ import json
 from data_preparation import load_and_preprocess_wikitext2
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer, TrainingArguments, Trainer, DataCollatorForLanguageModeling
+tokenizer = AutoTokenizer.from_pretrained("meta-llama/Meta-Llama-3.1-8B")
+print(f"Vocab size: {len(tokenizer)}") 
+print(f"PAD token: {tokenizer.pad_token}")  # Should be <|finetune_right_pad_id|> or similar
 from calibrations import unified_calibration
 from peft import LoraConfig, get_peft_model, TaskType
 from torch.utils.data import DataLoader

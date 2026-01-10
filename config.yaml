@@ -2,9 +2,9 @@
 
 
 experiment:
-  name: "high_dropout_high_smooth_alpha"
-  notes: "taking previous old clip backward with smooth calibration but increasing dropout to 0.15 and smooth alpha to 0.85"
-  tags: ["calibrate_smooth","cosine_lr", "extended_training", "high_alpha"]
+  name: "smooth_calib_fixed_init_pctl_wiki"
+  notes: "fixed the smoothfactor init percentile to be 100 instead of 99.5"
+  tags: ["calibrate_smooth", "fixed_init_pctl", "wikitext"]
 # Model
 model:
   name: "meta-llama/Llama-2-7b-hf"

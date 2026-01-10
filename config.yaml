@@ -2,12 +2,12 @@
 
 
 experiment:
-  name: "smooth_calib_fixed_init_pctl_wiki"
-  notes: "fixed the smoothfactor init percentile to be 100 instead of 99.5"
-  tags: ["calibrate_smooth", "fixed_init_pctl", "wikitext"]
+  name: "llama3.1_8b_wiki_1st_attempt"
+  notes: "first attempt at llama 3.1 8b on wiki"
+  tags: ["Llama3.1", "wikitext"]
 # Model
 model:
-  name: "meta-llama/Llama-2-7b-hf"
+  name: "meta-llama/Meta-Llama-3.1-8B"
   num_bits_weight: 4
   num_bits_activation: 4
   block_size: 2048

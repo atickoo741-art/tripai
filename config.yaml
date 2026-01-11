@@ -7,7 +7,7 @@ experiment:
   tags: ["Llama3.1", "wikitext"]
 # Model
 model:
-  name: "meta-llama/Meta-Llama-3.1-8B"
+  name: "meta-llama/Llama-3.1-8B"
   num_bits_weight: 4
   num_bits_activation: 4
   block_size: 2048

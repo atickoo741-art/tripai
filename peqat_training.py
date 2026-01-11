@@ -135,8 +135,8 @@ def custom_eval(peft_model, tokenizer, device, trainer_ppl):
 
 
 if __name__ == "__main__":
-    # config = Config("config.yaml")
-    config = Config("alpaca_config.yaml")
+    config = Config("config.yaml")
+    # config = Config("alpaca_config.yaml")
     print("=" * 60)
     print(f"Experiment: {config.get('experiment.name')}")
     print(f"Run ID: {config.run_id}")
@@ -147,12 +147,11 @@ if __name__ == "__main__":
 
 
 
-    model_name = "meta-llama/Llama-2-7b-hf"
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    model_name = config.get('model.name')
     # ============================================================================
     # CONFIGURATION
     # ============================================================================
-    MODEL_NAME = "meta-llama/Llama-2-7b-hf"
+    # MODEL_NAME = "meta-llama/Llama-2-7b-hf"
     BLOCK_SIZE = 2048
     NUM_EPOCHS = 10 
     BATCH_SIZE = 16 

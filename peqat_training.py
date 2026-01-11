@@ -227,8 +227,8 @@ if __name__ == "__main__":
     target_dtype = torch.bfloat16 if bool(config.get('system.bf16')) else torch.float32
     peft_model = peft_model.to(target_dtype)
 
-    for name, module in peft_model.named_modules():
-        print(name)
+    # for name, module in peft_model.named_modules():
+    #     print(name)
 
     # Freeze base model (this is already done by PEFT)
     for param in peft_model.base_model.parameters():

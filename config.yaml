@@ -2,8 +2,8 @@
 
 
 experiment:
-  name: "llama3.1_8b_wiki_1st_attempt"
-  notes: "first attempt at llama 3.1 8b on wiki"
+  name: "actual_llama3.1_8b_wikitext_qat_lora"
+  notes: "actual llama 3.1 8b wikitext peqat. first attempt accidentally used llama 2 7b"
   tags: ["Llama3.1", "wikitext"]
 # Model
 model:
@@ -24,7 +24,7 @@ lora:
 calibration:
   num_samples: 128
   percentile: 99.5
-  steps: 50
+  steps: 500
   alpha: 0.85
   learn_smooth: True
   calibrate_smooth: True

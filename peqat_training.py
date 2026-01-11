@@ -135,8 +135,8 @@ def custom_eval(peft_model, tokenizer, device, trainer_ppl):
 
 
 if __name__ == "__main__":
-    config = Config("config.yaml")
-    # config = Config("alpaca_config.yaml")
+    # config = Config("config.yaml")
+    config = Config("alpaca_config.yaml")
     print("=" * 60)
     print(f"Experiment: {config.get('experiment.name')}")
     print(f"Run ID: {config.run_id}")

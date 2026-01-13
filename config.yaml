@@ -2,12 +2,12 @@
 
 
 experiment:
-  name: "llama3.1_8b_wiki_fixed_config"
+  name: "llama2_70b_wiki_correct_config"
   notes: "fixed config errors. incorrect hyperparams"
-  tags: ["Llama3.1", "wikitext"]
+  tags: ["Llama2", "wikitext"]
 # Model
 model:
-  name: "meta-llama/Llama-3.1-8B"
+  name: "meta-llama/Llama-2-70b"
   num_bits_weight: 4
   num_bits_activation: 4
   block_size: 2048

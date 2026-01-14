@@ -40,6 +40,7 @@ def main():
         # Detect if model_path is a PEFT adapters directory
         is_peft = os.path.isfile(os.path.join(args.model_path, "adapter_config.json"))
         is_peqat = os.path.isfile(os.path.join(args.model_path, "quantization_params.pth"))
+        tokenizer = AutoTokenizer.from_pretrained(args.base_model_name, use_fast=False)
         if is_peqat:
             model, tokenizer = load_peqat_model(args.model_path, args.base_model_name, device)
         elif is_peft:

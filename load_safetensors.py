@@ -2,7 +2,8 @@ from safetensors import safe_open
 import os
 import torch
 # file_path = "/Users/shresthmishra/Documents/Code/w4a4peqat/qat_lora_model_6/adapter_model.safetensors"
-file_path = "/home/shresth/peqat-checkpoints/output_qat_lora_old_clip_backward_co_5f71_001/adapter_model.safetensors"
+# file_path = "/home/shresth/peqat-checkpoints/output_qat_lora_old_clip_backward_co_5f71_001/adapter_model.safetensors"
+file_path = "../peqat-checkpoints/output_qat_lora_old_clip_backward_co_5f71_001/adapter_model.safetensors"
 from safetensors.torch import load_file
 
 

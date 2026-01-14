@@ -46,9 +46,9 @@ def unified_calibration(model, dataloader, steps=200, percentile=99.5, alpha=0.5
             
             # Raw activation statistics
             x_flat = x.abs().reshape(-1, x.shape[-1]).float()
-            q = torch.quantile(x_flat, torch.tensor(percentile / 100.0, device=x.device), dim=0)
+            # q = torch.quantile(x_flat, torch.tensor(percentile / 100.0, device=x.device), dim=0)
             # act_max = x.abs().amax(dim=(0, 1))
-            # q = x.abs().amax(dim=(0, 1))
+            q = x.abs().amax(dim=(0, 1))
             
             key = id(mod)
             if key in per_module_stats:

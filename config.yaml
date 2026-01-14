@@ -2,12 +2,12 @@
 
 
 experiment:
-  name: "llama3.1_8b_wiki_fixed_config"
-  notes: "fixed config errors. incorrect hyperparams"
-  tags: ["Llama3.1", "wikitext"]
+  name: "llama2-7b-max-init-smooth"
+  notes: "used max for smooth initialization"
+  tags: ["Llama2-7B", "wikitext"]
 # Model
 model:
-  name: "meta-llama/Llama-3.1-8B"
+  name: "meta-llama/Llama-2-7b-hf"
   num_bits_weight: 4
   num_bits_activation: 4
   block_size: 2048

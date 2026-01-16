@@ -194,11 +194,12 @@ def main():
     gc.collect()
     
     model_fp16 = AutoModelForCausalLM.from_pretrained(
-        base_model_name,
-        torch_dtype=torch.bfloat16,
-        device_map="auto",
-        low_cpu_mem_usage=True
-    )
+    base_model_name,
+    torch_dtype=torch.bfloat16,
+    device_map={"": 0},  # Force all to GPU 0, no offloading
+    low_cpu_mem_usage=False
+)
+
     
     mem_fp16 = measure_memory()
     print(f"  Memory: {mem_fp16:.2f} GB")

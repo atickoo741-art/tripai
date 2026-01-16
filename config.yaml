@@ -2,8 +2,8 @@
 
 
 experiment:
-  name: "llama2-7b-max-init-smooth"
-  notes: "used max for smooth initialization"
+  name: "llama2-7b-no-smooth-ablation"
+  notes: "no smoothing ablation"
   tags: ["Llama2-7B", "wikitext"]
 # Model
 model:
@@ -26,8 +26,8 @@ calibration:
   percentile: 99.5
   steps: 50
   alpha: 0.5
-  learn_smooth: True
-  calibrate_smooth: True
+  learn_smooth: False
+  calibrate_smooth: False
 
 # Training
 training:

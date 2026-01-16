@@ -2,12 +2,12 @@
 
 
 experiment:
-  name: "llama3.1_8b_alpaca_1st_attempt"
-  notes: "first attempt at llama 3.1 8b on alpaca"
-  tags: ["alpaca", "Llama3.1"]
+  name: "llama3-8b-alpaca-1st-try"
+  notes: "llama 3 not 3.1 on alpaca"
+  tags: ["alpaca", "Llama3"]
 # Model
 model:
-  name: "meta-llama/Meta-Llama-3.1-8B"
+  name: "meta-llama/Meta-Llama-3-8B"
   num_bits_weight: 4
   num_bits_activation: 4
   block_size: 2048

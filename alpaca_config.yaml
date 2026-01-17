@@ -2,12 +2,12 @@
 
 
 experiment:
-  name: "llama3-8b-alpaca-1st-try"
-  notes: "llama 3 not 3.1 on alpaca"
-  tags: ["alpaca", "Llama3"]
+  name: "llama2-70b-alpaca-1st-try"
+  notes: "llama 2 70b on alpaca"
+  tags: ["alpaca", "Llama2", "huge model"]
 # Model
 model:
-  name: "meta-llama/Meta-Llama-3-8B"
+  name: "meta-llama/Llama-2-70b"
   num_bits_weight: 4
   num_bits_activation: 4
   block_size: 2048
@@ -24,7 +24,7 @@ lora:
 calibration:
   num_samples: 128
   percentile: 99.5
-  steps: 200
+  steps: 500
   alpha: 0.5
   learn_smooth: True
   calibrate_smooth: True

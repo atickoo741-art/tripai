@@ -2,12 +2,12 @@
 
 
 experiment:
-  name: "llama2-70b-alpaca-1st-try"
-  notes: "llama 2 70b on alpaca"
-  tags: ["alpaca", "Llama2", "huge model"]
+  name: "llama2-13b-alpaca-1st-try"
+  notes: "llama 2 13b on alpaca"
+  tags: ["alpaca", "Llama2", "big model"]
 # Model
 model:
-  name: "meta-llama/Llama-2-70b"
+  name: "meta-llama/Llama-2-13b-hf"
   num_bits_weight: 4
   num_bits_activation: 4
   block_size: 2048

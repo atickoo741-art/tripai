@@ -26,8 +26,8 @@ calibration:
   percentile: 99.5
   steps: 50
   alpha: 0.5
-  learn_smooth: False
-  calibrate_smooth: False
+  learn_smooth: True
+  calibrate_smooth: True
 
 # Training
 training:

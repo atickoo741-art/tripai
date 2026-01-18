@@ -2,9 +2,9 @@
 
 
 experiment:
-  name: "llama2-7b-no-smooth-ablation"
-  notes: "no smoothing ablation"
-  tags: ["Llama2-7B", "wikitext"]
+  name: "llama2-7b-no-lr-multiplier-ablation"
+  notes: "ablation with 1.0x quantization param lr multiplier"
+  tags: ["Llama2-7B", "wikitext", "ablation"]
 # Model
 model:
   name: "meta-llama/Llama-2-7b-hf"
@@ -53,8 +53,8 @@ training:
   # Optimizer (per-parameter group)
   optimizer:
     lora_lr_multiplier: 1.0      
-    clip_lr_multiplier: 10.0      
-    smooth_lr_multiplier: 10.0   
+    clip_lr_multiplier: 1.0      
+    smooth_lr_multiplier: 1.0   
     weight_decay: 0.01
     adam_beta1: 0.9
     adam_beta2: 0.95

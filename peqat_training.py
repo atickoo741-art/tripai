@@ -92,7 +92,8 @@ if __name__ == "__main__":
     # use_smooth = True
     learn_smooth = config.get('calibration.learn_smooth', True)
     calibrate_smooth = config.get('calibration.calibrate_smooth', False)
-    learn_clip = config.get('learn_clip', True)
+    learn_clip = config.get('calibration.learn_clip', True)
+    print(learn_clip, "-------------------LEARN CLIP DEBUG-------------------------------------")
     torch.backends.cuda.matmul.allow_tf32 = config.get('system.tf32', True)
     # ============================================================================
 

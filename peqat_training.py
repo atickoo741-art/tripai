@@ -174,7 +174,7 @@ if __name__ == "__main__":
 
     quantize_model(peft_model)
 
-    use_quant_grad = config.get('optimizer.use_quant_grad', True)
+    use_quant_grad = config.get('training.optimizer.use_quant_grad', True)
 
     # Set flag on all QAT modules
     for module in peft_model.modules():

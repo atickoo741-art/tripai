@@ -18,73 +18,6 @@ import torch.cuda
 
 
 
-# def save_model(peft_model, tokenizer, model_dir, model_name, device):
-    # # Save the model, tokenizer, and quantization parameters
-    
-    # print(f"\n--- Saving W4A4 QAT LoRA model to {model_dir} ---")
-    # os.makedirs(model_dir, exist_ok=True)
-    
-    # # Save quantization parameters after training
-    # # save_quantization_parameters(peft_model, model_dir)
-    
-    # # Save the LoRA adapters
-    # print(f"--- Saving W4A4 QAT LoRA adapters to {model_dir} ---")
-    # peft_model.save_pretrained(model_dir)
-
-    # # Save the tokenizer
-    # tokenizer.save_pretrained(model_dir)
-    
-    # best_checkpoint = trainer.state.best_model_checkpoint
-    # if best_checkpoint and os.path.exists(best_checkpoint):
-    #     import shutil
-    #     src = os.path.join(best_checkpoint, "quantization_params.pth")
-    #     dst = os.path.join(model_dir, "quantization_params.pth")
-        
-    #     if os.path.exists(src):
-    #         shutil.copy(src, dst)
-    #         print(f"✓ Copied quantization params from: {best_checkpoint}")
-            
-    #         # Verify the copy
-    #         quant_params = torch.load(dst)
-    #         print(f"  {len(quant_params)} quantization parameters")
-    #     else:
-    #         print(f"⚠️  Warning: quantization_params.pth not found in best checkpoint")
-    #         print(f"  Falling back to current model state...")
-            
-    #         # Fallback: save current state
-    #         quant_params = {}
-    #         for name, module in peft_model.named_modules():
-    #             if isinstance(module, QATW4A4LinearCore):
-    #                 prefix = f"{name}."
-    #                 quant_params[f"{prefix}activation_clip"] = module.activation_clip.data.detach().cpu()
-    #                 quant_params[f"{prefix}smooth_factor"] = module.smooth_factor.data.detach().cpu()
-            
-    #         torch.save(quant_params, dst)
-    #         print(f"  ✓ Saved {len(quant_params)} parameters from current state")
-    # else:
-    #     print("⚠️  No best checkpoint found, saving current model state...")
-        
-    #     # Save current quantization state
-    #     quant_params = {}
-    #     for name, module in peft_model.named_modules():
-    #         if isinstance(module, QATW4A4LinearCore):
-    #             prefix = f"{name}."
-    #             quant_params[f"{prefix}activation_clip"] = module.activation_clip.data.detach().cpu()
-    #             quant_params[f"{prefix}smooth_factor"] = module.smooth_factor.data.detach().cpu()
-        
-    #     torch.save(quant_params, os.path.join(model_dir, "quantization_params.pth"))
-    #     print(f"✓ Saved {len(quant_params)} quantization parameters")
-
-
-    # # Save the model config
-    # peft_model.config.to_json_file(os.path.join(model_dir, "config.json"))
-    
-    
-    # print(f"\n--- Model, tokenizer, and quantization config saved to {model_dir} ---")
-    # print("To load this model for inference, use:")
-    # print(f"model = AutoModelForCausalLM.from_pretrained('{model_name}').to('{device}')")
-    # print(f"model = PeftModel.from_pretrained(model, '{model_dir}')")
-    # print("# Make sure to apply the same quantization setup when loading")
 
 def ensure_dtype_consistency(model, target_dtype=torch.bfloat16):
     """Ensure all model parameters have the same dtype"""
@@ -159,6 +92,7 @@ if __name__ == "__main__":
     # use_smooth = True
     learn_smooth = config.get('calibration.learn_smooth', True)
     calibrate_smooth = config.get('calibration.calibrate_smooth', False)
+    learn_clip = config.get('learn_clip', True)
     torch.backends.cuda.matmul.allow_tf32 = config.get('system.tf32', True)
     # ============================================================================
 
@@ -241,20 +175,7 @@ if __name__ == "__main__":
 
     target_dtype = torch.bfloat16 if bool(config.get('system.bf16')) else torch.float32
     peft_model = peft_model.to(target_dtype)
-    # print("\n--- Converting to Fused Operations ---")
-    # from fused_ops import convert_to_fused
-    # peft_model = convert_to_fused(peft_model)
-    # print("✓ Model ready for accelerated training\n")
 
-
-    # if torch.__version__ >= "2.0":
-    #     print("Compiling model with torch.compile...")
-    #     peft_model = torch.compile(peft_model, mode="reduce-overhead")
-    # for name, module in peft_model.named_modules():
-    #     if isinstance(module, PEQATLoRAModule):
-    #         print(name)
-    # FREEZE ALL SMOOTH FACTORS AT 1.0
-    # use_smooth = False
     if not calibrate_smooth:
         # print("\n=== ABLATION: Freezing SmoothQuant factors at 1.0 ===")
         print("\n=== INITIALIZING: Smooth factors at 1.0 ===")
@@ -273,54 +194,15 @@ if __name__ == "__main__":
                     module.smooth_factor.requires_grad = False
         print("✓ All smooth factors frozen\n")
 
+    if not learn_clip:
+        print("\n=== FREEZING all CLIPS ===")
+        with torch.no_grad():
+            for name, module in peft_model.named_modules():
+                if isinstance(module, QATW4A4LinearCore):
+                    module.activation_clip.requires_grad = False
+        print("✓ All CLIPS factors frozen\n")
 
 
-    # print("\n--- LoRA Initialization Check ---")
-    # for name, module in peft_model.named_modules():
-    #     if isinstance(module, PEQATLoRAModule):
-    #         adapter_name = module.active_adapter[0]
-    #         lora_A = module.lora_A[adapter_name].weight
-    #         lora_B = module.lora_B[adapter_name].weight
-            
-    #         print(f"{name}:")
-    #         print(f"  lora_A: norm={lora_A.norm().item():.4f}, "
-    #             f"mean={lora_A.mean().item():.6f}, "
-    #             f"std={lora_A.std().item():.6f}")
-    #         print(f"  lora_B: norm={lora_B.norm().item():.4f}, "
-    #             f"mean={lora_B.mean().item():.6f}, "
-    #             f"std={lora_B.std().item():.6f}")
-    #         print(f"  scaling: {module.scaling[adapter_name]}")
-            
-    #         # Check if B is actually zero
-    #         # if lora_B.abs().max().item() < 1e-6:
-            #     print(f"  ⚠️  lora_B is zero-initialized (PEFT default)")
-
-
-    # # FIX: Reinitialize lora_B to break the zero-gradient deadlock
-    # print("\n--- Fixing LoRA Gradient Flow ---")
-    # for name, module in peft_model.named_modules():
-    #     if isinstance(module, PEQATLoRAModule):
-    #         adapter_name = module.active_adapter[0]
-    #         lora_B_module = module.lora_B[adapter_name]
-            
-    #         # Reinitialize lora_B with small non-zero values
-    #         with torch.no_grad():
-    #             # Use small random initialization instead of zeros
-    #             nn.init.normal_(lora_B_module.weight, mean=0.0, std=0.001)
-            
-    #         print(f"Reinitialized {name}.lora_B[{adapter_name}]: "
-    #             f"mean={lora_B_module.weight.mean():.6f}, "
-    #             f"std={lora_B_module.weight.std():.6f}")
-
-    # print("LoRA gradient flow fix applied\n")
-
-
-    # After quantization, configure QAT parameters to be trainable
-    # for name, param in peft_model.named_parameters():
-    #     lname = name.lower()
-    #     is_lora = ("lora" in lname)
-    #     is_qat = ("activation_clip" in lname) or ("smooth_factor" in lname)
-    #     param.requires_grad = bool(is_lora or is_qat)
 
     print("\n=== PARAMETER FILTERING DEBUG ===")
     lora_count = 0
@@ -352,11 +234,14 @@ if __name__ == "__main__":
             # print(f"OTHER: {name} -> {param.numel()} params (will be frozen)")
             other_count += param.numel()
 
-        if learn_smooth:
-            # param.requires_grad = bool(is_lora or is_qat)
-            param.requires_grad = bool(is_lora or is_qat or is_smooth)
-        else:
-            param.requires_grad = bool(is_lora or is_clip)
+        param.requires_grad = bool(is_lora or is_clip and learn_clip or is_smooth and learn_smooth)
+
+        # if learn_smooth:
+        #     # param.requires_grad = bool(is_lora or is_qat)
+        #     param.requires_grad = bool(is_lora or is_qat or is_smooth)
+        
+        # else:
+        #     param.requires_grad = bool(is_lora or is_clip)
 
     print(f"LoRA params found: {lora_count}")
     print(f"QAT params found: {qat_count}")
@@ -437,41 +322,6 @@ if __name__ == "__main__":
     
     # Choose memory-friendly settings based on device
     is_cuda = torch.cuda.is_available() and not torch.backends.mps.is_available()
-    # per_device_bs = 16 if is_cuda else 8
-    # grad_accum = 2 if is_cuda else 8
-
-    # training_args = TrainingArguments(
-    #     output_dir= output_dir,
-    #     overwrite_output_dir=False,
-    #     num_train_epochs=NUM_EPOCHS,
-    #     per_device_train_batch_size=BATCH_SIZE,
-    #     per_device_eval_batch_size=BATCH_SIZE,
-    #     gradient_accumulation_steps=GRAD_ACCUM,
-    #     max_grad_norm=5.0,
-    #     gradient_checkpointing=True,
-    #     # gradient_checkpointing=False,
-    #     gradient_checkpointing_kwargs={'use_reentrant': True},
-    #     save_strategy="epoch",
-    #     eval_strategy="epoch",
-    #     logging_steps=10,
-    #     learning_rate=LEARNING_RATE,
-    #     weight_decay=0.01,
-    #     warmup_ratio=0.3,
-    #     lr_scheduler_type="cosine_with_min_lr",
-    #     lr_scheduler_kwargs={"min_lr_rate": 0.1},
-    #     # lr_scheduler_kwargs={"num_cycles": 2},
-    #     # lr_scheduler_type="constant_with_warmup",
-    #     bf16=True, # Enable bfloat16
-    #     fp16=False,
-    #     tf32=True, # Enable for Blackwell/Ampere GPUs 
-    #     report_to="tensorboard",
-    #     load_best_model_at_end=True,
-    #     metric_for_best_model="eval_loss",
-    #     dataloader_num_workers=16,
-    #     dataloader_prefetch_factor=4,
-    #     dataloader_pin_memory=True
-    # )
-
     config.save_to_output(output_dir)
     torch.cuda.is_bf16_supported = lambda: True
 
@@ -582,8 +432,11 @@ if __name__ == "__main__":
             lora_params.append(param)
             # print(f"Added LoRA param: {name} ({param.numel()} params)")
         elif is_clip:
+            if learn_clip:
                 param.requires_grad_(True)
                 clip_params.append(param)
+            else:
+                param.requires_grad_(False)
         elif is_smooth:
             if learn_smooth:  # ← Only this check needed!
                 param.requires_grad_(True)
@@ -594,33 +447,6 @@ if __name__ == "__main__":
     print(f"Optimizer setup: {len(lora_params)} LoRA, {len(clip_params)} clip, {len(smooth_params)} smooth params")
 
 
-    # base_lr = config.get('training.learning_rate')
-    # param_groups = []
-    # # Set learning rates: LoRA uses the TrainingArguments LR; quant params use a higher LR
-    # lora_lr = training_args.learning_rate 
-    # clip_lr = training_args.learning_rate * 5
-    # smooth_lr = training_args.learning_rate * 3 
-
-
-    # param_groups = []
-    # if lora_params:
-    #     param_groups.append({
-    #         "params": lora_params, 
-    #         "lr": lora_lr, 
-    #         "weight_decay": 0.01  # Small L2 regularization for LoRA
-    #     })
-    # if clip_params:
-    #     param_groups.append({
-    #         "params": clip_params, 
-    #         "lr": clip_lr, 
-    #         "weight_decay": 0.0  # No weight decay on clip values
-    #     })
-    # if smooth_params and learn_smooth:
-    #     param_groups.append({
-    #         "params": smooth_params, 
-    #         "lr": smooth_lr, 
-    #         "weight_decay": 0.0  # No weight decay on smooth factors
-    #     })
 
     # Optimizer setup
     base_lr = float(config.get('training.learning_rate')) 

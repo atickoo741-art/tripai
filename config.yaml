@@ -2,8 +2,8 @@
 
 
 experiment:
-  name: "llama2-7b-no-learned-clips"
-  notes: "ablation with freezing clips after 99.5th init"
+  name: "llama2-7b-BOUNDARY-CLIP-BACKWARD"
+  notes: "ablation with only boundary backward term for actstequant"
   tags: ["Llama2-7B", "wikitext", "ablation", "clips"]
 # Model
 model:
@@ -28,7 +28,7 @@ calibration:
   alpha: 0.5
   learn_smooth: True
   calibrate_smooth: True
-  learn_clip: False
+  learn_clip: True
 
 # Training
 training:
@@ -60,6 +60,7 @@ training:
     adam_beta1: 0.9
     adam_beta2: 0.95
     adam_eps: 1.0e-8
+    use_quant_grad: False
   
   # Logging
   logging_steps: 10

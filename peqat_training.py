@@ -174,6 +174,15 @@ if __name__ == "__main__":
 
     quantize_model(peft_model)
 
+    use_quant_grad = config.get('optimizer.use_quant_grad', True)
+
+    # Set flag on all QAT modules
+    for module in peft_model.modules():
+        if isinstance(module, PEQATLoRAModule):
+            module.use_quant_grad = use_quant_grad
+
+    print(f"✓ Quantization gradient: {'ENABLED' if use_quant_grad else 'DISABLED (PACT-only)'}")
+
     target_dtype = torch.bfloat16 if bool(config.get('system.bf16')) else torch.float32
     peft_model = peft_model.to(target_dtype)
 

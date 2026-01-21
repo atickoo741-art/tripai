@@ -2,9 +2,9 @@
 
 
 experiment:
-  name: "llama2-7b-BOUNDARY-CLIP-BACKWARD"
-  notes: "ablation with only boundary backward term for actstequant"
-  tags: ["Llama2-7B", "wikitext", "ablation", "clips"]
+  name: "llama2-7b-rank-16-lora"
+  notes: "ablation with only lora using rank 16"
+  tags: ["Llama2-7B", "wikitext", "ablation", "lora"]
 # Model
 model:
   name: "meta-llama/Llama-2-7b-hf"
@@ -14,7 +14,7 @@ model:
 
 # LoRA
 lora:
-  rank: 32
+  rank: 16
   alpha: 64
   dropout: 0.05
   target_modules: ["q_proj", "k_proj", "v_proj", "o_proj", 
@@ -60,7 +60,7 @@ training:
     adam_beta1: 0.9
     adam_beta2: 0.95
     adam_eps: 1.0e-8
-    use_quant_grad: False
+    use_quant_grad: True
   
   # Logging
   logging_steps: 10

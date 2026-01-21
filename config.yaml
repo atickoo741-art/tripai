@@ -2,8 +2,8 @@
 
 
 experiment:
-  name: "llama2-7b-rank-16-lora"
-  notes: "ablation with only lora using rank 16"
+  name: "llama2-7b-rank-8-lora"
+  notes: "ablation with only lora using rank 8"
   tags: ["Llama2-7B", "wikitext", "ablation", "lora"]
 # Model
 model:
@@ -14,8 +14,8 @@ model:
 
 # LoRA
 lora:
-  rank: 16
-  alpha: 32
+  rank: 8
+  alpha: 16
   dropout: 0.05
   target_modules: ["q_proj", "k_proj", "v_proj", "o_proj", 
                    "gate_proj", "up_proj", "down_proj"]

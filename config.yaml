@@ -2,9 +2,9 @@
 
 
 experiment:
-  name: "llama2-7b-rank-8-lora"
-  notes: "ablation with only lora using rank 8"
-  tags: ["Llama2-7B", "wikitext", "ablation", "lora"]
+  name: "llama2-7b-5x-lr"
+  notes: "ablation with 5x qat param learning rate"
+  tags: ["Llama2-7B", "wikitext", "ablation", "learning rate"]
 # Model
 model:
   name: "meta-llama/Llama-2-7b-hf"
@@ -14,8 +14,8 @@ model:
 
 # LoRA
 lora:
-  rank: 8
-  alpha: 16
+  rank: 32
+  alpha: 64
   dropout: 0.05
   target_modules: ["q_proj", "k_proj", "v_proj", "o_proj", 
                    "gate_proj", "up_proj", "down_proj"]
@@ -54,8 +54,8 @@ training:
   # Optimizer (per-parameter group)
   optimizer:
     lora_lr_multiplier: 1.0      
-    clip_lr_multiplier: 10.0      
-    smooth_lr_multiplier: 10.0   
+    clip_lr_multiplier: 5.0      
+    smooth_lr_multiplier: 5.0   
     weight_decay: 0.01
     adam_beta1: 0.9
     adam_beta2: 0.95

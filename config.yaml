@@ -2,8 +2,8 @@
 
 
 experiment:
-  name: "llama2-7b-5x-lr"
-  notes: "ablation with 5x qat param learning rate"
+  name: "llama2-7b-25x-lr"
+  notes: "ablation with 25x qat param learning rate"
   tags: ["Llama2-7B", "wikitext", "ablation", "learning rate"]
 # Model
 model:
@@ -54,8 +54,8 @@ training:
   # Optimizer (per-parameter group)
   optimizer:
     lora_lr_multiplier: 1.0      
-    clip_lr_multiplier: 5.0      
-    smooth_lr_multiplier: 5.0   
+    clip_lr_multiplier: 25.0      
+    smooth_lr_multiplier: 25.0   
     weight_decay: 0.01
     adam_beta1: 0.9
     adam_beta2: 0.95

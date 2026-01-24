@@ -2,12 +2,12 @@
 
 
 experiment:
-  name: "llama2-13b-alpaca-1st-try"
-  notes: "llama 2 13b on alpaca"
-  tags: ["alpaca", "Llama2", "big model"]
+  name: "mistral-7b-v03-alpaca-1st-try"
+  notes: "mistral 7b on alpaca"
+  tags: ["alpaca", "Mistral"]
 # Model
 model:
-  name: "meta-llama/Llama-2-13b-hf"
+  name: "mistralai/Mistral-7B-v0.3"
   num_bits_weight: 4
   num_bits_activation: 4
   block_size: 2048
@@ -24,10 +24,11 @@ lora:
 calibration:
   num_samples: 128
   percentile: 99.5
-  steps: 500
+  steps: 200
   alpha: 0.5
   learn_smooth: True
   calibrate_smooth: True
+  learn_clip: True
 
 # Training
 training:
@@ -59,6 +60,7 @@ training:
     adam_beta1: 0.9
     adam_beta2: 0.95
     adam_eps: 1.0e-8
+    use_quant_grad: True
   
   # Logging
   logging_steps: 10

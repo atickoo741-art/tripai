@@ -2,9 +2,9 @@
 
 
 experiment:
-  name: "llama2-7b-25x-lr"
-  notes: "ablation with 25x qat param learning rate"
-  tags: ["Llama2-7B", "wikitext", "ablation", "learning rate"]
+  name: "llama2-7b-200-wiki"
+  notes: "running llama 2 7b wiki but with 200 steps calibration"
+  tags: ["Llama2-7B", "wikitext", "learning rate"]
 # Model
 model:
   name: "meta-llama/Llama-2-7b-hf"
@@ -24,7 +24,7 @@ lora:
 calibration:
   num_samples: 128
   percentile: 99.5
-  steps: 50
+  steps: 200
   alpha: 0.5
   learn_smooth: True
   calibrate_smooth: True
@@ -54,8 +54,8 @@ training:
   # Optimizer (per-parameter group)
   optimizer:
     lora_lr_multiplier: 1.0      
-    clip_lr_multiplier: 25.0      
-    smooth_lr_multiplier: 25.0   
+    clip_lr_multiplier: 10.0      
+    smooth_lr_multiplier: 10.0   
     weight_decay: 0.01
     adam_beta1: 0.9
     adam_beta2: 0.95

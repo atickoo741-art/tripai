@@ -2,8 +2,8 @@
 
 
 experiment:
-  name: "mistral-7b-v03-alpaca-1st-try"
-  notes: "mistral 7b on alpaca"
+  name: "mistral-7b-v03-multi-checkpoints-alpaca"
+  notes: "mistral 7b on alpaca with saving checkpoints every 300 steps"
   tags: ["alpaca", "Mistral"]
 # Model
 model:
@@ -33,7 +33,7 @@ calibration:
 # Training
 training:
   output_dir: "./output_qat_lora"
-  num_epochs: 6
+  num_epochs: 2
   batch_size: 16
   gradient_accumulation_steps: 2
   max_grad_norm: 5.0
@@ -64,8 +64,10 @@ training:
   
   # Logging
   logging_steps: 10
-  save_strategy: "epoch"
-  eval_strategy: "epoch"
+  eval_strategy: "steps"
+  eval_steps: 300
+  save_strategy: "steps"
+  save_steps: 300
 
 # Dataset
 dataset:

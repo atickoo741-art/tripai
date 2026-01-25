@@ -65,8 +65,8 @@ def custom_eval(peft_model, tokenizer, device, trainer_ppl):
 
 
 if __name__ == "__main__":
-    config = Config("config.yaml")
-    # config = Config("alpaca_config.yaml")
+    # config = Config("config.yaml")
+    config = Config("alpaca_config.yaml")
     print("=" * 60)
     print(f"Experiment: {config.get('experiment.name')}")
     print(f"Run ID: {config.run_id}")
@@ -347,7 +347,9 @@ if __name__ == "__main__":
     gradient_checkpointing_kwargs={'use_reentrant': config.get('training.use_reentrant', False)},
     save_strategy=config.get('training.save_strategy'),
     eval_strategy=config.get('training.eval_strategy'),
-    logging_steps=config.get('training.logging_steps'),
+    save_steps=config.get('training.save_steps', None), 
+    eval_steps=config.get('training.eval_steps', None),
+    logging_steps=config.get('training.logging_steps', None),
     learning_rate=float(config.get('training.learning_rate')),
     warmup_ratio=float(config.get('training.warmup_ratio')),
     lr_scheduler_type=config.get('training.lr_scheduler_type'),

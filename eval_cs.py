@@ -6,7 +6,7 @@ Uses lm-evaluation-harness with your trained checkpoints
 import torch
 import argparse
 from transformers import AutoTokenizer
-from fake_quant import load_peqat_model
+from fake_quant import PEQATLoRAModule, load_peqat_model
 import subprocess
 import json
 import os
@@ -84,13 +84,13 @@ def run_lm_eval(checkpoint_path: str,
         print("=" * 70)
         
         # Step 0: Clean adapter config
-        print("Step 0/3: Cleaning adapter_config.json...")
+        print("Step 0/4: Cleaning adapter_config.json...")
         backup_path = clean_adapter_config(checkpoint_path)
         print("✓ Config cleaned")
         
         try:
             # Step 1: Load PEQAT model
-            print("Step 1/3: Loading PEQAT model with quantization...")
+            print("Step 1/4: Loading PEQAT model with quantization...")
             device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
             model, tokenizer = load_peqat_model(
                 adapter_dir=checkpoint_path,
@@ -99,8 +99,15 @@ def run_lm_eval(checkpoint_path: str,
             )
             print(f"✓ Model loaded on {device}")
             
+            # Step 1.5: Set use_quant_grad flag (required for forward pass)
+            print("Step 1.5/4: Setting quantization gradient flag...")
+            for module in model.modules():
+                if isinstance(module, PEQATLoRAModule):
+                    module.use_quant_grad = True  # Enable PE-QAT gradients
+            print("✓ Quantization gradient flag set")
+            
             # Step 2: Merge LoRA into base model
-            print("Step 2/3: Merging LoRA adapters into base weights...")
+            print("Step 2/4: Merging LoRA adapters into base weights...")
             model = model.merge_and_unload()
             print("✓ LoRA merged")
             print("=" * 70 + "\n")
@@ -110,15 +117,13 @@ def run_lm_eval(checkpoint_path: str,
             restore_adapter_config(checkpoint_path, backup_path)
             print("✓ Original config restored\n")
         
-        # Step 3: Create HFLM wrapper with the already-loaded model
-        print("Step 3/3: Creating evaluation wrapper...")
-        
-        # Wrap the model in lm_eval's format
+        # Step 3: Create HFLM wrapper
+        print("Step 3/4: Creating evaluation wrapper...")
         lm = HFLM(pretrained=model, tokenizer=tokenizer, batch_size=batch_size)
         print("✓ Model wrapped for evaluation")
         
     else:
-        # It's a baseline HF model - load it normally
+        # Baseline model
         print(f"Type: Base Model (will be loaded by lm_eval)")
         lm = HFLM(pretrained=checkpoint_path, batch_size=batch_size)
     

@@ -60,10 +60,21 @@ def run_lm_eval(checkpoint_path: str,
                 output_path: str = None):
     """
     Run lm-evaluation-harness on PEQAT checkpoint
-    Uses Python API to avoid lm_eval's buggy model loading
+    
+    Args:
+        checkpoint_path: Path to PEQAT checkpoint directory
+        base_model: Base model name (e.g., meta-llama/Llama-2-13b-hf)
+        tasks: Comma-separated task names
+        num_fewshot: Number of few-shot examples
+        batch_size: Batch size for evaluation
+        output_path: Where to save results JSON
+    
+    Returns:
+        True if successful, False otherwise
     """
-    from lm_eval import evaluator
+    from lm_eval import simple_evaluate
     from lm_eval.models.huggingface import HFLM
+    from fake_quant import PEQATLoRAModule
     
     # Determine output path
     if output_path is None:
@@ -71,107 +82,143 @@ def run_lm_eval(checkpoint_path: str,
         parent_dir = os.path.dirname(checkpoint_path)
         output_path = os.path.join(parent_dir, f"eval_results_{checkpoint_name}.json")
     
-    print(f"\n🔍 Running LM Evaluation")
-    print(f"   Checkpoint: {checkpoint_path}")
-    print(f"   Tasks: {tasks}")
-    print(f"   Few-shot: {num_fewshot}")
-    print(f"   Output: {output_path}\n")
+    print(f"\n{'='*70}")
+    print("🔍 PEQAT EVALUATION")
+    print(f"{'='*70}")
+    print(f"Checkpoint: {checkpoint_path}")
+    print(f"Base Model: {base_model}")
+    print(f"Tasks:      {tasks}")
+    print(f"Few-shot:   {num_fewshot}")
+    print(f"Batch size: {batch_size}")
+    print(f"Output:     {output_path}")
+    print(f"{'='*70}\n")
     
+    # Check if this is a PEFT checkpoint or base model
     is_peft = os.path.isdir(checkpoint_path) or "checkpoint" in checkpoint_path
 
     if is_peft:
-        print(f"Type: PEFT Adapter (will merge before evaluation)")
-        print("=" * 70)
+        print("Type: PEFT Adapter (requires merging)")
+        print(f"{'='*70}\n")
         
         # Step 0: Clean adapter config
-        print("Step 0/4: Cleaning adapter_config.json...")
+        print("[1/5] Cleaning adapter_config.json...")
         backup_path = clean_adapter_config(checkpoint_path)
-        print("✓ Config cleaned")
+        print("      ✓ Config cleaned\n")
         
         try:
             # Step 1: Load PEQAT model
-            print("Step 1/4: Loading PEQAT model with quantization...")
+            print("[2/5] Loading PEQAT model with quantization...")
             device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
             model, tokenizer = load_peqat_model(
                 adapter_dir=checkpoint_path,
                 base_model_name=base_model,
                 device=device
             )
-            print(f"✓ Model loaded on {device}")
+            print(f"      ✓ Model loaded on {device}\n")
             
-            # Step 1.5: Set use_quant_grad flag (required for forward pass)
-            print("Step 1.5/4: Setting quantization gradient flag...")
+            # Step 2: Set use_quant_grad flag (required for forward pass)
+            print("[3/5] Setting quantization gradient flags...")
             for module in model.modules():
                 if isinstance(module, PEQATLoRAModule):
-                    module.use_quant_grad = True  # Enable PE-QAT gradients
-            print("✓ Quantization gradient flag set")
+                    module.use_quant_grad = True
+            print("      ✓ Quantization flags set\n")
             
-            # Step 2: Merge LoRA into base model
-            print("Step 2/4: Merging LoRA adapters into base weights...")
+            # Step 3: Merge LoRA into base model
+            print("[4/5] Merging LoRA adapters...")
             model = model.merge_and_unload()
-            print("✓ LoRA merged")
-            print("=" * 70 + "\n")
-
-            print("Step 2.5/4: Converting to BFloat16...")
+            print("      ✓ LoRA merged\n")
+            
+            # Step 4: Ensure dtype consistency
+            print("      Converting to BFloat16...")
             model = model.to(torch.bfloat16)
+            # Double-check all parameters
+            for param in model.parameters():
+                if param.dtype != torch.bfloat16:
+                    param.data = param.data.to(torch.bfloat16)
+            for buffer in model.buffers():
+                if buffer.is_floating_point() and buffer.dtype != torch.bfloat16:
+                    buffer.data = buffer.data.to(torch.bfloat16)
+            print("      ✓ All tensors converted to BFloat16\n")
             
         finally:
-            # Restore original config
+            # Always restore original config
             restore_adapter_config(checkpoint_path, backup_path)
-            print("✓ Original config restored\n")
+            print("      ✓ Original config restored\n")
         
-        # Step 3: Create HFLM wrapper
-        print("Step 3/4: Creating evaluation wrapper...")
+        # Step 5: Create evaluation wrapper
+        print("[5/5] Creating evaluation wrapper...")
         lm = HFLM(pretrained=model, tokenizer=tokenizer, batch_size=batch_size)
-        print("✓ Model wrapped for evaluation")
+        print("      ✓ Model wrapped for evaluation\n")
         
     else:
-        # Baseline model
-        print(f"Type: Base Model (will be loaded by lm_eval)")
+        # Base model evaluation
+        print("Type: Base Model (HuggingFace Hub)\n")
+        print("[1/1] Loading model...")
         lm = HFLM(pretrained=checkpoint_path, batch_size=batch_size)
+        print("      ✓ Model loaded\n")
     
-    print(f"\n{'='*70}")
-    print("Running evaluation...")
+    # Run evaluation
+    print(f"{'='*70}")
+    print("RUNNING EVALUATION")
     print(f"{'='*70}\n")
     
-    # Run evaluation using Python API
     task_list = tasks.split(',')
     
-    results = evaluator.simple_evaluate(
-        model=lm,
-        tasks=task_list,
-        num_fewshot=num_fewshot,
-        batch_size=batch_size,
-    )
+    try:
+        results = simple_evaluate(
+            model=lm,
+            tasks=task_list,
+            num_fewshot=num_fewshot,
+            batch_size=batch_size,
+            log_samples=False,
+        )
+    except Exception as e:
+        print(f"\n❌ Evaluation failed: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
     
     print(f"\n{'='*70}")
+    print("SAVING RESULTS")
+    print(f"{'='*70}\n")
     
-    # Save results
-    os.makedirs(os.path.dirname(output_path), exist_ok=True)
-    with open(output_path, 'w') as f:
-        json.dump(results, f, indent=2)
+    # Prepare output structure
+    output_dict = {
+        "results": results.get("results", {}),
+        "versions": results.get("versions", {}),
+        "config": {
+            "model": checkpoint_path,
+            "base_model": base_model,
+            "model_args": f"checkpoint={checkpoint_path}",
+            "tasks": task_list,
+            "num_fewshot": num_fewshot,
+            "batch_size": batch_size,
+        }
+    }
     
-    print(f"\n✅ Evaluation complete! Results saved to {output_path}")
+    # Ensure directory exists
+    output_dir = os.path.dirname(output_path)
+    if output_dir:
+        os.makedirs(output_dir, exist_ok=True)
+    
+    # Save results (use default=str to handle any non-serializable types)
+    try:
+        with open(output_path, 'w') as f:
+            json.dump(output_dict, f, indent=2, default=str)
+        print(f"✅ Results saved to: {output_path}\n")
+    except Exception as e:
+        print(f"❌ Failed to save JSON: {e}")
+        # Fallback: save as pickle
+        import pickle
+        pickle_path = output_path.replace('.json', '.pkl')
+        with open(pickle_path, 'wb') as f:
+            pickle.dump(results, f)
+        print(f"⚠️  Saved as pickle instead: {pickle_path}\n")
+    
+    # Display results summary
     display_results(results, tasks)
     
     return True
-
-def display_results(results: dict, tasks: str):
-    """Pretty print evaluation results"""
-    print("\n" + "="*70)
-    print("EVALUATION RESULTS")
-    print("="*70)
-    
-    if "results" in results:
-        for task_name, metrics in results["results"].items():
-            print(f"\n{task_name}:")
-            for metric_name, value in metrics.items():
-                if isinstance(value, float):
-                    print(f"  {metric_name}: {value:.4f}")
-                else:
-                    print(f"  {metric_name}: {value}")
-    
-    print("="*70 + "\n")
 
 
 def main():

@@ -13,6 +13,45 @@ import os
 import shutil
 
 
+def clean_adapter_config(checkpoint_path):
+    """Temporarily clean adapter_config.json of unsupported keys"""
+    config_path = os.path.join(checkpoint_path, "adapter_config.json")
+    backup_path = os.path.join(checkpoint_path, "adapter_config.json.backup")
+    
+    # Read original config
+    with open(config_path, 'r') as f:
+        config = json.load(f)
+    
+    # Backup original
+    with open(backup_path, 'w') as f:
+        json.dump(config, f, indent=2)
+    
+    # Keep only valid LoraConfig keys
+    valid_keys = {
+        'r', 'lora_alpha', 'target_modules', 'lora_dropout', 'bias', 
+        'task_type', 'inference_mode', 'modules_to_save', 'init_lora_weights',
+        'layers_to_transform', 'layers_pattern', 'rank_pattern', 'alpha_pattern',
+        'fan_in_fan_out', 'peft_type', 'base_model_name_or_path'
+    }
+    
+    cleaned_config = {k: v for k, v in config.items() if k in valid_keys}
+    
+    # Write cleaned config
+    with open(config_path, 'w') as f:
+        json.dump(cleaned_config, f, indent=2)
+    
+    return backup_path
+
+
+def restore_adapter_config(checkpoint_path, backup_path):
+    """Restore original adapter_config.json"""
+    config_path = os.path.join(checkpoint_path, "adapter_config.json")
+    
+    if os.path.exists(backup_path):
+        shutil.copy(backup_path, config_path)
+        os.remove(backup_path)
+
+
 def run_lm_eval(checkpoint_path: str, 
                 base_model: str = "meta-llama/Llama-2-7b-hf",
                 tasks: str = "mmlu",
@@ -42,38 +81,49 @@ def run_lm_eval(checkpoint_path: str,
         print(f"Type: PEFT Adapter (will merge before evaluation)")
         print("=" * 70)
         
-        # Step 1: Load PEQAT model
-        print("Step 1/3: Loading PEQAT model with quantization...")
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        model, tokenizer = load_peqat_model(
-            adapter_dir=checkpoint_path,
-            base_model_name=base_model,
-            device=device
-        )
-        print(f"✓ Model loaded on {device}")
+        # Step 0: Clean adapter config
+        print("Step 0/3: Cleaning adapter_config.json...")
+        backup_path = clean_adapter_config(checkpoint_path)
+        print("✓ Config cleaned")
         
-        # Step 2: Merge LoRA into base model
-        print("Step 2/3: Merging LoRA adapters into base weights...")
-        model = model.merge_and_unload()
-        print("✓ LoRA merged")
-        
-        # Step 3: Save merged model temporarily
-        temp_merged_path = f"{checkpoint_path}_merged_temp"
-        os.makedirs(temp_merged_path, exist_ok=True)
-        
-        print(f"Step 3/3: Saving merged model to {temp_merged_path}...")
-        model.save_pretrained(temp_merged_path)
-        tokenizer.save_pretrained(temp_merged_path)
-        print("✓ Merged model saved")
-        print("=" * 70 + "\n")
-        
-        # Evaluate the merged model (not PEFT)
-        model_args = f"pretrained={temp_merged_path}"
-        cleanup_after = True
-        
-        # Free memory
-        del model
-        torch.cuda.empty_cache()
+        try:
+            # Step 1: Load PEQAT model
+            print("Step 1/3: Loading PEQAT model with quantization...")
+            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            model, tokenizer = load_peqat_model(
+                adapter_dir=checkpoint_path,
+                base_model_name=base_model,
+                device=device
+            )
+            print(f"✓ Model loaded on {device}")
+            
+            # Step 2: Merge LoRA into base model
+            print("Step 2/3: Merging LoRA adapters into base weights...")
+            model = model.merge_and_unload()
+            print("✓ LoRA merged")
+            
+            # Step 3: Save merged model temporarily
+            temp_merged_path = f"{checkpoint_path}_merged_temp"
+            os.makedirs(temp_merged_path, exist_ok=True)
+            
+            print(f"Step 3/3: Saving merged model to {temp_merged_path}...")
+            model.save_pretrained(temp_merged_path)
+            tokenizer.save_pretrained(temp_merged_path)
+            print("✓ Merged model saved")
+            print("=" * 70 + "\n")
+            
+            # Evaluate the merged model (not PEFT)
+            model_args = f"pretrained={temp_merged_path}"
+            cleanup_after = True
+            
+            # Free memory
+            del model
+            torch.cuda.empty_cache()
+            
+        finally:
+            # Always restore original config
+            restore_adapter_config(checkpoint_path, backup_path)
+            print("✓ Original config restored")
         
     else:
         # It's a baseline HF model

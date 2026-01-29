@@ -60,8 +60,10 @@ def run_lm_eval(checkpoint_path: str,
                 output_path: str = None):
     """
     Run lm-evaluation-harness on PEQAT checkpoint
-    Merges LoRA adapters before evaluation to avoid lm_eval PEFT bugs
+    Uses Python API to avoid lm_eval's buggy model loading
     """
+    from lm_eval import evaluator
+    from lm_eval.models.huggingface import HFLM
     
     # Determine output path
     if output_path is None:
@@ -69,7 +71,7 @@ def run_lm_eval(checkpoint_path: str,
         parent_dir = os.path.dirname(checkpoint_path)
         output_path = os.path.join(parent_dir, f"eval_results_{checkpoint_name}.json")
     
-    print(f"\n🔍 Running LM Evaluation Harness")
+    print(f"\n🔍 Running LM Evaluation")
     print(f"   Checkpoint: {checkpoint_path}")
     print(f"   Tasks: {tasks}")
     print(f"   Few-shot: {num_fewshot}")
@@ -101,80 +103,50 @@ def run_lm_eval(checkpoint_path: str,
             print("Step 2/3: Merging LoRA adapters into base weights...")
             model = model.merge_and_unload()
             print("✓ LoRA merged")
-            
-            # Step 3: Save merged model temporarily
-            temp_merged_path = f"{checkpoint_path}_merged_temp"
-            os.makedirs(temp_merged_path, exist_ok=True)
-            
-            print(f"Step 3/3: Saving merged model to {temp_merged_path}...")
-            model.save_pretrained(temp_merged_path)
-            tokenizer.save_pretrained(temp_merged_path)
-            print("✓ Merged model saved")
             print("=" * 70 + "\n")
             
-            # Evaluate the merged model (not PEFT)
-            model_args = f"pretrained={temp_merged_path}"
-            cleanup_after = True
-            
-            # Free memory
-            del model
-            torch.cuda.empty_cache()
-            
         finally:
-            # Always restore original config
+            # Restore original config
             restore_adapter_config(checkpoint_path, backup_path)
-            print("✓ Original config restored")
+            print("✓ Original config restored\n")
+        
+        # Step 3: Create HFLM wrapper with the already-loaded model
+        print("Step 3/3: Creating evaluation wrapper...")
+        
+        # Wrap the model in lm_eval's format
+        lm = HFLM(pretrained=model, tokenizer=tokenizer, batch_size=batch_size)
+        print("✓ Model wrapped for evaluation")
         
     else:
-        # It's a baseline HF model
-        print(f"Type: Base Model (HF Hub)")
-        model_args = f"pretrained={checkpoint_path}"
-        cleanup_after = False
-        temp_merged_path = None
+        # It's a baseline HF model - load it normally
+        print(f"Type: Base Model (will be loaded by lm_eval)")
+        lm = HFLM(pretrained=checkpoint_path, batch_size=batch_size)
     
-    print(f"Model Args: {model_args}")
-
-    # Build lm_eval command
-    cmd = [
-        "lm_eval",
-        "--model", "hf",
-        "--model_args", model_args,
-        "--tasks", tasks,
-        "--num_fewshot", str(num_fewshot),
-        "--device", "cuda",
-        "--batch_size", str(batch_size),
-        "--output_path", output_path,
-    ]
+    print(f"\n{'='*70}")
+    print("Running evaluation...")
+    print(f"{'='*70}\n")
     
-    print(f"Running: {' '.join(cmd)}\n")
-    print("=" * 70)
+    # Run evaluation using Python API
+    task_list = tasks.split(',')
     
-    # Run evaluation
-    result = subprocess.run(cmd, capture_output=False, text=True)
+    results = evaluator.simple_evaluate(
+        model=lm,
+        tasks=task_list,
+        num_fewshot=num_fewshot,
+        batch_size=batch_size,
+    )
     
-    print("=" * 70)
+    print(f"\n{'='*70}")
     
-    # Cleanup temporary merged model
-    if cleanup_after and temp_merged_path and os.path.exists(temp_merged_path):
-        print(f"\n🧹 Cleaning up temporary merged model at {temp_merged_path}...")
-        shutil.rmtree(temp_merged_path)
-        print("✓ Cleanup complete")
+    # Save results
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    with open(output_path, 'w') as f:
+        json.dump(results, f, indent=2)
     
-    if result.returncode == 0:
-        print(f"\n✅ Evaluation complete! Results saved to {output_path}")
-        
-        try:
-            with open(output_path, 'r') as f:
-                results = json.load(f)
-                display_results(results, tasks)
-        except Exception as e:
-            print(f"Note: Could not display results ({e})")
-    else:
-        print(f"\n❌ Evaluation failed with return code {result.returncode}")
-        return False
+    print(f"\n✅ Evaluation complete! Results saved to {output_path}")
+    display_results(results, tasks)
     
     return True
-
 
 def display_results(results: dict, tasks: str):
     """Pretty print evaluation results"""

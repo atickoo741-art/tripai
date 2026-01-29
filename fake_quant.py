@@ -553,6 +553,13 @@ def load_peqat_model(adapter_dir: str, base_model_name: str = "gpt2", device: to
     with open(adapter_config_path, 'r') as f:
         lora_config_dict = json.load(f)
     
+
+    unsupported_keys = ['alora_invocation_tokens', 'layer_replication', 'use_rslora', 'use_dora']
+    for key in unsupported_keys:
+        if key in lora_config_dict:
+            print(f"  Removing unsupported config key: '{key}'")
+            lora_config_dict.pop(key)
+
     # print(lora_config_dict)
     # Create LoraConfig object
     lora_config = LoraConfig(**lora_config_dict)

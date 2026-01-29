@@ -111,6 +111,9 @@ def run_lm_eval(checkpoint_path: str,
             model = model.merge_and_unload()
             print("✓ LoRA merged")
             print("=" * 70 + "\n")
+
+            print("Step 2.5/4: Converting to BFloat16...")
+            model = model.to(torch.bfloat16)
             
         finally:
             # Restore original config

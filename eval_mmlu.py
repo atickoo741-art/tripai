@@ -79,11 +79,10 @@ def run_lm_eval(checkpoint_path: str,
 
     if is_peft:
         print(f"Type: PEFT Adapter (Local path)")
-        model_args = f"pretrained={base_model},peft={checkpoint_path},dtype=bfloat16"
+        model_args = f"pretrained={base_model},peft={checkpoint_path}" 
     else:
-        # It's a baseline HF model (e.g. meta-llama/Llama-2-7b-hf)
         print(f"Type: Base Model (HF Hub)")
-        model_args = f"pretrained={checkpoint_path},dtype=bfloat16"
+        model_args = f"pretrained={checkpoint_path}" 
     
     print(f"Model Args: {model_args}")  # Debug print
 

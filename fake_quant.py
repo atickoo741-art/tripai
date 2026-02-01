@@ -553,6 +553,7 @@ def load_peqat_model(adapter_dir: str, base_model_name: str = "gpt2", device: to
     with open(adapter_config_path, 'r') as f:
         lora_config_dict = json.load(f)
     
+
     # print(lora_config_dict)
     # Create LoraConfig object
     lora_config = LoraConfig(**lora_config_dict)

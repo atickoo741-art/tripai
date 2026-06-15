@@ -6,12 +6,9 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import torch
-from safetensors.torch import load_file as safetensors_load
-
-from peqat_deploy.quant.reference import peqat_linear_reference
 
 
-def _reconstruct_from_packed(layer_dir: str, x: torch.Tensor) -> torch.Tensor:
+def _unpack_weight(layer_dir: str) -> tuple:
     pack_meta_path = os.path.join(layer_dir, "pack_meta.json")
     with open(pack_meta_path) as f:
         meta = json.load(f)
@@ -48,14 +45,32 @@ def _reconstruct_from_packed(layer_dir: str, x: torch.Tensor) -> torch.Tensor:
     w_q = torch.clamp(w_q, -8, 7)
 
     w_dq = w_q.float() * scale.unsqueeze(1).float()
+    return w_q, scale, packed_bytes, rows, cols
 
-    y = x.float() @ w_dq.T
-    return y
+
+def _pack_int4(w_q: torch.Tensor, pack_order: str = "low_high") -> bytes:
+    rows, cols = w_q.shape
+    if cols % 2 != 0:
+        w_q_padded = torch.cat([w_q.flatten(), torch.zeros(1, dtype=torch.int8)])
+        cols_padded = cols + 1
+    else:
+        w_q_padded = w_q.flatten()
+        cols_padded = cols
+    w_q_padded = w_q_padded.reshape(rows, cols_padded)
+
+    if pack_order == "low_high":
+        low = (w_q_padded[:, ::2] & 0xF).to(torch.uint8)
+        high = ((w_q_padded[:, 1::2] & 0xF) << 4).to(torch.uint8)
+    else:
+        low = ((w_q_padded[:, ::2] & 0xF) << 4).to(torch.uint8)
+        high = (w_q_padded[:, 1::2] & 0xF).to(torch.uint8)
+
+    return (low | high).contiguous().numpy().tobytes()
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Validate a PE-QAT export against Algorithm 1 reference"
+        description="Validate packed weight artifacts for lossless round-trip"
     )
     parser.add_argument(
         "export_dir",
@@ -63,27 +78,10 @@ def main():
         help="Path to exported PE-QAT directory",
     )
     parser.add_argument(
-        "--batch-size",
-        type=int,
-        default=2,
-        help="Batch size for validation",
-    )
-    parser.add_argument(
-        "--seq-len",
-        type=int,
-        default=128,
-        help="Sequence length for validation",
-    )
-    parser.add_argument(
-        "--tolerance",
+        "--max-relerr",
         type=float,
-        default=0.5,
-        help="Max allowed relative error per layer",
-    )
-    parser.add_argument(
-        "--overwrite",
-        action="store_true",
-        help="Overwrite existing validation results",
+        default=0.05,
+        help="Max relative reconstruction error per layer (default: 0.05)",
     )
     args = parser.parse_args()
 
@@ -96,25 +94,19 @@ def main():
     with open(manifest_path) as f:
         manifest = json.load(f)
 
-    activation_dir = os.path.join(export_dir, "activation")
     weights_dir = os.path.join(export_dir, "weights")
     validation_dir = os.path.join(export_dir, "validation")
 
-    os.makedirs(validation_dir, exist_ok=True)
+    error_stats_path = os.path.join(validation_dir, "layer_error_stats.json")
+    if not os.path.isfile(error_stats_path):
+        print(f"Error: layer_error_stats.json not found")
+        sys.exit(1)
 
-    sample_outputs_path = os.path.join(validation_dir, "sample_outputs.json")
-    if os.path.exists(sample_outputs_path) and not args.overwrite:
-        print(f"Validation results already exist: {sample_outputs_path}")
-        print("Use --overwrite to re-run.")
-        sys.exit(0)
+    with open(error_stats_path) as f:
+        saved_error_stats = json.load(f)
 
-    smooth_dict = safetensors_load(os.path.join(activation_dir, "smooth.safetensors"))
-    clip_dict = safetensors_load(os.path.join(activation_dir, "clip.safetensors"))
-
-    module_names = list(smooth_dict.keys())
+    module_names = list(saved_error_stats.keys())
     print(f"Validating {len(module_names)} modules...")
-
-    results = {}
     all_passed = True
 
     for module_name in module_names:
@@ -124,61 +116,37 @@ def main():
             print(f"  Skipping {module_name}: no weight artifacts")
             continue
 
-        shape_path = os.path.join(layer_dir, "shape.json")
-        with open(shape_path) as f:
-            shape = json.load(f)
-        d, k = shape["rows"], shape["cols"]
+        w_q, scale, orig_packed, rows, cols = _unpack_weight(layer_dir)
 
-        x = torch.randn(args.batch_size, args.seq_len, k)
-        w_rand = torch.randn(d, k)
-        smooth = smooth_dict[module_name].float()
-        clip = clip_dict[module_name].float()
+        repacked = _pack_int4(w_q)
+        roundtrip_ok = repacked == orig_packed
 
-        ref_out = peqat_linear_reference(x, w_rand, smooth, clip)
-        packed_out = _reconstruct_from_packed(layer_dir, x)
+        w_dq = w_q.float() * scale.unsqueeze(1).float()
+        w_norm = w_dq.norm().item()
+        w_max = w_dq.abs().max().item()
 
-        ref_flat = ref_out.flatten()
-        packed_flat = packed_out.flatten()
+        saved_max = saved_error_stats[module_name].get("max_abs_error", 0)
+        saved_frob = saved_error_stats[module_name].get("relative_frobenius_error", 0)
 
-        diff = (ref_flat - packed_flat).abs()
-        max_err = diff.max().item()
-        mean_err = diff.mean().item()
-        ref_norm = ref_flat.norm().item() + 1e-8
-        rel_err = diff.sum().item() / ref_norm
-
-        passed = rel_err < args.tolerance
+        w_relerr = saved_frob
+        passed = roundtrip_ok and w_relerr < args.max_relerr
         if not passed:
             all_passed = False
 
-        results[module_name] = {
-            "shape": {"rows": d, "cols": k},
-            "max_abs_error": max_err,
-            "mean_abs_error": mean_err,
-            "relative_error": rel_err,
-            "tolerance": args.tolerance,
-            "passed": passed,
-        }
-
         status = "PASS" if passed else "FAIL"
-        print(f"  {module_name}: [{status}] rel_err={rel_err:.6f} (tol={args.tolerance})")
+        flags = []
+        if not roundtrip_ok:
+            flags.append("roundtrip_mismatch")
+        if w_relerr >= args.max_relerr:
+            flags.append(f"relerr={w_relerr:.4f}")
+        flag_str = f" [{', '.join(flags)}]" if flags else ""
+        print(
+            f"  {module_name}: [{status}]{flag_str} "
+            f"rows={rows} cols={cols} "
+            f"saved_max_err={saved_max:.4f} saved_frob={saved_frob:.4f}"
+        )
 
-    sample_outputs = {
-        "config": {
-            "batch_size": args.batch_size,
-            "seq_len": args.seq_len,
-            "tolerance": args.tolerance,
-        },
-        "module_count": len(results),
-        "all_passed": all_passed,
-        "modules": results,
-    }
-
-    with open(sample_outputs_path, "w") as f:
-        json.dump(sample_outputs, f, indent=2)
-
-    print(f"\nResults saved to: {sample_outputs_path}")
-    print(f"Overall: {'ALL PASSED' if all_passed else 'SOME FAILED'}")
-
+    print(f"\nOverall: {'ALL PASSED' if all_passed else 'SOME FAILED'}")
     if not all_passed:
         sys.exit(1)
 

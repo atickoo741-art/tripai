@@ -11,3 +11,7 @@ __pycache__/
 data/
 EOF
 test_fusing.py
+full_commits.txt
+cleaned_commits.txt
+.gitignore
+commits.json

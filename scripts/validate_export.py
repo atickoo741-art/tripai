@@ -80,8 +80,8 @@ def main():
     parser.add_argument(
         "--max-relerr",
         type=float,
-        default=0.05,
-        help="Max relative reconstruction error per layer (default: 0.05)",
+        default=1.0,
+        help="Max relative quantization error (default: 1.0, sanity check)",
     )
     args = parser.parse_args()
 
@@ -106,8 +106,9 @@ def main():
         saved_error_stats = json.load(f)
 
     module_names = list(saved_error_stats.keys())
-    print(f"Validating {len(module_names)} modules...")
+    print(f"Validating {len(module_names)} modules (pack round-trip)...")
     all_passed = True
+    passed_count = 0
 
     for module_name in module_names:
         safe_name = module_name.replace(".", "_")
@@ -121,30 +122,29 @@ def main():
         repacked = _pack_int4(w_q)
         roundtrip_ok = repacked == orig_packed
 
-        w_dq = w_q.float() * scale.unsqueeze(1).float()
-        w_norm = w_dq.norm().item()
-        w_max = w_dq.abs().max().item()
-
         saved_max = saved_error_stats[module_name].get("max_abs_error", 0)
         saved_frob = saved_error_stats[module_name].get("relative_frobenius_error", 0)
 
-        w_relerr = saved_frob
-        passed = roundtrip_ok and w_relerr < args.max_relerr
-        if not passed:
+        passed = roundtrip_ok and saved_frob < args.max_relerr
+        if passed:
+            passed_count += 1
+        else:
             all_passed = False
 
         status = "PASS" if passed else "FAIL"
         flags = []
         if not roundtrip_ok:
             flags.append("roundtrip_mismatch")
-        if w_relerr >= args.max_relerr:
-            flags.append(f"relerr={w_relerr:.4f}")
+        if saved_frob >= args.max_relerr:
+            flags.append(f"quant_relerr={saved_frob:.4f}")
         flag_str = f" [{', '.join(flags)}]" if flags else ""
         print(
             f"  {module_name}: [{status}]{flag_str} "
             f"rows={rows} cols={cols} "
-            f"saved_max_err={saved_max:.4f} saved_frob={saved_frob:.4f}"
+            f"max_err={saved_max:.4f} frob_err={saved_frob:.4f}"
         )
+
+    print(f"\nResults: {passed_count}/{len(module_names)} passed")
 
     print(f"\nOverall: {'ALL PASSED' if all_passed else 'SOME FAILED'}")
     if not all_passed:

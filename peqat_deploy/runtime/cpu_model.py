@@ -58,12 +58,16 @@ class PackedQuantizedLinear(nn.Module):
         self.out_features = rows
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        w_dq = self.w_q.float() * self.scale.unsqueeze(1)
-        x_smooth = x / self.smooth.unsqueeze(0)
-        x_clipped = torch.clamp(x_smooth, -self.clip, self.clip)
-        s_x = (self.clip / 7.0).unsqueeze(0)
+        dtype = x.dtype
+        smooth = self.smooth.to(dtype=dtype)
+        clip = self.clip.to(dtype=dtype)
+        scale = self.scale.to(dtype=dtype)
+        w_dq = self.w_q.float().to(dtype=dtype) * scale.unsqueeze(1)
+        x_smooth = x / smooth.unsqueeze(0)
+        x_clipped = torch.clamp(x_smooth, -clip, clip)
+        s_x = (clip / 7.0).unsqueeze(0)
         x_q = torch.clamp(torch.round(x_clipped / s_x), -8, 7)
-        x_dq = x_q * s_x
+        x_dq = x_q.to(dtype=dtype) * s_x
         return x_dq @ w_dq.T
 
 

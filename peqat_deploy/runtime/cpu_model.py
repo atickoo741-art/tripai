@@ -82,7 +82,6 @@ def build_packed_model(
         torch_dtype=torch.float16,
         low_cpu_mem_usage=True,
     )
-    model = model.to(device)
     model.eval()
 
     smooth_dict = safetensors_load(os.path.join(export_dir, "activation", "smooth.safetensors"))
@@ -107,6 +106,8 @@ def build_packed_model(
         for part in parent_path.split("."):
             parent = getattr(parent, part)
         setattr(parent, child_name, new_module)
+
+    model = model.to(device)
 
     print(f"  Replaced {len(replacements)} target linear layers with packed quantized versions")
     return model, tokenizer, replacements

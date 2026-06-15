@@ -1,4 +1,5 @@
 import argparse
+import gc
 import os
 import sys
 
@@ -106,6 +107,11 @@ def main():
         job.lora_alpha,
     )
     print(f"  Merged {len(merged_weights)} target modules")
+
+    del base_model
+    del peft_model
+    gc.collect()
+    print("  Freed base model and adapter from memory")
 
     # Step 5: Extract quantization parameters
     print("\n[5/8] Extracting quantization parameters...")

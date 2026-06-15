@@ -41,8 +41,8 @@ def _unpack_weight(layer_dir: str) -> tuple:
         high = packed & 0xF
 
     interleaved = torch.stack([low, high], dim=1).flatten()
-    w_q = interleaved[: rows * cols].reshape(rows, cols).to(torch.int8)
-    w_q = torch.clamp(w_q, -8, 7)
+    w_q = interleaved[: rows * cols].reshape(rows, cols).to(torch.uint8)
+    w_q = torch.where(w_q > 7, w_q - 16, w_q).to(torch.int8)
 
     w_dq = w_q.float() * scale.unsqueeze(1).float()
     return w_q, scale, packed_bytes, rows, cols

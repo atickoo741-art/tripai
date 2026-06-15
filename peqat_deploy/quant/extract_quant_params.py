@@ -11,19 +11,26 @@ def extract_quant_params(quant_params_path: str, merged_weights: dict) -> dict:
     if not isinstance(raw, dict):
         raise ValueError(f"Expected dict in quantization_params.pth, got {type(raw)}")
 
+    grouped = {}
+    for key, tensor in raw.items():
+        for suffix in (".qat_core.activation_clip", ".qat_core.smooth_factor"):
+            if key.endswith(suffix):
+                module_name = key[: -len(suffix)]
+                if module_name not in grouped:
+                    grouped[module_name] = {}
+                if suffix == ".qat_core.activation_clip":
+                    grouped[module_name]["clip"] = tensor
+                elif suffix == ".qat_core.smooth_factor":
+                    grouped[module_name]["smooth"] = tensor
+
     normalized = {}
     for module_name in merged_weights:
-        if module_name not in raw:
+        if module_name not in grouped:
             raise KeyError(
                 f"Module '{module_name}' not found in quantization_params.pth. "
-                f"Available keys: {list(raw.keys())[:10]}..."
+                f"Available module keys (first 10): {sorted(grouped.keys())[:10]}"
             )
-        entry = raw[module_name]
-        if not isinstance(entry, dict):
-            raise ValueError(
-                f"Expected dict entry for '{module_name}', got {type(entry)}"
-            )
-
+        entry = grouped[module_name]
         smooth = entry.get("smooth")
         clip = entry.get("clip")
         if smooth is None or clip is None:

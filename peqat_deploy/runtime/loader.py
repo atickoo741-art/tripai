@@ -37,7 +37,7 @@ class CUDAQuantizedLinear(nn.Module):
         else:
             x_2d = x_f32
         x_dq = peqat_cuda.preprocess_forward(x_2d, self.smooth, self.clip)[1]
-        y = peqat_cuda.linear_forward(
+        y = peqat_cuda.linear_forward_fused(
             x_dq, self.packed_w, self.w_scale, self.out_features, self.in_features,
         )
         if ndim == 3:

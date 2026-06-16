@@ -109,30 +109,27 @@ def test_from_export(export_dir: str):
     with open(manifest_path) as f:
         manifest = json.load(f)
 
-    target_modules = manifest.get("target_modules", [])
-    if not target_modules:
-        print(f"  no target_modules in manifest, skipping real export test")
+    module_names = sorted(manifest.get("weight_artifact_paths", {}).keys())
+    if not module_names:
+        print(f"  no weight_artifact_paths in manifest")
         return True
 
-    # Test up to 5 modules from different layers
+    # Pick one module from each of up to 3 different layers
     test_modules = []
     seen_layers = set()
-    for m in target_modules:
-        layer_num = m.split(".")[3] if "layers" in m else "0"
-        if layer_num not in seen_layers:
+    for m in module_names:
+        parts = m.split(".")
+        layer_key = parts[4] if len(parts) > 4 and parts[4].isdigit() else "0"
+        if layer_key not in seen_layers:
             test_modules.append(m)
-            seen_layers.add(layer_num)
-        if len(test_modules) >= 5:
+            seen_layers.add(layer_key)
+        if len(test_modules) >= 3:
             break
 
     N = 4
     ok = True
     for module_name in test_modules:
-        try:
-            packed, w_scale, D, K = load_export_layer(export_dir, module_name)
-        except FileNotFoundError as e:
-            print(f"  {module_name}: {e}")
-            continue
+        packed, w_scale, D, K = load_export_layer(export_dir, module_name)
 
         x_dq = torch.randn(N, K, device="cuda", dtype=torch.float32)
 

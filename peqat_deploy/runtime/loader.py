@@ -28,6 +28,7 @@ class CUDAQuantizedLinear(nn.Module):
         self.in_features = in_features
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        dtype = x.dtype
         x_f32 = x.float()
         ndim = x_f32.dim()
         if ndim == 3:
@@ -41,7 +42,7 @@ class CUDAQuantizedLinear(nn.Module):
         )
         if ndim == 3:
             y = y.reshape(B, S, self.out_features)
-        return y
+        return y.to(dtype)
 
 
 def load_export(export_dir: str, device: str = "cuda") -> dict:
@@ -96,7 +97,7 @@ def build_cuda_model(
 
     model = AutoModelForCausalLM.from_pretrained(
         base_model_name,
-        torch_dtype=torch.float16,
+        dtype=torch.float16,
         low_cpu_mem_usage=True,
     )
     model.eval()

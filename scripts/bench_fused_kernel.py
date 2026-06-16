@@ -1,6 +1,4 @@
-"""Microbenchmark: fused kernel vs old unpack+cuBLAS path.
-Single-layer only — no model loading, ~100MB GPU memory max."""
-
+"""Microbenchmark: fused vs old kernel — tiny shapes, low memory."""
 import torch
 import sys
 import os
@@ -58,8 +56,7 @@ def bench_layer(D, K, N, warmup=10, repeats=100):
     fused_ms = start.elapsed_time(end) / repeats
 
     speedup = old_ms / fused_ms if fused_ms > 0 else 0
-    mem = packed.numel() + w_scale_f16.numel() * 2 + x_dq.numel() * 4
-    return old_ms, fused_ms, speedup, mem
+    return old_ms, fused_ms, speedup
 
 
 def main():
@@ -70,26 +67,32 @@ def main():
     try:
         import peqat_cuda
     except ImportError:
-        print("peqat_cuda not built. Run: cd csrc && python3 setup.py build_ext --inplace")
+        print("peqat_cuda not built")
         return 1
 
-    print(f"  {'shape':<20} {'N':>4} {'old(ms)':>10} {'fused(ms)':>10} {'speedup':>8} {'mem(MB)':>8}")
-    print("  " + "-" * 64)
+    free, total = torch.cuda.mem_get_info()
+    print(f"GPU: {free/1024**3:.1f}GB free / {total/1024**3:.1f}GB total\n")
 
+    print(f"  {'shape':<16} {'N':>4} {'old(ms)':>10} {'fused(ms)':>10} {'speedup':>8}")
+    print(f"  {'-'*50}")
+
+    # Tiny shapes to fit constrained GPU memory
     shapes = [
-        (4096, 4096, [1, 4, 16]),
-        (14336, 4096, [1, 4]),
-        (4096, 14336, [1, 4]),
-        (1024, 1024, [1, 16, 64]),
+        (256, 256, [1, 4, 16]),
+        (512, 256, [1, 4]),
+        (256, 512, [1, 4]),
+        (128, 128, [1, 4, 16]),
+        (64, 128, [1]),
     ]
 
     for D, K, Ns in shapes:
         for N in Ns:
-            old_ms, fused_ms, speedup, mem_bytes = bench_layer(D, K, N)
-            mem_mb = mem_bytes / (1024 * 1024)
+            old_ms, fused_ms, speedup = bench_layer(D, K, N)
             shape_str = f"{D}x{K}"
-            print(f"  {shape_str:<20} {N:>4} {old_ms:>9.3f} {fused_ms:>9.3f} {speedup:>7.2f}x {mem_mb:>7.1f}")
+            print(f"  {shape_str:<16} {N:>4} {old_ms:>9.3f} {fused_ms:>9.3f} {speedup:>7.2f}x")
+
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

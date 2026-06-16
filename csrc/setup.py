@@ -7,6 +7,7 @@ setup(
         CUDAExtension("peqat_cuda", [
             "bindings.cpp",
             "peqat_preprocess.cu",
+            "peqat_gemm.cu",
         ]),
     ],
     cmdclass={"build_ext": BuildExtension},

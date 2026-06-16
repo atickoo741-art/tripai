@@ -9,6 +9,11 @@ void launch_preprocess(
     int N, int K, cudaStream_t stream
 );
 
+void launch_unpack_dequant(
+    const uint8_t* packed, const float* w_scale, float* w_dq,
+    int rows, int cols, cudaStream_t stream
+);
+
 std::vector<torch::Tensor> preprocess_forward(
     torch::Tensor x,
     torch::Tensor smooth,
@@ -49,7 +54,44 @@ std::vector<torch::Tensor> preprocess_forward(
     return {x_q, x_dq, x_scale};
 }
 
+torch::Tensor linear_forward(
+    torch::Tensor x_dq,
+    torch::Tensor packed_w,
+    torch::Tensor w_scale,
+    int64_t rows,
+    int64_t cols
+) {
+    TORCH_CHECK(x_dq.device().is_cuda(), "x_dq must be CUDA tensor");
+    TORCH_CHECK(packed_w.device().is_cuda(), "packed_w must be CUDA tensor");
+    TORCH_CHECK(w_scale.device().is_cuda(), "w_scale must be CUDA tensor");
+
+    TORCH_CHECK(x_dq.dim() == 2, "x_dq must be 2D [N, K]");
+    TORCH_CHECK(x_dq.scalar_type() == torch::kFloat32, "x_dq must be float32");
+    TORCH_CHECK(x_dq.size(1) == cols, "x_dq dim[1] != cols");
+
+    TORCH_CHECK(w_scale.dim() == 1, "w_scale must be 1D [rows]");
+    TORCH_CHECK(w_scale.scalar_type() == torch::kFloat16, "w_scale must be float16");
+    TORCH_CHECK(w_scale.size(0) == rows, "w_scale dim[0] != rows");
+
+    int N = x_dq.size(0);
+
+    auto w_scale_f32 = w_scale.to(torch::kFloat32);
+    auto w_dq = torch::empty({rows, cols}, torch::dtype(torch::kFloat32).device(x_dq.device()));
+
+    launch_unpack_dequant(
+        packed_w.data_ptr<uint8_t>(),
+        w_scale_f32.data_ptr<float>(),
+        w_dq.data_ptr<float>(),
+        rows, cols,
+        at::cuda::getCurrentCUDAStream()
+    );
+
+    return torch::matmul(x_dq, w_dq.t());
+}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("preprocess_forward", &preprocess_forward,
           "PE-QAT activation preprocessing: x/smooth -> clamp(-clip,clip) -> quantize INT4 -> dequantize");
+    m.def("linear_forward", &linear_forward,
+          "PE-QAT packed INT4 linear: unpack weights -> dequantize -> matmul");
 }

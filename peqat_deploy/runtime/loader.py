@@ -29,10 +29,19 @@ class CUDAQuantizedLinear(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x_f32 = x.float()
-        x_dq = peqat_cuda.preprocess_forward(x_f32, self.smooth, self.clip)[1]
-        return peqat_cuda.linear_forward(
+        ndim = x_f32.dim()
+        if ndim == 3:
+            B, S, K = x_f32.shape
+            x_2d = x_f32.reshape(B * S, K)
+        else:
+            x_2d = x_f32
+        x_dq = peqat_cuda.preprocess_forward(x_2d, self.smooth, self.clip)[1]
+        y = peqat_cuda.linear_forward(
             x_dq, self.packed_w, self.w_scale, self.out_features, self.in_features,
         )
+        if ndim == 3:
+            y = y.reshape(B, S, self.out_features)
+        return y
 
 
 def load_export(export_dir: str, device: str = "cuda") -> dict:

@@ -52,8 +52,10 @@ def main():
         next_id = logits[0, -1].argmax().unsqueeze(0).unsqueeze(0)
         input_ids = torch.cat([input_ids, next_id], dim=-1)
     gen_time = time.time() - t0
-    print(f"  Generated: {tokenizer.decode(input_ids[0], skip_special_tokens=True)}")
+    generated = tokenizer.decode(input_ids[0], skip_special_tokens=True)
+    print(f"  Generated: {generated}")
     print(f"  Generation time: {gen_time:.3f}s ({gen_time/10*1000:.1f}ms/token)")
+    print(f"  Output length: {input_ids.shape[1]} tokens")
 
     print("\nPASS: CUDA runtime end-to-end forward pass and generation successful")
     return 0

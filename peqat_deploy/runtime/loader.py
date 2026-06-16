@@ -67,9 +67,8 @@ def load_export(export_dir: str, device: str = "cuda") -> dict:
         with open(os.path.join(layer_dir, "shape.json")) as f:
             shape = json.load(f)
 
-        with open(os.path.join(layer_dir, "weight_int4.bin"), "rb") as f:
-            packed_bytes = f.read()
-        packed_w = torch.frombuffer(packed_bytes, dtype=torch.uint8).clone()
+        path = os.path.join(layer_dir, "weight_int4.bin")
+        packed_w = torch.tensor(bytearray(open(path, "rb").read()), dtype=torch.uint8)
         packed_w = packed_w[:(shape["rows"] * shape["cols"] + 1) // 2]
 
         with open(os.path.join(layer_dir, "weight_scale.fp16"), "rb") as f:

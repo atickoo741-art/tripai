@@ -228,10 +228,32 @@ Replaces the old `linear_forward` in `CUDAQuantizedLinear.forward()`. Same Pytho
 
 Primary savings: eliminating the FP32 weight materialization (8GB write + 8GB read → 2GB INT4 read). Secondary: better cache reuse from tiling.
 
-## 8. Implementation Plan
+## 8. Key Optimizations Implemented (v2)
 
-1. **`csrc/peqat_fused_gemm.cu`** — single kernel with manual FP32 accumulation (Approach A)
-2. **`csrc/bindings.cpp`** — add `fused_linear_forward` binding
+### 8.1 Byte-pair loading (halves global weight reads)
+
+Each thread loads 8 packed bytes instead of 16 individual values. Each byte is loaded once from global memory, then both nibbles are unpacked and stored as two FP32 values in `s_B`. This halves the global memory traffic for weights.
+
+### 8.2 w_scale cached in shared memory
+
+`s_scale[BN]` in shared memory loaded once per K-tile iteration (512 bytes). Used during B-tile unpack instead of per-element `w_scale[g_row]` loads.
+
+### 8.3 Bank-conflict mitigation
+
+Both `s_A` and `s_B` use stride `BK_STRIDE = BK + 1` (=33) instead of `BK` (=32). This changes the shared-memory bank mapping from `(row*BK + col) % 32 = col % 32` (all threads at same col → same bank) to `((row*33 + col) % 32) = (row + col) % 32`, distributing accesses across banks.
+
+### 8.4 Separate decode kernel for M ≤ 8
+
+`fused_int4_gemm_smallm_kernel` with tile BM=8, BN=128, BK=32. Each thread computes 1×4 output elements. No wasted threads: all 256 threads produce valid output for the full 8×128 tile.
+
+### 8.5 Float4 vectorized A-tile load
+
+Activation tile loaded via `float4` when all 4 elements are within bounds, reducing instruction count for the A-side global memory reads.
+
+## 9. Implementation Plan
+
+1. **`csrc/peqat_fused_gemm.cu`** — prefill + decode kernels with all optimizations
+2. **`csrc/bindings.cpp`** — dispatch to decode kernel when M ≤ 8
 3. **`csrc/setup.py`** — add `peqat_fused_gemm.cu` to sources
 4. **`peqat_deploy/runtime/loader.py`** — update `linear_forward` call in `CUDAQuantizedLinear`
 5. **`scripts/bench_fused_kernel.py`** — microbenchmark comparing old vs fused

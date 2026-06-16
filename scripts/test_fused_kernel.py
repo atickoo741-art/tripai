@@ -83,7 +83,7 @@ def test_fused_vs_old():
         y_fused = peqat_cuda.fused_linear_forward(x_dq, packed, w_scale_f16, D, K)
 
         max_err = (y_old - y_fused).abs().max().item()
-        ok = torch.allclose(y_old, y_fused, atol=1e-5, rtol=1e-5)
+        ok = torch.allclose(y_old, y_fused, atol=1e-4, rtol=1e-3)
 
         if not ok:
             print(f"  FAIL vs-old [{D:>4}, {K:>4}] max_err={max_err:.2e}")

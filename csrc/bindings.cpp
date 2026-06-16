@@ -23,6 +23,15 @@ void launch_fused_int4_gemm(
     cudaStream_t stream
 );
 
+void launch_fused_int4_gemm_smallm(
+    const float* x_dq,
+    const uint8_t* packed,
+    const float* w_scale,
+    float* output,
+    int M, int N, int K,
+    cudaStream_t stream
+);
+
 std::vector<torch::Tensor> preprocess_forward(
     torch::Tensor x,
     torch::Tensor smooth,
@@ -124,14 +133,25 @@ torch::Tensor fused_linear_forward(
     auto w_scale_f32 = w_scale.to(torch::kFloat32);
     auto output = torch::empty({M, N}, torch::dtype(torch::kFloat32).device(x_dq.device()));
 
-    launch_fused_int4_gemm(
-        x_dq.data_ptr<float>(),
-        packed_w.data_ptr<uint8_t>(),
-        w_scale_f32.data_ptr<float>(),
-        output.data_ptr<float>(),
-        M, N, K,
-        at::cuda::getCurrentCUDAStream()
-    );
+    if (M <= 8) {
+        launch_fused_int4_gemm_smallm(
+            x_dq.data_ptr<float>(),
+            packed_w.data_ptr<uint8_t>(),
+            w_scale_f32.data_ptr<float>(),
+            output.data_ptr<float>(),
+            M, N, K,
+            at::cuda::getCurrentCUDAStream()
+        );
+    } else {
+        launch_fused_int4_gemm(
+            x_dq.data_ptr<float>(),
+            packed_w.data_ptr<uint8_t>(),
+            w_scale_f32.data_ptr<float>(),
+            output.data_ptr<float>(),
+            M, N, K,
+            at::cuda::getCurrentCUDAStream()
+        );
+    }
 
     return output;
 }

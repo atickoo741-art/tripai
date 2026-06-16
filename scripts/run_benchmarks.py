@@ -1,26 +1,13 @@
 import json
 import os
 import sys
-import time
 
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from peqat_deploy.eval.harness import run_suite, measure_memory, measure_prefill
+from peqat_deploy.eval.harness import run_suite, measure_memory
 from peqat_deploy.runtime.loader import build_cuda_model
-
-
-def build_fp16_model(base_model_name: str, device: str = "cuda"):
-    print(f"Loading FP16 model {base_model_name}...")
-    tokenizer = AutoTokenizer.from_pretrained(base_model_name)
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
-    model = AutoModelForCausalLM.from_pretrained(
-        base_model_name, dtype=torch.float16, low_cpu_mem_usage=True,
-    ).to(device)
-    model.eval()
-    return model, tokenizer
 
 
 def main():
@@ -28,38 +15,39 @@ def main():
     if not export_dir or not os.path.isdir(export_dir):
         print(f"Usage: python {sys.argv[0]} <export_dir>")
         return 1
-
     if not torch.cuda.is_available():
         print("FAIL: CUDA not available")
         return 1
 
     with open(os.path.join(export_dir, "manifest.json")) as f:
-        manifest = json.load(f)
-    base_model_name = manifest["base_model_name"]
+        base_model_name = json.load(f)["base_model_name"]
 
     output_dir = os.path.join(
         os.path.dirname(export_dir),
         os.path.basename(export_dir).replace("_export", "_benchmarks"),
     )
     os.makedirs(output_dir, exist_ok=True)
-    print(f"Output: {output_dir}")
 
-    seq_lens = [128, 512, 2048]
+    # --- FP16 baseline (quick: seq_len 128 only) ---
+    print("Loading FP16 model...")
+    tokenizer = AutoTokenizer.from_pretrained(base_model_name)
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+    model = AutoModelForCausalLM.from_pretrained(
+        base_model_name, dtype=torch.float16, low_cpu_mem_usage=True,
+    ).to("cuda")
+    model.eval()
 
-    torch.cuda.empty_cache()
-    torch.cuda.reset_peak_memory_stats()
+    fp16_mem = measure_memory(model)
+    run_suite(model, tokenizer, "fp16_baseline", os.path.join(output_dir, "fp16"), seq_lens=[128])
 
-    # --- FP16 baseline ---
-    model_fp16, tokenizer = build_fp16_model(base_model_name)
-    fp16_mem = measure_memory(model_fp16)
-    run_suite(model_fp16, tokenizer, "fp16_baseline", os.path.join(output_dir, "fp16"), seq_lens)
-    del model_fp16
+    del model
     torch.cuda.empty_cache()
 
     # --- CUDA quantized ---
-    model_cuda, tokenizer = build_cuda_model(export_dir, base_model_name)
-    cuda_mem = measure_memory(model_cuda)
-    run_suite(model_cuda, tokenizer, "cuda_peqat", os.path.join(output_dir, "cuda_peqat"), seq_lens)
+    model, tokenizer = build_cuda_model(export_dir, base_model_name)
+    cuda_mem = measure_memory(model)
+    run_suite(model, tokenizer, "cuda_peqat", output_dir, seq_lens=[128, 512, 2048])
 
     # --- Summary ---
     print(f"\n{'='*60}")

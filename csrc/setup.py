@@ -8,7 +8,7 @@ setup(
             "bindings.cpp",
             "peqat_preprocess.cu",
             "peqat_gemm.cu",
-            "peqat_gemm_fused.cu",
+            "peqat_fused_gemm.cu",
         ]),
     ],
     cmdclass={"build_ext": BuildExtension},

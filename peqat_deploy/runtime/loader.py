@@ -37,10 +37,10 @@ class CUDAQuantizedLinear(nn.Module):
         else:
             x_2d = x_f32
 
-        # FP16 tensor core path: preprocess -> INT4 dequant to FP16 -> FP16 matmul
-        _, x_dq, _ = peqat_cuda.preprocess_forward(x_2d, self.smooth, self.clip)
+        # FP16 tensor core path: preprocess (FP16 output) -> INT4 dequant to FP16 -> FP16 matmul
+        _, x_dq_f16, _ = peqat_cuda.preprocess_forward_f16(x_2d, self.smooth, self.clip)
         y = peqat_cuda.linear_forward_f16(
-            x_dq, self.packed_w, self.w_scale,
+            x_dq_f16, self.packed_w, self.w_scale,
             self.out_features, self.in_features,
         )
 

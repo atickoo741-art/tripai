@@ -213,21 +213,23 @@ __global__ void fused_preprocess_gemm_smallm_kernel(
         __syncthreads();
 
         // --- Load A tile with inline activation preprocessing ---
-        int g_row = m_start + m_local;
-        for (int kk = 0; kk < BK_S; kk++) {
-            if (m_local < bm_eff && kk < bk_eff) {
-                float x_val = x[g_row * K + (k_start + kk)];
-                float s = fmaxf(s_smooth[kk], 1e-8f);
-                float c = fmaxf(s_clip[kk], 1e-8f);
-                float x_s = x_val / s;
-                float x_clipped = fminf(fmaxf(x_s, -c), c);
-                float s_x = fmaxf(c / 7.0f, 1e-8f);
-                float scaled = x_clipped / s_x;
-                int q = __float2int_rn(scaled);
-                q = min(max(q, -7), 7);
-                s_A[m_local * BK_STRIDE_S + kk] = (float)q * s_x;
-            } else {
-                s_A[m_local * BK_STRIDE_S + kk] = 0.0f;
+        if ((tid % 32) == 0) {
+            int g_row = m_start + m_local;
+            for (int kk = 0; kk < BK_S; kk++) {
+                if (m_local < bm_eff && kk < bk_eff) {
+                    float x_val = x[g_row * K + (k_start + kk)];
+                    float s = fmaxf(s_smooth[kk], 1e-8f);
+                    float c = fmaxf(s_clip[kk], 1e-8f);
+                    float x_s = x_val / s;
+                    float x_clipped = fminf(fmaxf(x_s, -c), c);
+                    float s_x = fmaxf(c / 7.0f, 1e-8f);
+                    float scaled = x_clipped / s_x;
+                    int q = __float2int_rn(scaled);
+                    q = min(max(q, -7), 7);
+                    s_A[m_local * BK_STRIDE_S + kk] = (float)q * s_x;
+                } else {
+                    s_A[m_local * BK_STRIDE_S + kk] = 0.0f;
+                }
             }
         }
 
@@ -318,7 +320,7 @@ void launch_fused_preprocess_gemm_smallm(
     int M, int N, int K,
     cudaStream_t stream
 ) {
-    dim3 grid(1, (N + BN_S - 1) / BN_S);
+    dim3 grid((M + BM_S - 1) / BM_S, (N + BN_S - 1) / BN_S);
     dim3 block(THREADS_S);
 
     fused_preprocess_gemm_smallm_kernel<<<grid, block, 0, stream>>>(

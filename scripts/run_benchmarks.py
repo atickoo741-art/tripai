@@ -35,11 +35,16 @@ def main():
         manifest = json.load(f)
     base_model_name = manifest["base_model_name"]
 
-    output_dir = os.path.join(
+    base_output = os.path.join(
         os.path.dirname(export_dir),
         os.path.basename(export_dir).replace("_export", "_benchmarks"),
     )
-    os.makedirs(output_dir, exist_ok=True)
+    output_dir = base_output
+    n = 1
+    while os.path.exists(output_dir):
+        output_dir = f"{base_output}_{n}"
+        n += 1
+    os.makedirs(output_dir)
 
     force_free()
 

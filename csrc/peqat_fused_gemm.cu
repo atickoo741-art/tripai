@@ -196,18 +196,16 @@ __global__ void fused_int4_gemm_smallm_kernel(
     }
     __syncthreads();
 
-    int a_elems = (BM_S * BK_S) / THREADS_S;  // 1 element per thread
     int b_bytes = (BN_S * BK_S / 2) / THREADS_S;  // 8 bytes per thread
 
     for (int k_start = 0; k_start < K; k_start += BK_S) {
         int bk_eff = min(K - k_start, BK_S);
 
-        // --- Load A tile (1 element per thread) ---
-        if (m_local < bm_eff) {
-            int g_row = m_start + m_local;
-            for (int kk = 0; kk < bk_eff; kk++) {
-                s_A[m_local * BK_STRIDE_S + kk] = x_dq[g_row * K + (k_start + kk)];
-            }
+        // --- Load A tile ---
+        int g_row = m_start + m_local;
+        for (int kk = 0; kk < BK_S; kk++) {
+            s_A[m_local * BK_STRIDE_S + kk] = (m_local < bm_eff && kk < bk_eff)
+                ? x_dq[g_row * K + (k_start + kk)] : 0.0f;
         }
 
         // --- Load B tile (byte-pair load) ---

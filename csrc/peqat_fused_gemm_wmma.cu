@@ -11,7 +11,7 @@
 #define BN 128
 #define BK 64
 
-using namespace nvcuda;
+using namespace nvcuda::wmma;
 
 __global__ void fused_gemm_wmma_kernel(
     const half* __restrict__ x,
@@ -51,7 +51,7 @@ __global__ void fused_gemm_wmma_kernel(
     fragment<accumulator, WMMA_M, WMMA_N, WMMA_K, half> acc[8];
     #pragma unroll
     for (int i = 0; i < 8; i++) {
-        fill_fragment(acc[i], 0.0h);
+        fill_fragment(acc[i], __float2half(0.0f));
     }
 
     for (int k_start = 0; k_start < K; k_start += BK) {

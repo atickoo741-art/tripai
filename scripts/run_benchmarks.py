@@ -20,16 +20,19 @@ def force_free():
 
 def main():
     args = sys.argv[1:]
-    export_dir = args[0] if args else None
+    device = "cuda"
+    export_dir = None
+    i = 0
+    while i < len(args):
+        if args[i] == "--device" and i + 1 < len(args):
+            device = args[i + 1]
+            i += 2
+        else:
+            export_dir = args[i]
+            i += 1
     if not export_dir or not os.path.isdir(export_dir):
         print(f"Usage: python {sys.argv[0]} [--device cpu|cuda] <export_dir>")
         return 1
-
-    device = "cuda"
-    if "--device" in args:
-        idx = args.index("--device")
-        device = args[idx + 1]
-        export_dir = args[idx + 2] if len(args) > idx + 2 else export_dir
 
     with open(os.path.join(export_dir, "manifest.json")) as f:
         manifest = json.load(f)

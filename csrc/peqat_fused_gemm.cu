@@ -10,13 +10,17 @@
 #define TM_L 8
 #define TN_L 8
 
-__global__ void fused_int4_gemm_kernel(
-    const float* __restrict__ x_dq,
+__global__ void fused_preprocess_gemm_kernel(
+    const float* __restrict__ x,
     const uint8_t* __restrict__ packed,
     const float* __restrict__ w_scale,
+    const float* __restrict__ smooth,
+    const float* __restrict__ clip,
     float* __restrict__ output,
     int M, int N, int K
 ) {
+    __shared__ float s_smooth[BK];
+    __shared__ float s_clip[BK];
     __shared__ float s_A[BM_L * BK_STRIDE];
     __shared__ float s_B[BN_L * BK_STRIDE];
     __shared__ float s_scale[BN_L];
@@ -39,7 +43,6 @@ __global__ void fused_int4_gemm_kernel(
 
     int K_packed = (K + 1) / 2;
 
-    // --- Preload w_scale for the N-tile (with edge guard) ---
     if (tid < BN_L) {
         int g_idx = n_start + tid;
         s_scale[tid] = (g_idx < N) ? w_scale[g_idx] : 0.0f;
@@ -52,7 +55,15 @@ __global__ void fused_int4_gemm_kernel(
     for (int k_start = 0; k_start < K; k_start += BK) {
         int bk_eff = min(K - k_start, BK);
 
-        // --- Load A tile (scalar) ---
+        // --- Load smooth and clip for this K-tile ---
+        if (tid < BK) {
+            int g_k = k_start + tid;
+            s_smooth[tid] = (g_k < K) ? smooth[g_k] : 0.0f;
+            s_clip[tid]   = (g_k < K) ? clip[g_k] : 0.0f;
+        }
+        __syncthreads();
+
+        // --- Load A tile with inline activation preprocessing ---
         for (int i = 0; i < a_elems; i++) {
             int idx = tid * a_elems + i;
             int row = idx / BK;
@@ -61,7 +72,16 @@ __global__ void fused_int4_gemm_kernel(
             if (row < bm_eff && col < bk_eff) {
                 int g_row = m_start + row;
                 int g_col = k_start + col;
-                s_A[store_idx] = x_dq[g_row * K + g_col];
+                float x_val = x[g_row * K + g_col];
+                float s = s_smooth[col];
+                float c = s_clip[col];
+                float x_s = x_val / s;
+                float x_clipped = fminf(fmaxf(x_s, -c), c);
+                float s_x = c / 7.0f;
+                float scaled = x_clipped / s_x;
+                int q = __float2int_rn(scaled);
+                q = min(max(q, -8), 7);
+                s_A[store_idx] = (float)q * s_x;
             } else {
                 s_A[store_idx] = 0.0f;
             }
@@ -70,9 +90,9 @@ __global__ void fused_int4_gemm_kernel(
         // --- Load B tile: each thread reads 8 packed bytes, unpacks both nibbles ---
         for (int j = 0; j < b_packed_bytes; j++) {
             int byte_idx_in_tile = tid * b_packed_bytes + j;
-            int val_idx = byte_idx_in_tile * 2;          // first of two values
-            int row = val_idx / BK;                       // 0..BN_L-1
-            int col = val_idx % BK;                       // always even
+            int val_idx = byte_idx_in_tile * 2;
+            int row = val_idx / BK;
+            int col = val_idx % BK;
             if (row < bn_eff && col < bk_eff - 1) {
                 int g_row = n_start + row;
                 int byte_global = g_row * K_packed + (k_start + col) / 2;
@@ -85,7 +105,6 @@ __global__ void fused_int4_gemm_kernel(
                 s_B[row * BK_STRIDE + col]     = (float)q_lo * scale;
                 s_B[row * BK_STRIDE + col + 1] = (float)q_hi * scale;
             } else if (row < bn_eff && col < bk_eff) {
-                // Last column when bk_eff is odd: only low nibble valid
                 int g_row = n_start + row;
                 int byte_global = g_row * K_packed + (k_start + col) / 2;
                 uint8_t byte = packed[byte_global];
@@ -108,7 +127,6 @@ __global__ void fused_int4_gemm_kernel(
 
         __syncthreads();
 
-        // --- Compute fragment ---
         for (int kk = 0; kk < bk_eff; kk++) {
             for (int tm = 0; tm < TM_L; tm++) {
                 float a_val = s_A[(m_group * TM_L + tm) * BK_STRIDE + kk];
@@ -121,7 +139,6 @@ __global__ void fused_int4_gemm_kernel(
         __syncthreads();
     }
 
-    // --- Write output ---
     for (int tm = 0; tm < TM_L; tm++) {
         for (int tn = 0; tn < TN_L; tn++) {
             int g_m = m_start + m_group * TM_L + tm;
@@ -142,13 +159,17 @@ __global__ void fused_int4_gemm_kernel(
 #define TM_S 1
 #define TN_S 4
 
-__global__ void fused_int4_gemm_smallm_kernel(
-    const float* __restrict__ x_dq,
+__global__ void fused_preprocess_gemm_smallm_kernel(
+    const float* __restrict__ x,
     const uint8_t* __restrict__ packed,
     const float* __restrict__ w_scale,
+    const float* __restrict__ smooth,
+    const float* __restrict__ clip,
     float* __restrict__ output,
     int M, int N, int K
 ) {
+    __shared__ float s_smooth[BK_S];
+    __shared__ float s_clip[BK_S];
     __shared__ float s_A[BM_S * BK_STRIDE_S];
     __shared__ float s_B[BN_S * BK_STRIDE_S];
     __shared__ float s_scale[BN_S];
@@ -165,26 +186,8 @@ __global__ void fused_int4_gemm_smallm_kernel(
 
     int tid = threadIdx.x;
 
-    // Thread mapping: 256 threads, TM_S=1 row per thread, TN_S=4 cols per thread
-    // 64 threads along M (covers BM_S=8 rows × 8 different groups in K)
-    // 64 threads along N (covers BN_S=128 cols)
-    // Total: 64 × 64 / 16 = 256 ... 
-    // Simpler: 32 warps. Each warp covers 4 rows × 32 cols.
-    // Within a warp: 32 lanes, each computes 1 output element.
-    // 8 output rows per block, so 8 warp-groups in M dim.
-    
-    // Each thread computes 1 element: (m_local, n_local)
-    // 256 threads × 1 element = 256 output elements = BM_S * BN_S = 8 * 32 = 256
-    // But BN_S = 128, so we need 256 elements. 8 * 128 = 1024 output elements.
-    // With 256 threads: 1024 / 256 = 4 elements per thread.
-    
-    // Revised: each thread computes 4 columns in the output
-    // 256 threads × (1×4) = 1024 = 8 × 128 ✓
-    // m_local = tid / 32
-    // n_base = (tid % 32) * 4
-    
-    int m_local = tid / 32;             // 0..7
-    int n_base  = (tid % 32) * TN_S;    // 0..124 in steps of 4
+    int m_local = tid / 32;
+    int n_base  = (tid % 32) * TN_S;
 
     float accum[TN_S] = {0.0f};
 
@@ -196,16 +199,36 @@ __global__ void fused_int4_gemm_smallm_kernel(
     }
     __syncthreads();
 
-    int b_bytes = (BN_S * BK_S / 2) / THREADS_S;  // 8 bytes per thread
+    int b_bytes = (BN_S * BK_S / 2) / THREADS_S;
 
     for (int k_start = 0; k_start < K; k_start += BK_S) {
         int bk_eff = min(K - k_start, BK_S);
 
-        // --- Load A tile ---
+        // --- Load smooth and clip for this K-tile ---
+        if (tid < BK_S) {
+            int g_k = k_start + tid;
+            s_smooth[tid] = (g_k < K) ? smooth[g_k] : 0.0f;
+            s_clip[tid]   = (g_k < K) ? clip[g_k] : 0.0f;
+        }
+        __syncthreads();
+
+        // --- Load A tile with inline activation preprocessing ---
         int g_row = m_start + m_local;
         for (int kk = 0; kk < BK_S; kk++) {
-            s_A[m_local * BK_STRIDE_S + kk] = (m_local < bm_eff && kk < bk_eff)
-                ? x_dq[g_row * K + (k_start + kk)] : 0.0f;
+            if (m_local < bm_eff && kk < bk_eff) {
+                float x_val = x[g_row * K + (k_start + kk)];
+                float s = s_smooth[kk];
+                float c = s_clip[kk];
+                float x_s = x_val / s;
+                float x_clipped = fminf(fmaxf(x_s, -c), c);
+                float s_x = c / 7.0f;
+                float scaled = x_clipped / s_x;
+                int q = __float2int_rn(scaled);
+                q = min(max(q, -8), 7);
+                s_A[m_local * BK_STRIDE_S + kk] = (float)q * s_x;
+            } else {
+                s_A[m_local * BK_STRIDE_S + kk] = 0.0f;
+            }
         }
 
         // --- Load B tile (byte-pair load) ---
@@ -244,7 +267,6 @@ __global__ void fused_int4_gemm_smallm_kernel(
 
         __syncthreads();
 
-        // --- Compute: for this one M row, accumulate over BK ---
         for (int kk = 0; kk < bk_eff; kk++) {
             float a_val = s_A[m_local * BK_STRIDE_S + kk];
             for (int tn = 0; tn < TN_S; tn++) {
@@ -255,7 +277,6 @@ __global__ void fused_int4_gemm_smallm_kernel(
         __syncthreads();
     }
 
-    // --- Write output ---
     int g_m = m_start + m_local;
     if (g_m < M) {
         for (int tn = 0; tn < TN_S; tn++) {
@@ -269,10 +290,12 @@ __global__ void fused_int4_gemm_smallm_kernel(
 
 // --- Launch wrappers ---
 
-void launch_fused_int4_gemm(
-    const float* x_dq,
+void launch_fused_preprocess_gemm(
+    const float* x,
     const uint8_t* packed,
     const float* w_scale,
+    const float* smooth,
+    const float* clip,
     float* output,
     int M, int N, int K,
     cudaStream_t stream
@@ -280,15 +303,17 @@ void launch_fused_int4_gemm(
     dim3 grid((M + BM_L - 1) / BM_L, (N + BN_L - 1) / BN_L);
     dim3 block(THREADS_L);
 
-    fused_int4_gemm_kernel<<<grid, block, 0, stream>>>(
-        x_dq, packed, w_scale, output, M, N, K
+    fused_preprocess_gemm_kernel<<<grid, block, 0, stream>>>(
+        x, packed, w_scale, smooth, clip, output, M, N, K
     );
 }
 
-void launch_fused_int4_gemm_smallm(
-    const float* x_dq,
+void launch_fused_preprocess_gemm_smallm(
+    const float* x,
     const uint8_t* packed,
     const float* w_scale,
+    const float* smooth,
+    const float* clip,
     float* output,
     int M, int N, int K,
     cudaStream_t stream
@@ -296,7 +321,7 @@ void launch_fused_int4_gemm_smallm(
     dim3 grid(1, (N + BN_S - 1) / BN_S);
     dim3 block(THREADS_S);
 
-    fused_int4_gemm_smallm_kernel<<<grid, block, 0, stream>>>(
-        x_dq, packed, w_scale, output, M, N, K
+    fused_preprocess_gemm_smallm_kernel<<<grid, block, 0, stream>>>(
+        x, packed, w_scale, smooth, clip, output, M, N, K
     );
 }

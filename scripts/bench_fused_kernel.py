@@ -1,4 +1,4 @@
-"""Microbenchmark: fused vs old kernel — tiny shapes, low memory."""
+"""Microbenchmark: fused preprocess+GEMM vs old two-step path — tiny shapes, low memory."""
 import torch
 import sys
 import os
@@ -27,11 +27,15 @@ def bench_layer(D, K, N, warmup=10, repeats=100):
     packed = pack_weights(w_q)
     w_scale_f16 = w_scale.to(torch.float16)
 
-    x_dq = torch.randn(N, K, device="cuda", dtype=torch.float32)
+    smooth = torch.randn(K, device="cuda", dtype=torch.float32).abs() + 0.1
+    clip = torch.randn(K, device="cuda", dtype=torch.float32).abs() + 0.5
+    x = torch.randn(N, K, device="cuda", dtype=torch.float32)
 
     import peqat_cuda
 
+    # ---- old two-step: preprocess + linear_forward ----
     for _ in range(warmup):
+        x_dq = peqat_cuda.preprocess_forward(x, smooth, clip)[1]
         _ = peqat_cuda.linear_forward(x_dq, packed, w_scale_f16, D, K)
     torch.cuda.synchronize()
 
@@ -39,18 +43,20 @@ def bench_layer(D, K, N, warmup=10, repeats=100):
     end = torch.cuda.Event(enable_timing=True)
     start.record()
     for _ in range(repeats):
+        x_dq = peqat_cuda.preprocess_forward(x, smooth, clip)[1]
         _ = peqat_cuda.linear_forward(x_dq, packed, w_scale_f16, D, K)
     end.record()
     torch.cuda.synchronize()
     old_ms = start.elapsed_time(end) / repeats
 
+    # ---- fused single-kernel ----
     for _ in range(warmup):
-        _ = peqat_cuda.fused_linear_forward(x_dq, packed, w_scale_f16, D, K)
+        _ = peqat_cuda.fused_linear_forward(x, smooth, clip, packed, w_scale_f16, D, K)
     torch.cuda.synchronize()
 
     start.record()
     for _ in range(repeats):
-        _ = peqat_cuda.fused_linear_forward(x_dq, packed, w_scale_f16, D, K)
+        _ = peqat_cuda.fused_linear_forward(x, smooth, clip, packed, w_scale_f16, D, K)
     end.record()
     torch.cuda.synchronize()
     fused_ms = start.elapsed_time(end) / repeats
@@ -73,10 +79,9 @@ def main():
     free, total = torch.cuda.mem_get_info()
     print(f"GPU: {free/1024**3:.1f}GB free / {total/1024**3:.1f}GB total\n")
 
-    print(f"  {'shape':<16} {'N':>4} {'old(ms)':>10} {'fused(ms)':>10} {'speedup':>8}")
-    print(f"  {'-'*50}")
+    print(f"  {'shape':<16} {'N':>4} {'two-step(ms)':>12} {'fused(ms)':>10} {'speedup':>8}")
+    print(f"  {'-'*54}")
 
-    # Tiny shapes to fit constrained GPU memory
     shapes = [
         (256, 256, [1, 4, 16]),
         (512, 256, [1, 4]),
@@ -92,7 +97,7 @@ def main():
         for N in Ns:
             old_ms, fused_ms, speedup = bench_layer(D, K, N)
             shape_str = f"{D}x{K}"
-            print(f"  {shape_str:<16} {N:>4} {old_ms:>9.3f} {fused_ms:>9.3f} {speedup:>7.2f}x")
+            print(f"  {shape_str:<16} {N:>4} {old_ms:>11.3f} {fused_ms:>9.3f} {speedup:>7.2f}x")
 
     return 0
 

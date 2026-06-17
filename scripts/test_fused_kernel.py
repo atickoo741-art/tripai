@@ -19,19 +19,27 @@ def pack_weights(w_q):
     return (low | high).contiguous()
 
 
-def reference_linear(x_dq, w_q, w_scale):
+def preprocess_reference(x, smooth, clip):
+    x_s = x / smooth.unsqueeze(0)
+    x_clipped = torch.clamp(x_s, -clip.unsqueeze(0), clip.unsqueeze(0))
+    s_x = clip / 7.0
+    x_q = torch.clamp(torch.round(x_clipped / s_x.unsqueeze(0)), -8, 7)
+    return x_q.float() * s_x.unsqueeze(0)
+
+
+def reference_full(x, w_q, w_scale, smooth, clip):
+    x_dq = preprocess_reference(x, smooth, clip)
     w_dq = w_q.float() * w_scale.unsqueeze(1).float()
     return x_dq.float() @ w_dq.T
 
 
 def test_synthetic():
     torch.manual_seed(42)
-    # Tiny shapes — each <1MB GPU
     shapes = [
         (128, 256),
         (256, 128),
         (64, 64),
-        (1, 256),     # decode-like M=1
+        (1, 256),
         (8, 128),
     ]
 
@@ -44,11 +52,14 @@ def test_synthetic():
         w_q = torch.clamp(torch.round(w_f32 / w_scale.unsqueeze(1)), -8, 7).to(torch.int8)
         packed = pack_weights(w_q)
 
-        x_dq = torch.randn(4, K, device="cuda", dtype=torch.float32)
-        y_ref = reference_linear(x_dq, w_q, w_scale)
+        smooth = torch.randn(K, device="cuda", dtype=torch.float32).abs() + 0.1
+        clip = torch.randn(K, device="cuda", dtype=torch.float32).abs() + 0.5
+        x = torch.randn(4, K, device="cuda", dtype=torch.float32)
+
+        y_ref = reference_full(x, w_q, w_scale, smooth, clip)
 
         y_fused = peqat_cuda.fused_linear_forward(
-            x_dq, packed, w_scale.to(torch.float16), D, K
+            x, smooth, clip, packed, w_scale.to(torch.float16), D, K
         )
 
         max_err = (y_ref - y_fused).abs().max().item()
@@ -63,7 +74,7 @@ def test_synthetic():
 
 
 def test_fused_vs_old():
-    """Fused kernel must match existing unpack+cuBLAS path."""
+    """Fused kernel (preprocess + GEMM in one) must match old two-step path (preprocess_forward + linear_forward)."""
     import peqat_cuda
 
     torch.manual_seed(123)
@@ -77,10 +88,16 @@ def test_fused_vs_old():
         packed = pack_weights(w_q)
         w_scale_f16 = w_scale.to(torch.float16)
 
-        x_dq = torch.randn(4, K, device="cuda", dtype=torch.float32)
+        smooth = torch.randn(K, device="cuda", dtype=torch.float32).abs() + 0.1
+        clip = torch.randn(K, device="cuda", dtype=torch.float32).abs() + 0.5
+        x = torch.randn(4, K, device="cuda", dtype=torch.float32)
 
+        x_dq = peqat_cuda.preprocess_forward(x, smooth, clip)[1]
         y_old = peqat_cuda.linear_forward(x_dq, packed, w_scale_f16, D, K)
-        y_fused = peqat_cuda.fused_linear_forward(x_dq, packed, w_scale_f16, D, K)
+
+        y_fused = peqat_cuda.fused_linear_forward(
+            x, smooth, clip, packed, w_scale_f16, D, K
+        )
 
         max_err = (y_old - y_fused).abs().max().item()
         ok = torch.allclose(y_old, y_fused, atol=1e-4, rtol=1e-3)
@@ -110,7 +127,7 @@ def main():
     print("1. Synthetic shapes vs reference:")
     ok = test_synthetic()
 
-    print("\n2. Fused vs old unpack+cuBLAS path:")
+    print("\n2. Fused vs old two-step (preprocess + linear_forward):")
     ok = test_fused_vs_old() and ok
 
     print("\nPASS" if ok else "\nFAIL")

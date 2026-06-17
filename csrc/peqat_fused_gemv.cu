@@ -16,29 +16,28 @@ __global__ void fused_gemv_decode_kernel(
     if (row >= R) return;
 
     int tid = threadIdx.x;
-    half wsc = __ldg(&w_scale[row]);
-    half sum = 0.0h;
+    float wsc = __half2float(__ldg(&w_scale[row]));
+    float sum = 0.0f;
 
     int K_packed = (K + 1) / 2;
 
     for (int k = tid; k < K; k += 32) {
-        half act = __ldg(&x_f16[k]);
+        float act = __half2float(__ldg(&x_f16[k]));
 
         int byte_idx = row * K_packed + k / 2;
         uint8_t byte = __ldg(&packed[byte_idx]);
         uint8_t nibble = (k & 1) ? ((byte >> 4) & 0xF) : (byte & 0xF);
         int8_t qw = (nibble > 7) ? (int8_t)(nibble - 16) : (int8_t)nibble;
 
-        sum = __hfma(act, __hmul(__int2half_rn(qw), wsc), sum);
+        sum = fmaf(act, (float)qw * wsc, sum);
     }
 
-    // reduction fold 1
     for (int offset = 16; offset > 0; offset >>= 1) {
-        sum = __hadd(sum, __shfl_xor_sync(0xFFFFFFFF, sum, offset));
+        sum += __shfl_xor_sync(0xFFFFFFFF, sum, offset);
     }
 
     if (tid == 0) {
-        output[row] = sum;
+        output[row] = __float2half(sum);
     }
 }
 
@@ -50,10 +49,9 @@ void launch_fused_gemv_decode(
     int K, int R,
     cudaStream_t stream
 ) {
-    // One warp (32 threads) per output row. Use blockDim.y for rows-per-block.
-    int warp_per_block = 32;  // 32 warps * 32 threads = 1024 threads max
+    int warp_per_block = 32;
     int blocks = (R + warp_per_block - 1) / warp_per_block;
-    dim3 block(32, warp_per_block);  // 32 threads x 32 warps = 1024 threads
+    dim3 block(32, warp_per_block);
 
     fused_gemv_decode_kernel<<<blocks, block, 0, stream>>>(
         x_f16, packed, w_scale, output, K, R

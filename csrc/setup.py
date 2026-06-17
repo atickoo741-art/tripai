@@ -10,6 +10,7 @@ setup(
             "peqat_gemm.cu",
             "peqat_gemm_f16.cu",
             "peqat_fused_gemm.cu",
+            "peqat_fused_gemv.cu",
         ]),
     ],
     cmdclass={"build_ext": BuildExtension},

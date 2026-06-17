@@ -37,14 +37,23 @@ class CUDAQuantizedLinear(nn.Module):
         else:
             x_2d = x_f32
 
-        # FP16 tensor core path: preprocess (FP16 output) -> INT4 dequant to FP16 -> FP16 matmul
+        # Preprocess activations: FP32 input -> FP16 dequantized activations
         _, x_dq_f16, _ = peqat_cuda.preprocess_forward_f16(x_2d, self.smooth, self.clip)
-        y = peqat_cuda.linear_forward_f16(
-            x_dq_f16, self.packed_w, self.w_scale,
-            self.out_features, self.in_features,
-        )
 
-        # To switch back to fused kernel, replace above 3 lines with:
+        # Fused GEMV for decode (N=1): no w_dq global buffer, scale+unpack inline
+        # Falls back to separate dequant+cuBLAS for N>1 (prefill)
+        if x_2d.size(0) == 1:
+            y = peqat_cuda.fused_gemv_decode_forward(
+                x_dq_f16, self.packed_w, self.w_scale,
+                self.out_features, self.in_features,
+            )
+        else:
+            y = peqat_cuda.linear_forward_f16(
+                x_dq_f16, self.packed_w, self.w_scale,
+                self.out_features, self.in_features,
+            )
+
+        # To switch back to fused kernel, replace above 10 lines with:
         # y = peqat_cuda.fused_linear_forward(
         #     x_2d, self.smooth, self.clip, self.packed_w, self.w_scale,
         #     self.out_features, self.in_features,

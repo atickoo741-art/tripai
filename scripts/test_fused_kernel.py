@@ -23,7 +23,7 @@ def preprocess_reference(x, smooth, clip):
     x_s = x / smooth.unsqueeze(0)
     x_clipped = torch.clamp(x_s, -clip.unsqueeze(0), clip.unsqueeze(0))
     s_x = clip / 7.0
-    x_q = torch.clamp(torch.round(x_clipped / s_x.unsqueeze(0)), -8, 7)
+    x_q = torch.clamp(torch.round(x_clipped / s_x.unsqueeze(0)), -7, 7)
     return x_q.float() * s_x.unsqueeze(0)
 
 

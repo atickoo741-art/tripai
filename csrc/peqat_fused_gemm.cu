@@ -73,14 +73,14 @@ __global__ void fused_preprocess_gemm_kernel(
                 int g_row = m_start + row;
                 int g_col = k_start + col;
                 float x_val = x[g_row * K + g_col];
-                float s = s_smooth[col];
-                float c = s_clip[col];
+                float s = fmaxf(s_smooth[col], 1e-8f);
+                float c = fmaxf(s_clip[col], 1e-8f);
                 float x_s = x_val / s;
                 float x_clipped = fminf(fmaxf(x_s, -c), c);
-                float s_x = c / 7.0f;
+                float s_x = fmaxf(c / 7.0f, 1e-8f);
                 float scaled = x_clipped / s_x;
                 int q = __float2int_rn(scaled);
-                q = min(max(q, -8), 7);
+                q = min(max(q, -7), 7);
                 s_A[store_idx] = (float)q * s_x;
             } else {
                 s_A[store_idx] = 0.0f;
@@ -217,14 +217,14 @@ __global__ void fused_preprocess_gemm_smallm_kernel(
         for (int kk = 0; kk < BK_S; kk++) {
             if (m_local < bm_eff && kk < bk_eff) {
                 float x_val = x[g_row * K + (k_start + kk)];
-                float s = s_smooth[kk];
-                float c = s_clip[kk];
+                float s = fmaxf(s_smooth[kk], 1e-8f);
+                float c = fmaxf(s_clip[kk], 1e-8f);
                 float x_s = x_val / s;
                 float x_clipped = fminf(fmaxf(x_s, -c), c);
-                float s_x = c / 7.0f;
+                float s_x = fmaxf(c / 7.0f, 1e-8f);
                 float scaled = x_clipped / s_x;
                 int q = __float2int_rn(scaled);
-                q = min(max(q, -8), 7);
+                q = min(max(q, -7), 7);
                 s_A[m_local * BK_STRIDE_S + kk] = (float)q * s_x;
             } else {
                 s_A[m_local * BK_STRIDE_S + kk] = 0.0f;

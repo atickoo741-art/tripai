@@ -36,10 +36,20 @@ class CUDAQuantizedLinear(nn.Module):
             x_2d = x_f32.reshape(B * S, K)
         else:
             x_2d = x_f32
-        y = peqat_cuda.fused_linear_forward(
-            x_2d, self.smooth, self.clip, self.packed_w, self.w_scale,
+
+        # FP16 tensor core path: preprocess -> INT4 dequant to FP16 -> FP16 matmul
+        _, x_dq, _ = peqat_cuda.preprocess_forward(x_2d, self.smooth, self.clip)
+        y = peqat_cuda.linear_forward_f16(
+            x_dq, self.packed_w, self.w_scale,
             self.out_features, self.in_features,
         )
+
+        # To switch back to fused kernel, replace above 3 lines with:
+        # y = peqat_cuda.fused_linear_forward(
+        #     x_2d, self.smooth, self.clip, self.packed_w, self.w_scale,
+        #     self.out_features, self.in_features,
+        # )
+
         if ndim == 3:
             y = y.reshape(B, S, self.out_features)
         return y.to(dtype)

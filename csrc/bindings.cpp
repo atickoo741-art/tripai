@@ -14,6 +14,11 @@ void launch_unpack_dequant(
     int rows, int cols, cudaStream_t stream
 );
 
+void launch_unpack_dequant_f16(
+    const uint8_t*, const half*, half*,
+    int, int, cudaStream_t
+);
+
 void launch_fused_preprocess_gemm(
     const float* x,
     const uint8_t* packed,
@@ -111,6 +116,40 @@ torch::Tensor linear_forward(
     return torch::matmul(x_dq, w_dq.t());
 }
 
+torch::Tensor linear_forward_f16(
+    torch::Tensor x_dq,
+    torch::Tensor packed_w,
+    torch::Tensor w_scale,
+    int64_t rows,
+    int64_t cols
+) {
+    TORCH_CHECK(x_dq.device().is_cuda(), "x_dq must be CUDA tensor");
+    TORCH_CHECK(packed_w.device().is_cuda(), "packed_w must be CUDA tensor");
+    TORCH_CHECK(w_scale.device().is_cuda(), "w_scale must be CUDA tensor");
+
+    TORCH_CHECK(x_dq.dim() == 2, "x_dq must be 2D [N, K]");
+    TORCH_CHECK(x_dq.scalar_type() == torch::kFloat32, "x_dq must be float32");
+    TORCH_CHECK(x_dq.size(1) == cols, "x_dq dim[1] != cols");
+
+    TORCH_CHECK(w_scale.dim() == 1, "w_scale must be 1D [rows]");
+    TORCH_CHECK(w_scale.scalar_type() == torch::kFloat16, "w_scale must be float16");
+    TORCH_CHECK(w_scale.size(0) == rows, "w_scale dim[0] != rows");
+
+    int N = x_dq.size(0);
+    auto x_f16 = x_dq.to(torch::kFloat16);
+
+    auto w_dq = torch::empty({rows, cols}, torch::dtype(torch::kFloat16).device(x_dq.device()));
+    launch_unpack_dequant_f16(
+        packed_w.data_ptr<uint8_t>(),
+        reinterpret_cast<half*>(w_scale.data_ptr<at::Half>()),
+        reinterpret_cast<half*>(w_dq.data_ptr<at::Half>()),
+        rows, cols,
+        at::cuda::getCurrentCUDAStream()
+    );
+
+    return torch::matmul(x_f16, w_dq.t());
+}
+
 torch::Tensor fused_linear_forward(
     torch::Tensor x,
     torch::Tensor smooth,
@@ -181,6 +220,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           "PE-QAT activation preprocessing: x/smooth -> clamp(-clip,clip) -> quantize INT4 -> dequantize");
     m.def("linear_forward", &linear_forward,
           "PE-QAT packed INT4 linear: unpack weights -> dequantize -> matmul");
+    m.def("linear_forward_f16", &linear_forward_f16,
+          "PE-QAT FP16 tensor core path: unpack -> FP16 dequant -> FP16 matmul");
     m.def("fused_linear_forward", &fused_linear_forward,
           "PE-QAT fused INT4 linear with inline activation preprocessing: x/smooth -> clamp -> quant -> dequant -> tiled GEMM (one kernel)");
 }

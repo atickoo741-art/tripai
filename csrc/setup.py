@@ -8,6 +8,7 @@ setup(
             "bindings.cpp",
             "peqat_preprocess.cu",
             "peqat_gemm.cu",
+            "peqat_gemm_f16.cu",
             "peqat_fused_gemm.cu",
         ]),
     ],

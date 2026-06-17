@@ -19,24 +19,33 @@ def measure_prefill(model, input_ids, warmup=3, repeats=10):
     return {"ms": avg * 1000, "tokens": tokens, "ms_per_token": avg * 1000 / tokens}
 
 
+def _decode_with_kv(model, prompt_ids, decode_tokens):
+    """Run decode with KV-cache reuse. Returns total time for decode_tokens steps."""
+    model.eval()
+    with torch.no_grad():
+        outputs = model(prompt_ids, use_cache=True)
+        past_key_values = outputs.past_key_values
+        next_token = outputs.logits[0, -1:].argmax(dim=-1, keepdim=True)
+
+        t0 = time.time()
+        for _ in range(decode_tokens):
+            outputs = model(next_token, past_key_values=past_key_values, use_cache=True)
+            past_key_values = outputs.past_key_values
+            next_token = outputs.logits[0, -1:].argmax(dim=-1, keepdim=True)
+        torch.cuda.synchronize()
+    return time.time() - t0
+
+
 def measure_decode(model, prompt_len=128, decode_tokens=50, warmup=3, repeats=5):
-    input_ids = torch.randint(0, 100, (1, prompt_len), device="cuda")
+    prompt_ids = torch.randint(0, 100, (1, prompt_len), device="cuda")
+
     for _ in range(warmup):
-        ids = input_ids.clone()
-        for _ in range(5):
-            logits = model(ids).logits
-            ids = torch.cat([ids, logits[0, -1].argmax().unsqueeze(0).unsqueeze(0)], dim=-1)
-    torch.cuda.synchronize()
+        _decode_with_kv(model, prompt_ids, min(5, decode_tokens))
 
     times = []
     for _ in range(repeats):
-        ids = input_ids.clone()
-        t0 = time.time()
-        for _ in range(decode_tokens):
-            logits = model(ids).logits
-            ids = torch.cat([ids, logits[0, -1].argmax().unsqueeze(0).unsqueeze(0)], dim=-1)
-        torch.cuda.synchronize()
-        times.append((time.time() - t0) / decode_tokens)
+        elapsed = _decode_with_kv(model, prompt_ids, decode_tokens)
+        times.append(elapsed / decode_tokens)
 
     avg_s = sum(times) / len(times)
     return {

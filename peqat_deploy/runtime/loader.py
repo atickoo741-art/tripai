@@ -40,15 +40,14 @@ class CUDAQuantizedLinear(nn.Module):
         # Preprocess activations: FP32 input -> FP16 dequantized activations
         _, x_dq_f16, _ = peqat_cuda.preprocess_forward_f16(x_2d, self.smooth, self.clip)
 
-        # Fused GEMV for decode (N=1): no w_dq global buffer, scale+unpack inline
-        # Falls back to separate dequant+cuBLAS for N>1 (prefill)
+        # Fused kernels: INT4 packed weights loaded directly, unpack+compute in one shot
         if x_2d.size(0) == 1:
             y = peqat_cuda.fused_gemv_decode_forward(
                 x_dq_f16, self.packed_w, self.w_scale,
                 self.out_features, self.in_features,
             )
         else:
-            y = peqat_cuda.linear_forward_f16(
+            y = peqat_cuda.fused_gemm_wmma_forward(
                 x_dq_f16, self.packed_w, self.w_scale,
                 self.out_features, self.in_features,
             )

@@ -8,7 +8,11 @@ from fake_quant import load_peqat_model, PEQATLoRAModule
 
 device = "cuda"
 export_dir = sys.argv[1]
-orig_dir = export_dir.replace("_export", "")
+if len(sys.argv) >= 3:
+    orig_dir = sys.argv[2]
+else:
+    suffix = "_export"
+    orig_dir = export_dir[:-len(suffix)] if export_dir.endswith(suffix) else export_dir.replace("_export", "", 1)
 
 # Load both models
 print("Loading deployed model...")

@@ -23,21 +23,25 @@ dataset = load_dataset("wikitext", "wikitext-2-raw-v1", split="test")
 enc = tokenizer("\n\n".join(dataset["text"]), return_tensors="pt").input_ids.to(device)
 batch = enc[:, :2048]
 
+# Strip PEFT prefix to match deployed naming
+def strip_prefix(name):
+    return name.replace("base_model.model.", "", 1) if name.startswith("base_model.model.") else name
+
 # Hook: capture output at each replaced linear
 orig_acts, dep_acts = {}, {}
 
-def make_hook(d, name):
+def make_hook(d, key):
     def hook(module, inp, out):
-        d[name] = out[0].float() if isinstance(out, tuple) else out.float()
+        d[key] = out[0].float() if isinstance(out, tuple) else out.float()
     return hook
 
-# Register hooks on original
+# Register hooks on original PEQATLoRAModule layers
 orig_handles = []
 for name, mod in orig.named_modules():
     if isinstance(mod, PEQATLoRAModule):
-        orig_handles.append(mod.register_forward_hook(make_hook(orig_acts, name)))
+        orig_handles.append(mod.register_forward_hook(make_hook(orig_acts, strip_prefix(name))))
 
-# Register hooks on deployed
+# Register hooks on deployed CUDAQuantizedLinear layers
 dep_handles = []
 for name, mod in deployed.named_modules():
     if isinstance(mod, CUDAQuantizedLinear):
@@ -61,8 +65,7 @@ for h in dep_handles:
 shared = sorted(set(orig_acts.keys()) & set(dep_acts.keys()))
 print(f"\nFound {len(shared)} shared modules to compare")
 if not shared:
-    print(f"Orig keys sample: {list(orig_acts.keys())[:3]}")
-    print(f"Dep keys sample:  {list(dep_acts.keys())[:3]}")
+    print("No shared modules found!")
     sys.exit(1)
 
 print(f"\n{'Layer':55s} {'MaxDiff':>10s} {'MeanDiff':>10s}")
@@ -81,6 +84,8 @@ for name in shared:
 
 if first_bad:
     print(f"\nFirst layer with max_diff > 1.0: {first_bad}")
+else:
+    print(f"\nNo layer exceeded max_diff 1.0 — differences are small throughout")
 
 # Final logits
 print("\nFinal logits:")

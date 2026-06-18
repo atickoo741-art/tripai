@@ -43,6 +43,7 @@ def main():
         from fake_quant import load_peqat_model
         import torch
         model, tokenizer = load_peqat_model(args.model_path, args.base_model, torch.device(device))
+        model.to(torch.bfloat16)
     else:
         is_original = os.path.isfile(os.path.join(args.model_path, "quantization_params.pth"))
         is_export  = os.path.isfile(os.path.join(args.model_path, "manifest.json"))
@@ -52,6 +53,7 @@ def main():
             from fake_quant import load_peqat_model
             import torch
             model, tokenizer = load_peqat_model(args.model_path, args.base_model, torch.device(device))
+            model.to(torch.bfloat16)
         else:
             print(f"Error: {args.model_path} is neither a valid export dir (manifest.json) "
                   f"nor an original checkpoint dir (quantization_params.pth)")

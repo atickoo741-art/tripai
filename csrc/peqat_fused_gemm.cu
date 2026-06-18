@@ -81,7 +81,7 @@ __global__ void fused_preprocess_gemm_kernel(
                 float scaled = x_clipped / s_x;
                 int q = __float2int_rn(scaled);
                 q = min(max(q, -7), 7);
-                s_A[store_idx] = (float)q * s_x;
+                s_A[store_idx] = (float)q * s_x * s;
             } else {
                 s_A[store_idx] = 0.0f;
             }
@@ -226,7 +226,7 @@ __global__ void fused_preprocess_gemm_smallm_kernel(
                     float scaled = x_clipped / s_x;
                     int q = __float2int_rn(scaled);
                     q = min(max(q, -7), 7);
-                    s_A[m_local * BK_STRIDE_S + kk] = (float)q * s_x;
+                    s_A[m_local * BK_STRIDE_S + kk] = (float)q * s_x * s;
                 } else {
                     s_A[m_local * BK_STRIDE_S + kk] = 0.0f;
                 }

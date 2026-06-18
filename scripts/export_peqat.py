@@ -75,7 +75,10 @@ def main():
     print("\n[1/8] Discovering source directory...")
     discovered = discover_source_dir(args.source_dir, args.checkpoint)
     print(f"  Source: {discovered['source_dir']}")
-    print(f"  Checkpoint: {os.path.basename(discovered['selected_checkpoint'])}")
+    if discovered["selected_checkpoint"]:
+        print(f"  Checkpoint: {os.path.basename(discovered['selected_checkpoint'])}")
+    else:
+        print(f"  Using final model at source dir")
 
     # Step 2: Load config
     print("\n[2/8] Loading export configuration...")
@@ -95,7 +98,8 @@ def main():
     base_model, tokenizer = load_base_model(job.base_model_name, device=device)
     print(f"  Base model loaded: {type(base_model).__name__}")
 
-    peft_model = load_adapter(base_model, discovered["selected_checkpoint"])
+    adapter_path = discovered["selected_checkpoint"] or discovered["source_dir"]
+    peft_model = load_adapter(base_model, adapter_path)
     print(f"  Adapter loaded")
 
     # Step 4: Merge LoRA weights

@@ -1,5 +1,5 @@
 """WikiText-2 perplexity eval for PE-QAT models (deployed CUDA runtime or original fake-quant)."""
-import sys, os, json, torch, torch.nn as nn, tqdm
+import sys, os, json, time, torch, torch.nn as nn, tqdm
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from transformers import AutoTokenizer
 from datasets import load_dataset
@@ -20,6 +20,8 @@ def evaluate(model, tokenizer, device="cuda", seq_len=2048, stride=2048, n_sampl
         shift_labels = batch[:, 1:]
         loss = nn.CrossEntropyLoss()(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
         nlls.append(loss.float() * seq_len)
+        torch.cuda.synchronize()
+        time.sleep(1)
     ppl = torch.exp(torch.stack(nlls).sum() / (n * seq_len))
     return ppl.item()
 

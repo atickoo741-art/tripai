@@ -1,4 +1,4 @@
-"""WikiText-2 perplexity eval for deployed PE-QAT model (CUDA runtime)."""
+"""WikiText-2 perplexity eval for PE-QAT models (deployed CUDA runtime or original fake-quant)."""
 import sys, os, json, torch, torch.nn as nn, tqdm
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from transformers import AutoTokenizer
@@ -26,15 +26,37 @@ def evaluate(model, tokenizer, device="cuda", seq_len=2048, stride=2048, n_sampl
 
 def main():
     import argparse
-    parser = argparse.ArgumentParser()
-    parser.add_argument("export_dir", type=str)
+    parser = argparse.ArgumentParser(description="Evaluate PE-QAT model perplexity on WikiText-2.")
+    parser.add_argument("model_path", type=str, help="Path to export dir (CUDA runtime) or original PE-QAT checkpoint dir")
     parser.add_argument("--base_model", type=str, default="meta-llama/Llama-3.1-8B")
     parser.add_argument("--seq_len", type=int, default=2048)
     parser.add_argument("--n_samples", type=int, default=None)
+    parser.add_argument("--mode", type=str, choices=["auto", "export", "original"], default="auto",
+                        help="'export' for deployed CUDA runtime, 'original' for fake-quant PyTorch, 'auto' to detect")
     args = parser.parse_args()
 
     device = "cuda"
-    model, tokenizer = build_cuda_model(args.export_dir, args.base_model, device)
+
+    if args.mode == "export":
+        model, tokenizer = build_cuda_model(args.model_path, args.base_model, device)
+    elif args.mode == "original":
+        from fake_quant import load_peqat_model
+        import torch
+        model, tokenizer = load_peqat_model(args.model_path, args.base_model, torch.device(device))
+    else:
+        is_original = os.path.isfile(os.path.join(args.model_path, "quantization_params.pth"))
+        is_export  = os.path.isfile(os.path.join(args.model_path, "manifest.json"))
+        if is_export:
+            model, tokenizer = build_cuda_model(args.model_path, args.base_model, device)
+        elif is_original:
+            from fake_quant import load_peqat_model
+            import torch
+            model, tokenizer = load_peqat_model(args.model_path, args.base_model, torch.device(device))
+        else:
+            print(f"Error: {args.model_path} is neither a valid export dir (manifest.json) "
+                  f"nor an original checkpoint dir (quantization_params.pth)")
+            sys.exit(1)
+
     ppl = evaluate(model, tokenizer, device, args.seq_len, n_samples=args.n_samples)
     print(f"\nWikiText-2 perplexity: {ppl:.4f}")
 

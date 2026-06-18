@@ -34,8 +34,9 @@ def discover_source_dir(source_dir: str, checkpoint: str | None = None) -> dict:
             raise FileNotFoundError(
                 f"Specified checkpoint '{checkpoint}' not found in {source_dir}"
             )
-    elif checkpoint_dirs:
-        result["selected_checkpoint"] = checkpoint_dirs[-1]
+    else:
+        # Use source_dir itself (final model), not a checkpoint subdirectory
+        pass
 
     search_dir = result["selected_checkpoint"] or source_dir
 

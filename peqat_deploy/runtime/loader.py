@@ -47,7 +47,7 @@ class CUDAQuantizedLinear(nn.Module):
                 self.out_features, self.in_features,
             )
         else:
-            y = peqat_cuda.fused_gemm_wmma_forward(
+            y = peqat_cuda.linear_forward_f16(
                 x_dq_f16, self.packed_w, self.w_scale,
                 self.out_features, self.in_features,
             )

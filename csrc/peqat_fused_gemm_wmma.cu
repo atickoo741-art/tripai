@@ -5,7 +5,7 @@
 
 #define WMMA_M 16
 #define WMMA_N 16
-#define WMMA_K 16
+#define WMMA_K 64
 
 #define BM 128
 #define BN 64

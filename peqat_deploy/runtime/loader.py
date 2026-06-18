@@ -37,18 +37,18 @@ class CUDAQuantizedLinear(nn.Module):
         else:
             x_2d = x_f32
 
-        # Preprocess activations: FP32 input -> FP16 dequantized activations
-        _, x_dq_f16, _ = peqat_cuda.preprocess_forward_f16(x_2d, self.smooth, self.clip)
-
-        # Fused kernels: INT4 packed weights loaded directly, unpack+compute in one shot
         if x_2d.size(0) == 1:
+            # Decode: FP16 path (GEMV kernel, 1.9× faster, stable)
+            _, x_dq_f16, _ = peqat_cuda.preprocess_forward_f16(x_2d, self.smooth, self.clip)
             y = peqat_cuda.fused_gemv_decode_forward(
                 x_dq_f16, self.packed_w, self.w_scale,
                 self.out_features, self.in_features,
             )
         else:
-            y = peqat_cuda.linear_forward_f16(
-                x_dq_f16, self.packed_w, self.w_scale,
+            # Prefill: bf16 path (avoids FP16 overflow in accumulation, matches training precision)
+            _, x_dq_f16, _ = peqat_cuda.preprocess_forward_f16(x_2d, self.smooth, self.clip)
+            y = peqat_cuda.linear_forward_bf16(
+                x_dq_f16.bfloat16(), self.packed_w, self.w_scale.bfloat16(),
                 self.out_features, self.in_features,
             )
 

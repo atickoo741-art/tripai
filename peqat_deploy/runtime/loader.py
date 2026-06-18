@@ -39,14 +39,14 @@ class CUDAQuantizedLinear(nn.Module):
 
         if x_2d.size(0) == 1:
             # Decode: FP16 path (GEMV kernel, 1.9× faster, stable)
-            _, x_dq_f16, _ = peqat_cuda.preprocess_forward_f16(x_2d, self.smooth, self.clip)
+            _, x_dq_f16, _ = peqat_cuda.preprocess_forward_f16(x_2d, self.smooth.float(), self.clip.float())
             y = peqat_cuda.fused_gemv_decode_forward(
                 x_dq_f16, self.packed_w, self.w_scale,
                 self.out_features, self.in_features,
             )
         else:
             # Prefill: bf16 path (avoids FP16 overflow in accumulation, matches training precision)
-            _, x_dq_f16, _ = peqat_cuda.preprocess_forward_f16(x_2d, self.smooth, self.clip)
+            _, x_dq_f16, _ = peqat_cuda.preprocess_forward_f16(x_2d, self.smooth.float(), self.clip.float())
             y = peqat_cuda.linear_forward_bf16(
                 x_dq_f16.bfloat16(), self.packed_w, self.w_scale.bfloat16(),
                 self.out_features, self.in_features,
@@ -74,8 +74,8 @@ def load_export(export_dir: str, device: str = "cuda") -> dict:
         os.path.join(export_dir, "activation", "clip.safetensors"),
     )
     for k in smooth:
-        smooth[k] = smooth[k].to(device).float()
-        clip[k] = clip[k].to(device).float()
+        smooth[k] = smooth[k].to(device).bfloat16()
+        clip[k] = clip[k].to(device).bfloat16()
 
     layers = {}
     for module_name in manifest.get("weight_artifact_paths", {}):

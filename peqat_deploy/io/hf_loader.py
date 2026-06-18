@@ -9,7 +9,7 @@ def load_base_model(model_name: str, device: str = "cpu"):
 
     model = AutoModelForCausalLM.from_pretrained(
         model_name,
-        torch_dtype=torch.float16,
+        torch_dtype=torch.bfloat16,
         low_cpu_mem_usage=True,
     )
     if device != "cpu":

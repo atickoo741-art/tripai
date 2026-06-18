@@ -51,8 +51,8 @@ def extract_quant_params(quant_params_path: str, merged_weights: dict) -> dict:
             )
 
         normalized[module_name] = {
-            "smooth": smooth.detach().clone().float(),
-            "clip": clip.detach().clone().float(),
+            "smooth": smooth.detach().clone().bfloat16(),
+            "clip": clip.detach().clone().bfloat16(),
         }
 
     return normalized

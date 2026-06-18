@@ -44,7 +44,7 @@ def merge_lora_weights(
         lora_delta = (lora_B_weight @ lora_A_weight) * scaling
         w_eff = base_weight + lora_delta.to(dtype=base_weight.dtype, device=base_weight.device)
 
-        merged_weights[name] = w_eff.detach().clone().to(torch.float16).cpu()
+        merged_weights[name] = w_eff.detach().clone().to(torch.bfloat16).cpu()
 
         if debug_layer and debug_layer in name and not debug_saved:
             debug_path = f"debug_{name.replace('.', '_')}_merged_fp16.pt"

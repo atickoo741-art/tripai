@@ -15,6 +15,12 @@ void launch_preprocess_f16(
     int, int, cudaStream_t
 );
 
+void launch_preprocess_bf16(
+    const __nv_bfloat16*, const __nv_bfloat16*, const __nv_bfloat16*,
+    int8_t*, __nv_bfloat16*, float*,
+    int, int, cudaStream_t
+);
+
 void launch_unpack_dequant(
     const uint8_t* packed, const float* w_scale, float* w_dq,
     int rows, int cols, cudaStream_t stream
@@ -134,6 +140,46 @@ std::vector<torch::Tensor> preprocess_forward_f16(
         clip.data_ptr<float>(),
         x_q.data_ptr<int8_t>(),
         reinterpret_cast<half*>(x_dq.data_ptr<at::Half>()),
+        x_scale.data_ptr<float>(),
+        N, K,
+        at::cuda::getCurrentCUDAStream()
+    );
+
+    return {x_q, x_dq, x_scale};
+}
+
+std::vector<torch::Tensor> preprocess_forward_bf16(
+    torch::Tensor x,
+    torch::Tensor smooth,
+    torch::Tensor clip
+) {
+    TORCH_CHECK(x.device().is_cuda(), "x must be CUDA tensor");
+    TORCH_CHECK(smooth.device().is_cuda(), "smooth must be CUDA tensor");
+    TORCH_CHECK(clip.device().is_cuda(), "clip must be CUDA tensor");
+
+    TORCH_CHECK(x.dim() == 2, "x must be 2D [N, K]");
+    TORCH_CHECK(smooth.dim() == 1, "smooth must be 1D [K]");
+    TORCH_CHECK(clip.dim() == 1, "clip must be 1D [K]");
+    TORCH_CHECK(x.scalar_type() == torch::kBFloat16, "x must be bfloat16");
+    TORCH_CHECK(smooth.scalar_type() == torch::kBFloat16, "smooth must be bfloat16");
+    TORCH_CHECK(clip.scalar_type() == torch::kBFloat16, "clip must be bfloat16");
+
+    int N = x.size(0);
+    int K = x.size(1);
+
+    TORCH_CHECK(smooth.size(0) == K, "smooth dim[0] != K");
+    TORCH_CHECK(clip.size(0) == K, "clip dim[0] != K");
+
+    auto x_q = torch::empty({N, K}, torch::dtype(torch::kInt8).device(x.device()));
+    auto x_dq = torch::empty({N, K}, torch::dtype(torch::kBFloat16).device(x.device()));
+    auto x_scale = torch::empty({K}, torch::dtype(torch::kFloat32).device(x.device()));
+
+    launch_preprocess_bf16(
+        reinterpret_cast<__nv_bfloat16*>(x.data_ptr<at::BFloat16>()),
+        reinterpret_cast<__nv_bfloat16*>(smooth.data_ptr<at::BFloat16>()),
+        reinterpret_cast<__nv_bfloat16*>(clip.data_ptr<at::BFloat16>()),
+        x_q.data_ptr<int8_t>(),
+        reinterpret_cast<__nv_bfloat16*>(x_dq.data_ptr<at::BFloat16>()),
         x_scale.data_ptr<float>(),
         N, K,
         at::cuda::getCurrentCUDAStream()
@@ -390,6 +436,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           "PE-QAT activation preprocessing: x/smooth -> clamp(-clip,clip) -> quantize INT4 -> dequantize");
     m.def("preprocess_forward_f16", &preprocess_forward_f16,
           "PE-QAT activation preprocessing with FP16 output");
+    m.def("preprocess_forward_bf16", &preprocess_forward_bf16,
+          "PE-QAT activation preprocessing with bf16 arithmetic and bf16 output");
     m.def("linear_forward", &linear_forward,
           "PE-QAT packed INT4 linear: unpack weights -> dequantize -> matmul");
     m.def("linear_forward_f16", &linear_forward_f16,

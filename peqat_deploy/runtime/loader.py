@@ -28,31 +28,20 @@ class CUDAQuantizedLinear(nn.Module):
         self.in_features = in_features
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        dtype = x.dtype
-        x_f32 = x.float()
-        ndim = x_f32.dim()
+        ndim = x.dim()
         if ndim == 3:
-            B, S, K = x_f32.shape
-            x_2d = x_f32.reshape(B * S, K)
+            B, S, K = x.shape
+            x_2d = x.reshape(B * S, K)
         else:
-            x_2d = x_f32
+            x_2d = x
 
-        if x_2d.size(0) == 1:
-            # Decode: FP16 path (GEMV kernel, 1.9× faster, stable)
-            _, x_dq_f16, _ = peqat_cuda.preprocess_forward_f16(x_2d, self.smooth.float(), self.clip.float())
-            y = peqat_cuda.fused_gemv_decode_forward(
-                x_dq_f16, self.packed_w, self.w_scale,
-                self.out_features, self.in_features,
-            )
-        else:
-            # Prefill: bf16 path (avoids FP16 overflow in accumulation, matches training precision)
-            _, x_dq_f16, _ = peqat_cuda.preprocess_forward_f16(x_2d, self.smooth.float(), self.clip.float())
-            y = peqat_cuda.linear_forward_bf16(
-                x_dq_f16.bfloat16(), self.packed_w, self.w_scale.bfloat16(),
-                self.out_features, self.in_features,
-            )
+        _, x_dq, _ = peqat_cuda.preprocess_forward_bf16(x_2d, self.smooth, self.clip)
+        y = peqat_cuda.linear_forward_bf16(
+            x_dq, self.packed_w, self.w_scale.bfloat16(),
+            self.out_features, self.in_features,
+        )
 
-        # To switch back to fused kernel, replace above 10 lines with:
+        # To switch to fused kernel (once converted to bf16): 
         # y = peqat_cuda.fused_linear_forward(
         #     x_2d, self.smooth, self.clip, self.packed_w, self.w_scale,
         #     self.out_features, self.in_features,
@@ -60,7 +49,7 @@ class CUDAQuantizedLinear(nn.Module):
 
         if ndim == 3:
             y = y.reshape(B, S, self.out_features)
-        return y.to(dtype)
+        return y.to(x.dtype)
 
 
 def load_export(export_dir: str, device: str = "cuda") -> dict:
@@ -115,7 +104,7 @@ def build_cuda_model(
 
     model = AutoModelForCausalLM.from_pretrained(
         base_model_name,
-        dtype=torch.float16,
+        dtype=torch.bfloat16,
         low_cpu_mem_usage=True,
     )
     model.eval()

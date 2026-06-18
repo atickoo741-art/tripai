@@ -9,21 +9,21 @@ def quantize_weights(smoothed_weights: dict) -> tuple:
     error_stats = {}
 
     for module_name, w in smoothed_weights.items():
-        w_float = w.float()
-        d, k = w_float.shape
+        w_bf16 = w.bfloat16()
+        d, k = w_bf16.shape
 
-        row_max = w_float.abs().amax(dim=1)
+        row_max = w_bf16.abs().amax(dim=1)
         scale = (row_max / qmax).clamp(min=1e-8)
         scale = scale.unsqueeze(1)
 
-        w_scaled = w_float / scale
+        w_scaled = w_bf16 / scale
         w_q = torch.clamp(torch.round(w_scaled), qmin, qmax).to(torch.int8)
-        w_dequant = w_q.float() * scale
+        w_dequant = w_q.float() * scale.float()
 
-        abs_err = (w_float - w_dequant).abs()
+        abs_err = (w_bf16.float() - w_dequant.float()).abs()
         max_err = abs_err.max().item()
         mean_err = abs_err.mean().item()
-        frob_err = (w_float - w_dequant).norm().item() / w_float.norm().item()
+        frob_err = (w_bf16.float() - w_dequant).norm().item() / w_bf16.float().norm().item()
 
         quantized[module_name] = {
             "qweight": w_q,

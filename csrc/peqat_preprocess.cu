@@ -32,7 +32,7 @@ __global__ void preprocess_forward_kernel(
         q = min(max(q, -8), 7);
 
         x_q[idx] = (int8_t)q;
-        x_dq[idx] = (float)q * s_x * s;
+        x_dq[idx] = (float)q * s_x;
 
         if (n == 0) {
             x_scale[k] = s_x;
@@ -70,7 +70,7 @@ __global__ void preprocess_f16_kernel(
         q = min(max(q, -8), 7);
 
         x_q[idx] = (int8_t)q;
-        x_dq[idx] = __float2half((float)q * s_x * s);
+        x_dq[idx] = __float2half((float)q * s_x);
 
         if (n == 0) {
             x_scale[k] = s_x;

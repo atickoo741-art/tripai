@@ -21,7 +21,7 @@ def evaluate(model, tokenizer, device="cuda", seq_len=2048, stride=2048, n_sampl
         loss = nn.CrossEntropyLoss()(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
         nlls.append(loss.float() * seq_len)
         torch.cuda.synchronize()
-        time.sleep(2)
+        time.sleep(5)
     ppl = torch.exp(torch.stack(nlls).sum() / (n * seq_len))
     return ppl.item()
 

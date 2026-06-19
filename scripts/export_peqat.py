@@ -18,6 +18,7 @@ from peqat_deploy.quant.manifest import build_manifest
 from peqat_deploy.quant.merge_lora import build_layer_map, merge_lora_weights
 from peqat_deploy.quant.pack_int4 import pack_int4
 from peqat_deploy.quant.quantize_weights import quantize_weights
+from peqat_deploy.quant.fold_act_scale import fold_act_scale_into_weights
 
 
 def main():
@@ -60,6 +61,11 @@ def main():
         help="Overwrite existing export directory",
     )
     parser.add_argument(
+        "--fold-weights",
+        action="store_true",
+        help="Fold activation scale s_x into weights for INT4 Tensor Core runtime",
+    )
+    parser.add_argument(
         "--device",
         type=str,
         default="cpu",
@@ -71,8 +77,10 @@ def main():
     print("PE-QAT Export Pipeline")
     print("=" * 60)
 
+    num_main_steps = "8" if not args.fold_weights else "9"
+
     # Step 1: Discover source
-    print("\n[1/8] Discovering source directory...")
+    print(f"\n[1/{num_main_steps}] Discovering source directory...")
     discovered = discover_source_dir(args.source_dir, args.checkpoint)
     print(f"  Source: {discovered['source_dir']}")
     if discovered["selected_checkpoint"]:
@@ -81,7 +89,7 @@ def main():
         print(f"  Using final model at source dir")
 
     # Step 2: Load config
-    print("\n[2/8] Loading export configuration...")
+    print(f"\n[2/{num_main_steps}] Loading export configuration...")
     overrides = {}
     if args.output_dir:
         overrides["export_dir"] = args.output_dir
@@ -93,7 +101,7 @@ def main():
     print(f"  Export dir: {job.export_dir}")
 
     # Step 3: Load base model and adapter
-    print("\n[3/8] Loading base model and adapter...")
+    print(f"\n[3/{num_main_steps}] Loading base model and adapter...")
     device = args.device
     base_model, tokenizer = load_base_model(job.base_model_name, device=device)
     print(f"  Base model loaded: {type(base_model).__name__}")
@@ -103,7 +111,7 @@ def main():
     print(f"  Adapter loaded")
 
     # Step 4: Merge LoRA weights
-    print("\n[4/8] Merging LoRA weights...")
+    print(f"\n[4/{num_main_steps}] Merging LoRA weights...")
     merged_weights = merge_lora_weights(
         peft_model,
         job.target_modules,
@@ -118,7 +126,7 @@ def main():
     print("  Freed base model and adapter from memory")
 
     # Step 5: Extract quantization parameters
-    print("\n[5/8] Extracting quantization parameters...")
+    print(f"\n[5/{num_main_steps}] Extracting quantization parameters...")
     if not discovered["quantization_params"]:
         raise FileNotFoundError(
             "quantization_params.pth not found in checkpoint directory"
@@ -129,20 +137,30 @@ def main():
     print(f"  Extracted params for {len(quant_params)} modules")
 
     # Step 6: Fold smoothing onto weights
-    print("\n[6/8] Folding smoothing onto weights...")
+    print(f"\n[6/{num_main_steps}] Folding smoothing onto weights...")
     smoothed_weights = fold_smoothing(merged_weights, quant_params)
     print(f"  Smoothed {len(smoothed_weights)} weight tensors")
 
     # Step 7: Quantize and pack
-    print("\n[7/8] Quantizing and packing weights...")
+    print(f"\n[7/{num_main_steps}] Quantizing and packing weights...")
     quantized, error_stats = quantize_weights(smoothed_weights)
     print(f"  Quantized {len(quantized)} modules")
 
     packed = pack_int4(quantized, smoothing_folded=True)
     print(f"  Packed {len(packed)} modules")
 
-    # Step 8: Save artifacts
-    print("\n[8/8] Saving export artifacts...")
+    # Step 8: Fold activation scales into weights for INT4 TC (optional)
+    packed_folded = None
+    next_step = 8
+    if args.fold_weights:
+        print(f"\n[{next_step}/{num_main_steps}] Folding activation scales into weights for INT4 Tensor Core...")
+        next_step += 1
+        clip_dict = {k: v["clip"] for k, v in quant_params.items()}
+        packed_folded = fold_act_scale_into_weights(packed, clip_dict)
+        print(f"  Folded {len(packed_folded)} modules")
+
+    # Step 9 (or 8): Save artifacts
+    print(f"\n[{next_step}/{num_main_steps}] Saving export artifacts...")
     layer_map = build_layer_map(merged_weights, job.export_dir)
 
     artifact_paths = {
@@ -151,7 +169,7 @@ def main():
         "activation_meta": "activation/activation_meta.json",
     }
 
-    manifest = build_manifest(job, layer_map, quant_params, packed, artifact_paths)
+    manifest = build_manifest(job, layer_map, quant_params, packed, artifact_paths, packed_folded=packed_folded)
 
     save_artifacts(
         export_dir=job.export_dir,
@@ -161,6 +179,7 @@ def main():
         quant_params=quant_params,
         quantized=quantized,
         packed=packed,
+        packed_folded=packed_folded,
         error_stats=error_stats,
         layer_map=layer_map,
         manifest=manifest,

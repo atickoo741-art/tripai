@@ -10,6 +10,7 @@ def build_manifest(
     quant_params: dict,
     packed: dict,
     artifact_paths: dict,
+    packed_folded: dict | None = None,
 ) -> dict:
     try:
         git_commit = (
@@ -33,12 +34,16 @@ def build_manifest(
     weight_artifact_paths = {}
     for module_name in layer_map:
         safe_name = module_name.replace(".", "_")
-        weight_artifact_paths[module_name] = {
+        entry = {
             "weight_int4": f"weights/{safe_name}/weight_int4.bin",
             "weight_scale": f"weights/{safe_name}/weight_scale.fp16",
             "shape": f"weights/{safe_name}/shape.json",
             "pack_meta": f"weights/{safe_name}/pack_meta.json",
         }
+        if packed_folded and module_name in packed_folded:
+            entry["weight_int4_folded"] = f"weights/{safe_name}/weight_int4_folded.bin"
+            entry["weight_scale_folded"] = f"weights/{safe_name}/weight_scale_folded.bf16"
+        weight_artifact_paths[module_name] = entry
 
     manifest = {
         "manifest_version": 1,

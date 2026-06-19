@@ -22,6 +22,7 @@ def save_artifacts(
     layer_map: dict,
     manifest: dict,
     overwrite: bool = False,
+    packed_folded: dict | None = None,
 ):
     if os.path.exists(export_dir):
         if overwrite:
@@ -195,6 +196,21 @@ def save_artifacts(
         with open(pack_meta_path, "w") as f:
             json.dump(layer_data["pack_meta"], f, indent=2)
         print(f"  Wrote weights/{safe_name}/pack_meta.json")
+
+    # --- folded weights for INT4 TC (optional) ---
+    if packed_folded:
+        print(f"  Saving folded weights for INT4 Tensor Core runtime...")
+        for module_name in packed_folded:
+            safe_name = module_name.replace(".", "_")
+            layer_dir = os.path.join(export_dir, "weights", safe_name)
+
+            fd = packed_folded[module_name]
+            w4_path = os.path.join(layer_dir, "weight_int4_folded.bin")
+            with open(w4_path, "wb") as f:
+                f.write(fd["weight_int4_bytes"])
+            ws_path = os.path.join(layer_dir, "weight_scale_folded.bf16")
+            with open(ws_path, "wb") as f:
+                f.write(fd["weight_scale_bytes"])
 
     # --- validation/ ---
     error_stats_path = os.path.join(export_dir, "validation", "layer_error_stats.json")

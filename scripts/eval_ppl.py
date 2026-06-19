@@ -33,14 +33,16 @@ def main():
     parser.add_argument("--base_model", type=str, default="meta-llama/Llama-3.1-8B")
     parser.add_argument("--seq_len", type=int, default=2048)
     parser.add_argument("--n_samples", type=int, default=None)
-    parser.add_argument("--mode", type=str, choices=["auto", "export", "original"], default="auto",
-                        help="'export' for deployed CUDA runtime, 'original' for fake-quant PyTorch, 'auto' to detect")
+    parser.add_argument("--mode", type=str, choices=["auto", "export", "export-folded", "original"], default="auto",
+                        help="'export' for deployed CUDA runtime, 'export-folded' for INT4 TC folded-weights validation, 'original' for fake-quant PyTorch, 'auto' to detect")
     args = parser.parse_args()
 
     device = "cuda"
 
     if args.mode == "export":
         model, tokenizer = build_cuda_model(args.model_path, args.base_model, device)
+    elif args.mode == "export-folded":
+        model, tokenizer = build_cuda_model(args.model_path, args.base_model, device, use_folded=True)
     elif args.mode == "original":
         from fake_quant import load_peqat_model
         import torch

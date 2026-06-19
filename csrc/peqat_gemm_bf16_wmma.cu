@@ -86,6 +86,7 @@ __global__ void fused_gemm_bf16_wmma_kernel(
     __shared__ __nv_bfloat16 s_a[BM][BK_STRIDE];
     __shared__ __nv_bfloat16 s_b[BK][BN_STRIDE];
     __shared__ __nv_bfloat16 s_ws[BN];
+    __shared__ float s_float_cg[BM][WMMA_N];
 
     int bx = blockIdx.x;
     int by = blockIdx.y;
@@ -179,13 +180,27 @@ __global__ void fused_gemm_bf16_wmma_kernel(
         __syncthreads();
     }
 
+    // Store accumulators: WMMA float -> shared staging -> thread convert to bf16 -> global
     for (int cg = 0; cg < 4; cg++) {
         int col_base = cg * WMMA_N;
         int g_m = m_start + row_base;
         int g_n = n_start + col_base;
         if (g_m < M && g_n < N) {
-            store_matrix_sync(&output[g_m * N + g_n], acc[cg], N, mem_row_major);
+            store_matrix_sync(&s_float_cg[row_base][0], acc[cg], WMMA_N, mem_row_major);
         }
+        __syncthreads();
+
+        int total = bm_eff * WMMA_N;
+        for (int i = tid; i < total; i += 256) {
+            int row = i / WMMA_N;
+            int col = i % WMMA_N;
+            int out_m = m_start + row;
+            int out_n = n_start + col_base + col;
+            if (out_m < M && out_n < N) {
+                output[out_m * N + out_n] = __float2bfloat16_rn(s_float_cg[row][col]);
+            }
+        }
+        __syncthreads();
     }
 }
 

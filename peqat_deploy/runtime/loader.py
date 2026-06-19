@@ -66,7 +66,7 @@ class CUDAQuantizedLinear(nn.Module):
             w_new_q = self._get_folded_weights()
             w_new_scale = self.w_scale_folded.bfloat16()
             M, N = x_q.size(0), self.out_features
-            y = torch.matmul(x_q.float(), w_new_q.float()) * w_new_scale.unsqueeze(0).float()
+            y = torch.matmul(x_q.float(), w_new_q.T.float()) * w_new_scale.unsqueeze(0).float()
             y = y.bfloat16()
         else:
             _, x_dq, _ = peqat_cuda.preprocess_forward_bf16(x_2d, self.smooth, self.clip)

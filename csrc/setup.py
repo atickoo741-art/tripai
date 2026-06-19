@@ -12,6 +12,7 @@ setup(
             "peqat_fused_gemm.cu",
             "peqat_fused_gemv.cu",
             "peqat_fused_gemm_wmma.cu",
+            "peqat_gemm_bf16_wmma.cu",
         ]),
     ],
     cmdclass={"build_ext": BuildExtension},

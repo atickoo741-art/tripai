@@ -36,16 +36,16 @@ class CUDAQuantizedLinear(nn.Module):
             x_2d = x
 
         _, x_dq, _ = peqat_cuda.preprocess_forward_bf16(x_2d, self.smooth, self.clip)
-        y = peqat_cuda.linear_forward_bf16(
-            x_dq, self.packed_w, self.w_scale.bfloat16(),
-            self.out_features, self.in_features,
-        )
-
-        # To switch to fused kernel (once converted to bf16): 
-        # y = peqat_cuda.fused_linear_forward(
-        #     x_2d, self.smooth, self.clip, self.packed_w, self.w_scale,
-        #     self.out_features, self.in_features,
-        # )
+        if x_2d.size(0) == 1:
+            y = peqat_cuda.fused_gemv_bf16_forward(
+                x_dq, self.packed_w, self.w_scale.bfloat16(),
+                self.out_features, self.in_features,
+            )
+        else:
+            y = peqat_cuda.fused_gemm_bf16_wmma_forward(
+                x_dq, self.packed_w, self.w_scale.bfloat16(),
+                self.out_features, self.in_features,
+            )
 
         if ndim == 3:
             y = y.reshape(B, S, self.out_features)

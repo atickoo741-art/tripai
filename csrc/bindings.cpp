@@ -46,6 +46,16 @@ void launch_fused_gemm_wmma(
     int, int, int, cudaStream_t
 );
 
+void launch_fused_gemv_bf16(
+    const __nv_bfloat16*, const uint8_t*, const __nv_bfloat16*, __nv_bfloat16*,
+    int, int, cudaStream_t
+);
+
+void launch_fused_gemm_bf16_wmma(
+    const __nv_bfloat16*, const uint8_t*, const __nv_bfloat16*, __nv_bfloat16*,
+    int, int, int, cudaStream_t
+);
+
 void launch_fused_preprocess_gemm(
     const float* x,
     const uint8_t* packed,
@@ -366,6 +376,82 @@ torch::Tensor linear_forward_bf16(
     return torch::matmul(x_bf16, w_dq.t());
 }
 
+torch::Tensor fused_gemv_bf16_forward(
+    torch::Tensor x_bf16,
+    torch::Tensor packed_w,
+    torch::Tensor w_scale,
+    int64_t rows,
+    int64_t cols
+) {
+    TORCH_CHECK(x_bf16.device().is_cuda(), "x_bf16 must be CUDA tensor");
+    TORCH_CHECK(packed_w.device().is_cuda(), "packed_w must be CUDA tensor");
+    TORCH_CHECK(w_scale.device().is_cuda(), "w_scale must be CUDA tensor");
+
+    TORCH_CHECK(x_bf16.dim() == 2, "x_bf16 must be 2D [N, K]");
+    TORCH_CHECK(x_bf16.scalar_type() == torch::kBFloat16, "x_bf16 must be bfloat16");
+    TORCH_CHECK(x_bf16.size(1) == cols, "x_bf16 dim[1] != cols");
+
+    TORCH_CHECK(w_scale.dim() == 1, "w_scale must be 1D [rows]");
+    TORCH_CHECK(w_scale.scalar_type() == torch::kBFloat16, "w_scale must be bfloat16");
+    TORCH_CHECK(w_scale.size(0) == rows, "w_scale dim[0] != rows");
+
+    int N = x_bf16.size(0);
+    int K = cols;
+    int R = rows;
+
+    TORCH_CHECK(N == 1, "fused_gemv_bf16 only supports N=1, got N=" + std::to_string(N));
+
+    auto output = torch::empty({1, R}, torch::dtype(torch::kBFloat16).device(x_bf16.device()));
+    launch_fused_gemv_bf16(
+        reinterpret_cast<__nv_bfloat16*>(x_bf16.data_ptr<at::BFloat16>()),
+        packed_w.data_ptr<uint8_t>(),
+        reinterpret_cast<__nv_bfloat16*>(w_scale.data_ptr<at::BFloat16>()),
+        reinterpret_cast<__nv_bfloat16*>(output.data_ptr<at::BFloat16>()),
+        K, R,
+        at::cuda::getCurrentCUDAStream()
+    );
+
+    return output;
+}
+
+torch::Tensor fused_gemm_bf16_wmma_forward(
+    torch::Tensor x_bf16,
+    torch::Tensor packed_w,
+    torch::Tensor w_scale,
+    int64_t rows,
+    int64_t cols
+) {
+    TORCH_CHECK(x_bf16.device().is_cuda(), "x_bf16 must be CUDA tensor");
+    TORCH_CHECK(packed_w.device().is_cuda(), "packed_w must be CUDA tensor");
+    TORCH_CHECK(w_scale.device().is_cuda(), "w_scale must be CUDA tensor");
+
+    TORCH_CHECK(x_bf16.dim() == 2, "x_bf16 must be 2D [N, K]");
+    TORCH_CHECK(x_bf16.scalar_type() == torch::kBFloat16, "x_bf16 must be bfloat16");
+    TORCH_CHECK(x_bf16.size(1) == cols, "x_bf16 dim[1] != cols");
+
+    TORCH_CHECK(w_scale.dim() == 1, "w_scale must be 1D [rows]");
+    TORCH_CHECK(w_scale.scalar_type() == torch::kBFloat16, "w_scale must be bfloat16");
+    TORCH_CHECK(w_scale.size(0) == rows, "w_scale dim[0] != rows");
+
+    int M = x_bf16.size(0);
+    int K = cols;
+    int N = rows;
+
+    TORCH_CHECK(M > 1, "fused_gemm_bf16_wmma requires M>1, use fused_gemv_bf16 for M=1");
+
+    auto output = torch::empty({M, N}, torch::dtype(torch::kBFloat16).device(x_bf16.device()));
+    launch_fused_gemm_bf16_wmma(
+        reinterpret_cast<__nv_bfloat16*>(x_bf16.data_ptr<at::BFloat16>()),
+        packed_w.data_ptr<uint8_t>(),
+        reinterpret_cast<__nv_bfloat16*>(w_scale.data_ptr<at::BFloat16>()),
+        reinterpret_cast<__nv_bfloat16*>(output.data_ptr<at::BFloat16>()),
+        M, N, K,
+        at::cuda::getCurrentCUDAStream()
+    );
+
+    return output;
+}
+
 torch::Tensor fused_linear_forward(
     torch::Tensor x,
     torch::Tensor smooth,
@@ -446,6 +532,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           "PE-QAT fused GEMV decode: INT4 weights loaded directly, unpack+dot in one kernel");
     m.def("linear_forward_bf16", &linear_forward_bf16,
           "PE-QAT bf16 tensor core path: unpack -> bf16 dequant -> bf16 matmul");
+    m.def("fused_gemv_bf16_forward", &fused_gemv_bf16_forward,
+          "PE-QAT fused GEMV decode (bf16): INT4 weights loaded directly, unpack+dot in one kernel");
+    m.def("fused_gemm_bf16_wmma_forward", &fused_gemm_bf16_wmma_forward,
+          "PE-QAT fused GEMM prefill (bf16 WMMA): INT4 weights -> unpack to bf16 shared -> wmma bf16 tensor core GEMM");
     m.def("fused_gemm_wmma_forward", &fused_gemm_wmma_forward,
           "PE-QAT fused GEMM prefill: INT4 weights -> unpack to FP16 shared -> wmma tensor core GEMM");
     m.def("fused_linear_forward", &fused_linear_forward,

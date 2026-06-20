@@ -337,7 +337,6 @@ if __name__ == "__main__":
 
     training_args = TrainingArguments(
     output_dir=output_dir,
-    overwrite_output_dir=bool(config.get('training.overwrite_output_dir', False)),
     num_train_epochs=config.get('training.num_epochs'),
     per_device_train_batch_size=config.get('training.batch_size'),
     per_device_eval_batch_size=config.get('training.batch_size'),

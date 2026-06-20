@@ -56,6 +56,16 @@ void launch_fused_gemm_bf16_wmma(
     int, int, int, cudaStream_t
 );
 
+void launch_preprocess_per_token(
+    const __nv_bfloat16* x,
+    const __nv_bfloat16* smooth,
+    const __nv_bfloat16* clip,
+    int32_t* x_packed,
+    float* s_x,
+    int M, int K,
+    cudaStream_t stream
+);
+
 void launch_fused_preprocess_gemm(
     const float* x,
     const uint8_t* packed,
@@ -196,6 +206,48 @@ std::vector<torch::Tensor> preprocess_forward_bf16(
     );
 
     return {x_q, x_dq, x_scale};
+}
+
+// --- Per-token preprocess (for INT4 Tensor Core path) ---
+
+std::vector<torch::Tensor> preprocess_per_token_forward(
+    torch::Tensor x,
+    torch::Tensor smooth,
+    torch::Tensor clip
+) {
+    TORCH_CHECK(x.device().is_cuda(), "x must be CUDA tensor");
+    TORCH_CHECK(smooth.device().is_cuda(), "smooth must be CUDA tensor");
+    TORCH_CHECK(clip.device().is_cuda(), "clip must be CUDA tensor");
+
+    TORCH_CHECK(x.dim() == 2, "x must be 2D [M, K]");
+    TORCH_CHECK(smooth.dim() == 1, "smooth must be 1D [K]");
+    TORCH_CHECK(clip.dim() == 1, "clip must be 1D [K]");
+    TORCH_CHECK(x.scalar_type() == torch::kBFloat16, "x must be bfloat16");
+    TORCH_CHECK(smooth.scalar_type() == torch::kBFloat16, "smooth must be bfloat16");
+    TORCH_CHECK(clip.scalar_type() == torch::kBFloat16, "clip must be bfloat16");
+
+    int M = x.size(0);
+    int K = x.size(1);
+
+    TORCH_CHECK(smooth.size(0) == K, "smooth dim[0] != K");
+    TORCH_CHECK(clip.size(0) == K, "clip dim[0] != K");
+    TORCH_CHECK(K % 4 == 0, "K must be multiple of 4 for INT4 packing");
+
+    int n_packed = K / 4;
+    auto x_packed = torch::empty({M, n_packed}, torch::dtype(torch::kInt32).device(x.device()));
+    auto s_x_out = torch::empty({M}, torch::dtype(torch::kFloat32).device(x.device()));
+
+    launch_preprocess_per_token(
+        reinterpret_cast<__nv_bfloat16*>(x.data_ptr<at::BFloat16>()),
+        reinterpret_cast<__nv_bfloat16*>(smooth.data_ptr<at::BFloat16>()),
+        reinterpret_cast<__nv_bfloat16*>(clip.data_ptr<at::BFloat16>()),
+        x_packed.data_ptr<int32_t>(),
+        s_x_out.data_ptr<float>(),
+        M, K,
+        at::cuda::getCurrentCUDAStream()
+    );
+
+    return {x_packed, s_x_out};
 }
 
 torch::Tensor linear_forward(
@@ -540,4 +592,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           "PE-QAT fused GEMM prefill: INT4 weights -> unpack to FP16 shared -> wmma tensor core GEMM");
     m.def("fused_linear_forward", &fused_linear_forward,
           "PE-QAT fused INT4 linear with inline activation preprocessing: x/smooth -> clamp -> quant -> dequant -> tiled GEMM (one kernel)");
+    m.def("preprocess_per_token_forward", &preprocess_per_token_forward,
+          "Per-token preprocess for INT4 TC: x/smooth -> clamp(-clip,clip) -> per-token max/7 -> pack 4xINT4 per int32");
 }

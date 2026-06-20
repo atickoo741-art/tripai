@@ -7,11 +7,7 @@ setup(
         CUDAExtension("peqat_cuda", [
             "bindings.cpp",
             "peqat_preprocess.cu",
-            "peqat_gemm.cu",
-            "peqat_gemm_f16.cu",
-            "peqat_fused_gemm.cu",
-            "peqat_fused_gemv.cu",
-            "peqat_fused_gemm_wmma.cu",
+            "peqat_preprocess_per_token_sm121.cu",
             "peqat_gemm_bf16_wmma.cu",
         ]),
     ],

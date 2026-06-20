@@ -2,9 +2,9 @@
 
 
 experiment:
-  name: "llama2-7b-200-wiki"
-  notes: "running llama 2 7b wiki but with 200 steps calibration"
-  tags: ["Llama2-7B", "wikitext", "learning rate"]
+  name: "llama2-7b-per-tok-act-quant"
+  notes: "per token activation quantization for int4 tc compatibility. smooth clip still per channel."
+  tags: ["Llama2-7B", "wikitext", "per token"]
 # Model
 model:
   name: "meta-llama/Llama-2-7b-hf"
@@ -24,7 +24,7 @@ lora:
 calibration:
   num_samples: 128
   percentile: 99.5
-  steps: 200
+  steps: 50
   alpha: 0.5
   learn_smooth: True
   calibrate_smooth: True
@@ -60,7 +60,7 @@ training:
     adam_beta1: 0.9
     adam_beta2: 0.95
     adam_eps: 1.0e-8
-    use_quant_grad: True
+    use_quant_grad: False # in dynamic per token quantization, the clip doesn't affect the quantization scale, so use_quant_grad is false
   
   # Logging
   logging_steps: 10

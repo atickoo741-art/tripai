@@ -205,6 +205,73 @@ class ActSTEQuant(torch.autograd.Function):
         return grad_x, grad_alpha, None, None
 
 
+class PerTokenActSTEQuant(torch.autograd.Function):
+    """
+    Per-token activation quantization with per-channel learned clipping.
+    
+    Forward:
+        x: [M, K] or [B, S, K] — already smoothed (x/smooth applied upstream)
+        clip_vals: [K] — per-channel learned clip values (PACT)
+        num_bits: int (default 4)
+        
+        Per-token dynamic scale: s_x[t] = max|x_clipped| / qmax, detached.
+        Gradient flows only through PACT boundary clip — no quant gradient.
+    
+    Backward:
+        grad_x: STE — pass through for in-range values
+        grad_alpha: PACT boundary gradient only, summed over batch/seq dims
+    """
+    @staticmethod
+    def forward(ctx, x, clip_vals, num_bits=4):
+        qmax = (1 << (num_bits - 1)) - 1
+        clip = clip_vals.abs().clamp(min=1e-4)
+
+        # Broadcast clip for PACT clamping
+        if x.dim() == 3:
+            clip_b = clip.view(1, 1, -1)
+        else:
+            clip_b = clip.view(1, -1)
+
+        # Per-channel PACT clipping
+        x_clipped = torch.clamp(x, -clip_b, clip_b)
+
+        # Per-token dynamic scale — DETACHED (no gradient through scale computation)
+        s_x = x_clipped.abs().amax(dim=-1, keepdim=True) / qmax
+        s_x = s_x.detach()
+
+        # Quantize-dequantize with per-token scale
+        x_q = torch.round(x_clipped / s_x)
+        x_q = torch.clamp(x_q, -qmax, qmax)
+        x_dq = x_q * s_x
+
+        ctx.save_for_backward(x, x_clipped, clip)
+        ctx.qmax = qmax
+        return x_dq
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        x, x_clipped, clip = ctx.saved_tensors
+
+        # Broadcast clip for element-wise operations
+        if x.dim() == 3:
+            clip_b = clip.view(1, 1, -1)
+        else:
+            clip_b = clip.view(1, -1)
+
+        # Input gradient (STE): only in-range pass through
+        mask_inside = (x.abs() <= clip_b).float()
+        grad_x = grad_output * mask_inside
+
+        # Clip gradient: PACT boundary only
+        # Sum over batch/seq dims — handles both 2D and 3D
+        reduce_dims = (0, 1) if x.dim() == 3 else (0,)
+        grad_clip_upper = (grad_output * (x > clip_b).float()).sum(dim=reduce_dims)
+        grad_clip_lower = (grad_output * (x < -clip_b).float() * -1.0).sum(dim=reduce_dims)
+        grad_alpha = grad_clip_upper + grad_clip_lower
+
+        return grad_x, grad_alpha, None
+
+
 class WeightSTEQuant(torch.autograd.Function):
     @staticmethod
     def forward(ctx, W, num_bits):
@@ -352,7 +419,7 @@ class PEQATLoRAModule(nn.Module):
         clip_vals = self.qat_core.constrained_clip_val
         
         # Per-token quantization with per-channel learned clipping
-        quant_input = ActSTEQuant.apply(scaled_input, clip_vals, self.num_bits, self.use_quant_grad)
+        quant_input = PerTokenActSTEQuant.apply(scaled_input, clip_vals, self.num_bits)
         
         # Quantize weights
         quant_weight = WeightSTEQuant.apply(scaled_weights, self.num_bits)

@@ -1,8 +1,0 @@
-{
-  "quantization_config": {
-    "bits": 4,
-    "smoothquant_alpha": 0.5,
-    "activation_clip_init": 6.0,
-    "momentum": 0.1
-  }
-}

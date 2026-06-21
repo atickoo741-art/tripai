@@ -51,25 +51,32 @@ void launch_repack_4_to_8(
 /**
  * fused_int4_tc_per_token_kernel
  *
- * INT4 Tensor Core GEMM for SM 12.1 (Blackwell).
- * Uses mma.sync.aligned.m16n8k64.row.col.s4.s4.s32 via nvcuda::wmma.
+ * INT4 Tensor Core GEMM for SM 12.1 (Blackwell) using inline PTX.
+ * Instruction: mma.sync.aligned.m16n8k64.row.col.s4.s4.s32
  *
- * x_packed: [M, K/8] int32, dense 8 s4 per word (post repack_4_to_8)
+ * Fragment layout (per warp of 32 threads):
+ *
+ * A (row-major, 16x64 s4, 4 x uint32 per thread):
+ *   row = threadIdx.x / 2        (0..15)
+ *   k_half = threadIdx.x % 2     (0=cols 0-31, 1=cols 32-63)
+ *   a[r] = 8 s4 at K = k_half*32 + r*8 (r in 0..3)
+ *
+ * B (col-major, 64x8 s4, 2 x uint32 per thread):
+ *   n = threadIdx.x / 4            (0..7)
+ *   k_quad = threadIdx.x % 4       (0..3, each covers 16 K)
+ *   b[r] = 8 s4 at K = k_quad*16 + r*8 (r in 0..1)
+ *
+ * D (accumulator, 16x8 int32, 4 x int32 per thread):
+ *   row = threadIdx.x / 2
+ *   col_base = (threadIdx.x % 2) * 4   (0 or 4)
+ *   d[r] = acc[row][col_base + r]      (r in 0..3)
+ *
+ * x_packed: [M, K/8] int32, dense 8 s4 per word
  * w_packed: [N, K/8] int32, dense 8 s4 per word
- * w_scale:  [N] float32, per-output-channel weight scale
- * s_x:      [M] float32, per-token activation scale
- * y:        [M, N] bfloat16, output
- *
- * Grid:
- *   blockIdx.x * 64 in N dimension (8 warps × 8 cols each)
- *   blockIdx.y * 16 in M dimension
- *   256 threads/block (8 warps)
- *   Shared memory: 16×64×4 = 4096 bytes
+ * w_scale:  [N] float32
+ * s_x:      [M] float32
+ * y:        [M, N] bfloat16
  */
-#include <mma.h>
-
-namespace wmma = nvcuda::wmma;
-
 __global__ void fused_int4_tc_per_token_kernel(
     const int32_t* __restrict__ x_packed,
     const int32_t* __restrict__ w_packed,
@@ -80,49 +87,70 @@ __global__ void fused_int4_tc_per_token_kernel(
     int N,
     int K
 ) {
-    const int warp_id = threadIdx.x / 32;
-    const int num_warps = blockDim.x / 32;
+    int t = threadIdx.x;
+    int warp_id = t / 32;
+    int lane = t % 32;
 
-    const int m_start = blockIdx.y * 16;
-    const int n_start = blockIdx.x * 64;
+    int m_start = blockIdx.y * 16;
+    int n_start = blockIdx.x * 64;
+    int warp_n = n_start + warp_id * 8;
 
     if (m_start >= M) return;
 
-    int ldm = K / 2;
+    int ldm_x = K / 8;
+    int ldm_w = K / 8;
 
-    const int8_t* x_base = reinterpret_cast<const int8_t*>(
-        x_packed + m_start * (K / 8)
-    );
-    const int8_t* w_base = reinterpret_cast<const int8_t*>(
-        w_packed + n_start * (K / 8)
-    );
-
-    wmma::Fragment<wmma::accumulator, 16, 8, 64, int32_t> acc;
-    wmma::fill_fragment(acc, 0);
+    // Accumulator: 4 x int32 per thread (16x8 tile per warp)
+    int32_t d[4] = {0, 0, 0, 0};
 
     for (int k_offset = 0; k_offset < K; k_offset += 64) {
-        wmma::Fragment<wmma::matrix_a, 16, 8, 64, int8_t, wmma::row_major> a_frag;
-        wmma::Fragment<wmma::matrix_b, 16, 8, 64, int8_t, wmma::col_major> b_frag;
+        // --- Load A fragment (4 x uint32) ---
+        int a_row = lane / 2;
+        int a_k_half = lane % 2;
+        uint32_t a[4];
+        int x_idx = (m_start + a_row) * ldm_x + (k_offset + a_k_half * 32) / 8;
+        a[0] = ((const uint32_t*)x_packed)[x_idx + 0];
+        a[1] = ((const uint32_t*)x_packed)[x_idx + 1];
+        a[2] = ((const uint32_t*)x_packed)[x_idx + 2];
+        a[3] = ((const uint32_t*)x_packed)[x_idx + 3];
 
-        wmma::load_matrix_sync(a_frag, x_base + k_offset / 2, ldm);
-        wmma::load_matrix_sync(b_frag, w_base + k_offset / 2, ldm);
-        wmma::mma_sync(acc, a_frag, b_frag, acc);
+        // --- Load B fragment (2 x uint32) ---
+        int b_n = lane / 4;
+        int b_k_quad = lane % 4;
+        uint32_t b[2];
+        int w_idx = (warp_n + b_n) * ldm_w + (k_offset + b_k_quad * 16) / 8;
+        b[0] = ((const uint32_t*)w_packed)[w_idx + 0];
+        b[1] = ((const uint32_t*)w_packed)[w_idx + 1];
+
+        // --- MMA ---
+        asm volatile(
+            "mma.sync.aligned.m16n8k64.row.col.s4.s4.s32 "
+            "{%0, %1, %2, %3}, {%4, %5, %6, %7}, {%8, %9}, {%0, %1, %2, %3};\n"
+            : "+r"(d[0]), "+r"(d[1]), "+r"(d[2]), "+r"(d[3])
+            : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]),
+              "r"(b[0]), "r"(b[1])
+        );
     }
 
+    // --- Store accumulator to shared memory ---
     __shared__ float tile[16][64];
 
-    wmma::store_matrix_sync(
-        (float(*)[8])&tile[0][warp_id * 8],
-        acc, 64, wmma::mem_row_major
-    );
+    int d_row = lane / 2;
+    int d_col_base = (lane % 2) * 4;
+    float* tile_row = &tile[d_row][warp_id * 8 + d_col_base];
+    tile_row[0] = (float)d[0];
+    tile_row[1] = (float)d[1];
+    tile_row[2] = (float)d[2];
+    tile_row[3] = (float)d[3];
+
     __syncthreads();
 
-    int tid = threadIdx.x;
-    if (tid < 16 * 64) {
-        int row = m_start + tid / 64;
-        int col = n_start + tid % 64;
+    // --- Scale and store to output ---
+    if (t < 16 * 64) {
+        int row = m_start + t / 64;
+        int col = n_start + t % 64;
         if (row < M && col < N) {
-            float val = tile[tid / 64][tid % 64] * s_x[row] * w_scale[col];
+            float val = tile[t / 64][t % 64] * s_x[row] * w_scale[col];
             y[row * N + col] = __float2bfloat16(val);
         }
     }

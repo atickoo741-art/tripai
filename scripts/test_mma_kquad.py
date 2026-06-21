@@ -31,7 +31,7 @@ print(f"x_q: K=1 set to 1, rest 0")
 offsets = [0, 8, 16, 24, 32, 40, 48, 56]
 N_test = len(offsets)
 
-print(f"\nTest: each column n has weight at K={offsets[n]}")
+print(f"\nTest: each column n has weight at K={offsets}")
 for n, kpos in enumerate(offsets):
     print(f"  Col {n}: w[K={kpos}] = 1, rest 0")
 

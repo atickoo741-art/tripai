@@ -13,9 +13,9 @@ cuda_source = """
 // A values contribute to each row.
 __global__ void diag_a_probe(int32_t* d_out) {
     int lane = threadIdx.x;
-    // A: each nibble = (lane & 0xFF) — unique per lane
+    // A: each nibble = (lane & 0xF) — unique per 16-lane group
     uint32_t v = 0;
-    for (int i = 0; i < 8; i++) v |= ((lane & 0xFF) << (i * 4));
+    for (int i = 0; i < 8; i++) v |= ((lane & 0xF) << (i * 4));
     uint32_t a[4] = {v, v, v, v};
 
     uint32_t b[2] = {0, 0};

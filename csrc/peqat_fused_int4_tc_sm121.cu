@@ -109,8 +109,10 @@ __global__ void fused_int4_tc_per_token_kernel(
 
     for (int k_offset = 0; k_offset < K; k_offset += 64) {
         // --- Load A fragment (4 x uint32) ---
-        int a_row = lane / 2;
-        int a_k_half = lane % 2;
+        // A mapping: lanes 0,3 → rows 0-7 half 0,1; lanes 1,2 → rows 8-15 half 0,1
+        int a_mod4 = lane % 4;
+        int a_row = lane / 4 + ((a_mod4 == 1 || a_mod4 == 2) ? 8 : 0);
+        int a_k_half = a_mod4 / 2;
         uint32_t a[4];
         int x_idx = (m_start + a_row) * ldm_x + (k_offset + a_k_half * 32) / 8;
         a[0] = ((const uint32_t*)x_packed)[x_idx + 0];

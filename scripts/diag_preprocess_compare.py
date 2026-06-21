@@ -25,27 +25,13 @@ clip_f32 = clip.float()
 x_scaled = x_f32 / smooth_f32
 x_clamped = x_scaled.clamp(-clip_f32, clip_f32)
 
-x_abs_max = x_clamped.abs().amax(dim=1)
-s_x_ref = (x_abs_max / 7.0).clamp(min=1e-8)
+# Use KERNEL's s_x for reference to test bit-exactness
+s_x_ref = s_x  # force match
 
+# Quantize using kernel's s_x
 x_q_ref = (x_clamped / s_x_ref[:, None]).round().clamp(-8, 7).to(torch.int8)
 
-# Check s_x
-s_x_diff = (s_x - s_x_ref).abs().max().item()
-print(f"s_x max diff: {s_x_diff:.10f}")
-print(f"  kernel s_x: {s_x[0].item():.10f}")
-print(f"  ref    s_x: {s_x_ref[0].item():.10f}")
-
-if s_x_diff > 1e-6:
-    print("  *** s_x MISMATCH! ***")
-else:
-    print("  s_x OK")
-
-# Repack 4→8
-x_packed_8 = peqat_cuda.repack_4_to_8_forward(x_packed)
-
-# Manual repack of reference
-K8 = K // 8
+# Manual pack 4-per-int32 matching kernel format
 x_packed_4_ref = torch.zeros(M, K // 4, dtype=torch.int32, device="cuda")
 for k in range(0, K, 4):
     grp = k // 4
@@ -55,7 +41,9 @@ for k in range(0, K, 4):
         word |= v << (i * 4)
     x_packed_4_ref[0, grp] = word
 
-x_packed_8_ref = torch.zeros(M, K // 8, dtype=torch.int32, device="cuda")
+# Repack 4→8
+K8 = K // 8
+x_packed_8_ref = torch.zeros(M, K8, dtype=torch.int32, device="cuda")
 for i in range(K8):
     lo = x_packed_4_ref[0, i * 2].item() & 0xFFFF
     hi = x_packed_4_ref[0, i * 2 + 1].item() & 0xFFFF
@@ -65,43 +53,40 @@ for i in range(K8):
     x_packed_8_ref[0, i] = val
 
 # Compare packed values
-packed_diff = (x_packed_8 != x_packed_8_ref).sum().item()
-print(f"\nx_packed_8 mismatched words: {packed_diff} / {K8}")
+packed_diff = (x_packed != x_packed_4_ref).sum().item()
+packed_8_diff = (peqat_cuda.repack_4_to_8_forward(x_packed) != x_packed_8_ref).sum().item()
+print(f"x_packed diff (4-per-int32): {packed_diff} / {K//4}")
+print(f"x_packed_8 diff (8-per-int32): {packed_8_diff} / {K8}")
 
 if packed_diff > 0:
-    # Find first mismatch
-    for i in range(K8):
-        if x_packed_8[0, i].item() != x_packed_8_ref[0, i].item():
-            kv = i * 8
-            k0 = kv // 4
-            k1 = kv // 4 + 1
-            print(f"  First mismatch at word {i} (K={kv}-{kv+7}):")
-            print(f"    kernel: 0x{x_packed_8[0, i].item():08x}")
-            print(f"    ref:    0x{x_packed_8_ref[0, i].item():08x}")
-            # Unpack to see nibbles
-            for nib in range(8):
-                kv_nib = kv + nib
-                k_val = x_packed_8[0, i].item()
-                r_val = x_packed_8_ref[0, i].item()
-                k_nib = (k_val >> (nib * 4)) & 0xF
-                r_nib = (r_val >> (nib * 4)) & 0xF
+    print("\n*** Mismatch even with same s_x — kernel quantization differs from Python! ***")
+    # Find first mismatch in raw 4-per-int32
+    for i in range(K // 4):
+        if x_packed[0, i].item() != x_packed_4_ref[0, i].item():
+            k0 = i * 4
+            print(f"  First 4-per-int32 mismatch at word {i} (K={k0}-{k0+3}):")
+            print(f"    kernel: 0x{x_packed[0, i].item():08x}")
+            print(f"    ref:    0x{x_packed_4_ref[0, i].item():08x}")
+            for nib in range(4):
+                kv = k0 + nib
+                k_nib = (x_packed[0, i].item() >> (nib * 4)) & 0xF
+                r_nib = (x_packed_4_ref[0, i].item() >> (nib * 4)) & 0xF
                 if k_nib != r_nib:
-                    print(f"    nibble {nib} (K={kv_nib}): kernel=0x{k_nib:x} ref=0x{r_nib:x}")
-                    print(f"      x_clamped_kernel={x_clamped[0, kv_nib].item():.6f}")
-                    print(f"      x_clamped_ref={x_clamped[0, kv_nib].item():.6f}")
-                    print(f"      x_q_ref[{kv_nib}]={x_q_ref[0, kv_nib].item()}")
-                    # Recompute
-                    scaled = x_clamped[0, kv_nib].item() / s_x_ref[0].item()
-                    q_py = round(scaled)
-                    print(f"      scaled={scaled:.6f} round={q_py} clamp={max(-8, min(7, q_py))}")
+                    xc = x_clamped[0, kv].item()
+                    sx = s_x_ref[0].item()
+                    scaled = xc / sx
+                    print(f"    nibble {nib} (K={kv}): kernel=0x{k_nib:x} ref=0x{r_nib:x}")
+                    print(f"      x_clamped={xc:.10f} s_x={sx:.10f} scaled={scaled:.10f}")
+                    print(f"      rintf would give: {(int)(scaled + 0.5) if scaled >= 0 else (int)(scaled - 0.5)}")
             break
+elif packed_8_diff > 0:
+    print("Raw 4-per-int32 matches, but 8-per-int32 differs (repack bug?)")
 else:
-    print("  x_packed_8 matches perfectly!")
-    # Now test MMA
+    print("\n*** ALL preprocess outputs match perfectly with matching s_x! ***")
+    # Now test MMA with matching data
     w = torch.randint(-8, 7, (N, K), dtype=torch.int8, device="cuda")
     w_scale = torch.randn(N, dtype=torch.float32, device="cuda").abs() + 0.1
 
-    # Pack weights
     packed_u8 = (w[:, ::2].int() & 0xF).to(torch.uint8) | (((w[:, 1::2].int() & 0xF) << 4).to(torch.uint8))
     lo = (packed_u8 & 0xF).to(torch.int8)
     hi = ((packed_u8 >> 4) & 0xF).to(torch.int8)
@@ -126,6 +111,7 @@ else:
     y_ref = x_dq @ w_dq.T
 
     # Kernel MMA
+    x_packed_8 = peqat_cuda.repack_4_to_8_forward(x_packed)
     if M < 16:
         pad = 16 - M
         x_8_padded = torch.cat([x_packed_8, torch.zeros(pad, K8, dtype=torch.int32, device="cuda")], dim=0)
@@ -139,28 +125,11 @@ else:
     )
     y_tc = y_tc[:M, :N].contiguous()
 
-    # Compare
     diff = (y_ref.bfloat16().float() - y_tc.float()).abs()
     max_err = diff.max().item()
     cos = torch.nn.CosineSimilarity(dim=-1)
     sim = cos(y_ref.float().flatten(), y_tc.float().flatten()).item()
 
-    print(f"\n  MMA result: cos_sim={sim:.6f} max_err={max_err:.4f}")
-
-    if max_err > 1.0:
-        # Find worst elements
-        max_idx = diff.argmax().item()
-        r = max_idx // N
-        c = max_idx % N
-        print(f"  Worst diff at y[{r},{c}]: kernel={y_tc[0,c].item():.4f} ref={y_ref[0,c].item():.4f}")
-        # Check which K elements contribute to this output
-        acc_kernel = y_tc[0, c].item() / (s_x[0].item() * w_scale[c].item())
-        acc_ref = y_ref[0, c].item() / (s_x_ref[0].item() * w_scale[c].item())
-        print(f"  Unscaled acc: kernel={acc_kernel:.1f} ref={acc_ref:.1f}")
-        # Check per-tile (K=64) contributions
-        for kt in range(K // 64):
-            k_start = kt * 64
-            ref_sum = 0
-            for k in range(k_start, k_start + 64):
-                ref_sum += x_q_ref[0, k].item() * w_q_ref[c, k].item()
-            print(f"    K tile {kt} ({k_start}-{k_start+63}): ref_sum={ref_sum}")
+    print(f"\nMMA result with matching s_x: cos_sim={sim:.6f} max_err={max_err:.4f}")
+    if max_err < 1.0:
+        print("*** MMA PASSES with matching s_x! ***")

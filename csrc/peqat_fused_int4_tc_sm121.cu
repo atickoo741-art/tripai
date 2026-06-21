@@ -67,9 +67,13 @@ void launch_repack_4_to_8(
  *   b[r] = 8 s4 at K = k_quad*16 + r*8 (r in 0..1)
  *
  * D (accumulator, 16x8 int32, 4 x int32 per thread):
- *   row = threadIdx.x % 16
- *   col_base = (threadIdx.x / 16) * 4   (0 or 4)
- *   d[r] = acc[row][col_base + r]      (r in 0..3)
+ *   row_a = lane / 4                   (0-7, for first 8 D rows)
+ *   row_b = lane / 4 + 8              (8-15, for last 8 D rows)
+ *   col_base = lane % 4               (0-3)
+ *   d[0] = acc[row_a][col_base]
+ *   d[1] = acc[row_a][col_base + 4]
+ *   d[2] = acc[row_b][col_base]
+ *   d[3] = acc[row_b][col_base + 4]
  *
  * x_packed: [M, K/8] int32, dense 8 s4 per word
  * w_packed: [N, K/8] int32, dense 8 s4 per word
@@ -135,13 +139,12 @@ __global__ void fused_int4_tc_per_token_kernel(
     // --- Store accumulator to shared memory ---
     __shared__ float tile[16][64];
 
-    int d_row = lane % 16;
-    int d_col_base = (lane / 16) * 4;
-    float* tile_row = &tile[d_row][warp_id * 8 + d_col_base];
-    tile_row[0] = (float)d[0];
-    tile_row[1] = (float)d[1];
-    tile_row[2] = (float)d[2];
-    tile_row[3] = (float)d[3];
+    int d_row_a = lane / 4;
+    int d_col_base = lane % 4;
+    tile[d_row_a][warp_id * 8 + d_col_base]        = (float)d[0];
+    tile[d_row_a][warp_id * 8 + d_col_base + 4]    = (float)d[1];
+    tile[d_row_a + 8][warp_id * 8 + d_col_base]    = (float)d[2];
+    tile[d_row_a + 8][warp_id * 8 + d_col_base + 4] = (float)d[3];
 
     __syncthreads();
 

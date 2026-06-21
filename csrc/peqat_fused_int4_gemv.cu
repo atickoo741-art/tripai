@@ -44,11 +44,14 @@ __global__ void fused_int4_gemv_kernel(
 
     float s_x_val = s_x[0];
 
-    // Phase 2: each warp handles a group of consecutive columns
+    // Phase 2: each block handles a 64-column tile of N
+    int n0 = blockIdx.x * 64;
+    int n1 = min(n0 + 64, N);
+
     int num_warps = blockDim.x / 32;
-    int cols_per_warp = (N + num_warps - 1) / num_warps;
-    int start_n = warp_id * cols_per_warp;
-    int end_n = min(start_n + cols_per_warp, N);
+    int cols_per_warp = (n1 - n0 + num_warps - 1) / num_warps;
+    int start_n = n0 + warp_id * cols_per_warp;
+    int end_n = min(start_n + cols_per_warp, n1);
 
     for (int n = start_n; n < end_n; n++) {
         int32_t partial = 0;
@@ -88,7 +91,8 @@ void launch_fused_int4_gemv(
     cudaStream_t stream
 ) {
     int threads = 256;
-    fused_int4_gemv_kernel<<<1, threads, 0, stream>>>(
+    int blocks = (N + 63) / 64;
+    fused_int4_gemv_kernel<<<blocks, threads, 0, stream>>>(
         x_packed, w_packed, w_scale, s_x, y, N, K
     );
 }

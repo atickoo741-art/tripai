@@ -109,8 +109,8 @@ __global__ void fused_int4_tc_per_token_kernel(
 
     for (int k_offset = 0; k_offset < K; k_offset += 64) {
         // --- Load A fragment (4 x uint32) ---
-        int a_row = lane % 16;
-        int a_k_half = lane / 16;
+        int a_row = lane / 2;
+        int a_k_half = lane % 2;
         uint32_t a[4];
         int x_idx = (m_start + a_row) * ldm_x + (k_offset + a_k_half * 32) / 8;
         a[0] = ((const uint32_t*)x_packed)[x_idx + 0];
@@ -140,11 +140,11 @@ __global__ void fused_int4_tc_per_token_kernel(
     __shared__ float tile[16][64];
 
     int d_row_a = lane / 4;
-    int d_col_base = lane % 4;
-    tile[d_row_a][warp_id * 8 + d_col_base]        = (float)d[0];
-    tile[d_row_a][warp_id * 8 + d_col_base + 4]    = (float)d[1];
-    tile[d_row_a + 8][warp_id * 8 + d_col_base]    = (float)d[2];
-    tile[d_row_a + 8][warp_id * 8 + d_col_base + 4] = (float)d[3];
+    int d_col_pair = (lane % 4) * 2;
+    tile[d_row_a][warp_id * 8 + d_col_pair]          = (float)d[0];
+    tile[d_row_a][warp_id * 8 + d_col_pair + 1]      = (float)d[1];
+    tile[d_row_a + 8][warp_id * 8 + d_col_pair]      = (float)d[2];
+    tile[d_row_a + 8][warp_id * 8 + d_col_pair + 1]  = (float)d[3];
 
     __syncthreads();
 

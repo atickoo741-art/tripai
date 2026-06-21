@@ -146,7 +146,7 @@ __global__ void fused_int4_tc_per_token_kernel(
     }
 
     // --- Store accumulator to shared memory ---
-    __shared__ float tile[16][64];
+    __shared__ float tile[16][64 + 1]; // +1 padding to avoid 8-way bank conflicts
 
     int d_row_a = lane / 4;
     int d_col_pair = (lane % 4) * 2;

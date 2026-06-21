@@ -18,29 +18,31 @@ torch.manual_seed(42)
 
 
 def reference_forward(x_bf16, smooth, clip, w_q, w_scale):
-    """Compute reference: preprocess → quant → matmul."""
+    """Compute reference matching kernel: float32 arithmetic throughout."""
     M, K = x_bf16.shape
     N = w_q.shape[0]
 
-    # Smooth + clamp
-    s_inv = (1.0 / smooth).bfloat16()
-    x_scaled = x_bf16 * s_inv  # [M, K]
-    x_clamped = torch.where(x_scaled > clip, clip, torch.where(x_scaled < -clip, -clip, x_scaled))
-    x_clamped = x_clamped.float()
+    # Convert to float32 and divide (matches kernel: xv / sv in float32)
+    x_f32 = x_bf16.float()
+    smooth_f32 = smooth.float()
+    clip_f32 = clip.float()
+
+    x_scaled = x_f32 / smooth_f32
+    x_clamped = x_scaled.clamp(-clip_f32, clip_f32)
 
     # Per-token max scale
-    x_abs_max = x_clamped.abs().amax(dim=1)  # [M]
+    x_abs_max = x_clamped.abs().amax(dim=1)
     s_x = (x_abs_max / 7.0).clamp(min=1e-8)
 
     # Quantize
     x_q = (x_clamped / s_x[:, None]).round().clamp(-8, 7).to(torch.int8)
 
     # Dequantize
-    x_dq = x_q.float() * s_x[:, None]  # [M, K]
+    x_dq = x_q.float() * s_x[:, None]
 
     # Matmul with dequantized weights
-    w_dq = w_q.float() * w_scale[:, None]  # [N, K]
-    y_ref = x_dq @ w_dq.T  # [M, N]
+    w_dq = w_q.float() * w_scale[:, None]
+    y_ref = x_dq @ w_dq.T
     return y_ref.bfloat16()
 
 

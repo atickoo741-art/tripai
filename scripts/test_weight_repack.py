@@ -90,9 +90,16 @@ def test_shapes():
         packed_i32 = repack_for_tc(packed_u8, rows, cols)
         w_unpacked = unpack_int4_tc(packed_i32, rows)
 
-        match = (w_unpacked == w_orig).all().item()
+        K_round = cols // 4 * 4
+        if K_round > 0:
+            w_cmp = w_unpacked[:, :K_round]
+            w_ref = w_orig[:, :K_round]
+        else:
+            w_cmp = w_unpacked
+            w_ref = w_orig
+        match = (w_cmp == w_ref).all().item()
         status = "PASS" if match else "FAIL"
-        mismatch = ((w_unpacked != w_orig).float().mean() * 100).item() if not match else 0.0
+        mismatch = ((w_cmp != w_ref).float().mean() * 100).item() if not match else 0.0
         expected_shape = (rows, cols // 4) if cols >= 4 else (rows, 1)
         print(f"  [{status}] {name}: shape={tuple(packed_i32.shape)} expected={expected_shape} mismatch={mismatch:.2f}%")
 

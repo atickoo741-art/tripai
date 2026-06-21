@@ -108,34 +108,39 @@ __global__ void fused_int4_tc_per_token_kernel(
     // Accumulator: 4 x int32 per thread (16x8 tile per warp)
     int32_t d[4] = {0, 0, 0, 0};
 
+    // Shared memory tile for A: 16 rows x 8 int32 = 128 int32
+    // One cooperative load per block per K-step replaces 8 redundant warp loads
+    __shared__ int32_t s_a[16][8 + 1]; // +1 padding to avoid bank conflicts
+
     for (int k_offset = 0; k_offset < K; k_offset += 64) {
-        // --- Load A fragment (4 x uint32) ---
-        // Per PTX ISA v9.3: groupID=lane/4, threadID=lane%4
-        // a[0]: row=groupID,   K=threadID*8..threadID*8+7   (first half)
-        // a[1]: row=groupID+8, K=threadID*8..threadID*8+7   (first half)
-        // a[2]: row=groupID,   K=threadID*8+32..threadID*8+7+32 (second half)
-        // a[3]: row=groupID+8, K=threadID*8+32..threadID*8+7+32 (second half)
+        int x_off = k_offset / 8;
+
+        // --- Phase 1: Cooperative load A tile into shared memory ---
+        // 128 elements loaded by threads 0..127 (half the block)
+        if (t < 128) {
+            int row = t / 8;
+            int k8 = t % 8;
+            s_a[row][k8] = ((const int32_t*)x_packed)[(m_start + row) * ldm_x + x_off + k8];
+        }
+        __syncthreads();
+
+        // --- Phase 2: Load A fragment from shared memory ---
         int a_gid = lane / 4;
         int a_tid = lane % 4;
         uint32_t a[4];
-        int x_off = k_offset / 8;
-        a[0] = ((const uint32_t*)x_packed)[(m_start + a_gid) * ldm_x + x_off + a_tid];
-        a[1] = ((const uint32_t*)x_packed)[(m_start + a_gid + 8) * ldm_x + x_off + a_tid];
-        a[2] = ((const uint32_t*)x_packed)[(m_start + a_gid) * ldm_x + x_off + a_tid + 4];
-        a[3] = ((const uint32_t*)x_packed)[(m_start + a_gid + 8) * ldm_x + x_off + a_tid + 4];
+        a[0] = (uint32_t)s_a[a_gid][a_tid];
+        a[1] = (uint32_t)s_a[a_gid + 8][a_tid];
+        a[2] = (uint32_t)s_a[a_gid][a_tid + 4];
+        a[3] = (uint32_t)s_a[a_gid + 8][a_tid + 4];
 
-        // --- Load B fragment (2 x uint32) ---
-        // Per PTX ISA v9.3: groupID=lane/4, threadID=lane%4
-        // b[0]: col=groupID, K=threadID*8..threadID*8+7     (first half)
-        // b[1]: col=groupID, K=threadID*8+32..threadID*8+7+32 (second half)
+        // --- Phase 3: Load B fragment from global (unchanged) ---
         int b_gid = lane / 4;
         int b_tid = lane % 4;
         uint32_t b[2];
-        int w_off = k_offset / 8;
-        b[0] = ((const uint32_t*)w_packed)[(warp_n + b_gid) * ldm_w + w_off + b_tid];
-        b[1] = ((const uint32_t*)w_packed)[(warp_n + b_gid) * ldm_w + w_off + b_tid + 4];
+        b[0] = ((const uint32_t*)w_packed)[(warp_n + b_gid) * ldm_w + x_off + b_tid];
+        b[1] = ((const uint32_t*)w_packed)[(warp_n + b_gid) * ldm_w + x_off + b_tid + 4];
 
-        // --- MMA ---
+        // --- Phase 4: MMA ---
         asm volatile(
             "mma.sync.aligned.m16n8k64.row.col.s32.s4.s4.s32 "
             "{%0, %1, %2, %3}, {%4, %5, %6, %7}, {%8, %9}, {%0, %1, %2, %3};\n"
@@ -143,6 +148,8 @@ __global__ void fused_int4_tc_per_token_kernel(
             : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]),
               "r"(b[0]), "r"(b[1])
         );
+
+        __syncthreads(); // ensure all warps done reading s_a before next load
     }
 
     // --- Store accumulator to shared memory ---

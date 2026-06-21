@@ -40,7 +40,7 @@ __global__ void diag_d_layout(int32_t* d_out) {
 }
 
 torch::Tensor diag_d() {
-    auto d_out = torch::zeros({32, 4}, torch::dtype(torch::kInt32).cuda());
+    auto d_out = torch::zeros({32, 4}, torch::dtype(torch::kInt32).device(torch::kCUDA));
     diag_d_layout<<<1, 32>>>(d_out.data_ptr<int32_t>());
     return d_out;
 }

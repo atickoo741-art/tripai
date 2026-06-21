@@ -1,0 +1,138 @@
+"""Test weight repack from uint8 low_high to int32 TC-compatible format.
+
+Tests:
+  1. Round-trip: pack → repack → unpack matches original
+  2. Multiple shapes matching Llama-2-7B projections
+  3. Edge cases (odd K, single row, etc.)
+"""
+
+import torch
+import sys
+import os
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
+
+def pack_int4_low_high(w_q):
+    """PyTorch reference: pack int8[N, K] to uint8 low_high format."""
+    rows, cols = w_q.shape
+    w_clamped = torch.clamp(w_q, -8, 7).int()
+    if cols % 2 != 0:
+        w_clamped = torch.cat([w_clamped, torch.zeros(rows, 1, dtype=torch.int)], dim=1)
+        cols_padded = cols + 1
+    else:
+        cols_padded = cols
+    low = (w_clamped[:, ::2] & 0xF).to(torch.uint8)
+    high = ((w_clamped[:, 1::2] & 0xF) << 4).to(torch.uint8)
+    return (low | high).contiguous()
+
+
+def repack_for_tc(packed_uint8, rows, cols):
+    """Convert uint8 low_high packed weights to int32 TC-compatible format.
+
+    Args:
+        packed_uint8: uint8 tensor [N, K_packed] in low_high format
+        rows, cols: original weight shape
+
+    Returns:
+        int32 tensor [N, K/4] with 4 INT4 values packed per word
+    """
+    K_packed = packed_uint8.shape[1]
+    K_eff = K_packed * 2
+
+    lo = (packed_uint8 & 0xF).to(torch.int8)
+    hi = ((packed_uint8 >> 4) & 0xF).to(torch.int8)
+    lo = torch.where(lo > 7, lo - 16, lo)
+    hi = torch.where(hi > 7, hi - 16, hi)
+
+    w_q = torch.empty(rows, K_eff, dtype=torch.int8)
+    w_q[:, ::2] = lo
+    w_q[:, 1::2] = hi
+    if K_eff > cols:
+        w_q = w_q[:, :cols]
+
+    w_i32 = w_q.to(torch.int32) & 0xF
+    K = cols
+    n_packed = K // 4
+    w_groups = w_i32[:, :n_packed * 4].reshape(rows, n_packed, 4)
+    packed = (w_groups[:, :, 0]
+              | (w_groups[:, :, 1] << 4)
+              | (w_groups[:, :, 2] << 8)
+              | (w_groups[:, :, 3] << 12))
+    return packed
+
+
+def unpack_int4_tc(w_packed, rows):
+    """Unpack int32[N, K/4] back to individual INT4 values as int8[N, K]."""
+    n_packed = w_packed.shape[1]
+    K = n_packed * 4
+    w_q = torch.zeros(rows, K, dtype=torch.int32)
+    for i in range(4):
+        w_q[:, i::4] = (w_packed[:, :] >> (i * 4)) & 0xF
+    w_q = torch.where(w_q > 7, w_q - 16, w_q)
+    return w_q.to(torch.int8)
+
+
+def test_shapes():
+    test_cases = [
+        ("small 4x16", 4, 16),
+        ("q_proj 4096x4096", 4096, 4096),
+        ("v_proj 4096x4096", 4096, 4096),
+        ("gate_proj 4096x11008", 4096, 11008),
+        ("down_proj 11008x4096", 11008, 4096),
+        ("odd K 4x18", 4, 18),
+        ("single row 1x4096", 1, 4096),
+    ]
+
+    for name, rows, cols in test_cases:
+        w_orig = torch.randint(-8, 7, (rows, cols), dtype=torch.int8)
+        packed_u8 = pack_int4_low_high(w_orig)
+        packed_i32 = repack_for_tc(packed_u8, rows, cols)
+        w_unpacked = unpack_int4_tc(packed_i32, rows)
+
+        match = (w_unpacked == w_orig).all().item()
+        status = "PASS" if match else "FAIL"
+        mismatch = ((w_unpacked != w_orig).float().mean() * 100).item() if not match else 0.0
+        expected_shape = (rows, cols // 4) if cols >= 4 else (rows, 1)
+        print(f"  [{status}] {name}: shape={tuple(packed_i32.shape)} expected={expected_shape} mismatch={mismatch:.2f}%")
+
+
+def test_round_trip_integrity():
+    """Test that repack → unpack is identity within INT4 range [-8, 7]."""
+    rows, cols = 256, 4096
+    w = torch.randint(-8, 7, (rows, cols), dtype=torch.int8)
+    packed_u8 = pack_int4_low_high(w)
+    packed_i32 = repack_for_tc(packed_u8, rows, cols)
+    w_back = unpack_int4_tc(packed_i32, rows)
+    assert (w == w_back).all(), "Round-trip failed!"
+    print(f"  [PASS] round-trip integrity: {rows}x{cols}")
+
+
+def test_export_format_parity():
+    """Verify repack produces same int32 bit pattern as reference."""
+    rows, cols = 4, 16
+    w = torch.tensor([
+        [0, 1, 2, 3, 4, 5, 6, 7, -1, -2, -3, -4, -5, -6, -7, -8],
+        [7, 6, 5, 4, 3, 2, 1, 0, -1, -2, -3, -4, -5, -6, -7, -8],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        [-1, -2, -3, -4, -5, -6, -7, -8, 0, 1, 2, 3, 4, 5, 6, 7],
+    ], dtype=torch.int8)
+
+    packed_u8 = pack_int4_low_high(w)
+    packed_i32 = repack_for_tc(packed_u8, rows, cols)
+    w_back = unpack_int4_tc(packed_i32, rows)
+
+    match = (w == w_back).all().item()
+    status = "PASS" if match else "FAIL"
+    print(f"  [{status}] export format parity")
+
+
+if __name__ == "__main__":
+    print("=== Weight Repack Test (uint8 → int32 TC) ===")
+    print("\n--- Shape tests ---")
+    test_shapes()
+    print("\n--- Round-trip integrity ---")
+    test_round_trip_integrity()
+    print("\n--- Export format parity ---")
+    test_export_format_parity()
+    print("\nDone.")

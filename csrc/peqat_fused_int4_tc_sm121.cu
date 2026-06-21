@@ -57,8 +57,8 @@ void launch_repack_4_to_8(
  * Fragment layout (per warp of 32 threads):
  *
  * A (row-major, 16x64 s4, 4 x uint32 per thread):
- *   row = threadIdx.x / 2        (0..15)
- *   k_half = threadIdx.x % 2     (0=cols 0-31, 1=cols 32-63)
+ *   row = threadIdx.x % 16        (0..15)
+ *   k_half = threadIdx.x / 16     (0=cols 0-31, 1=cols 32-63)
  *   a[r] = 8 s4 at K = k_half*32 + r*8 (r in 0..3)
  *
  * B (col-major, 64x8 s4, 2 x uint32 per thread):
@@ -67,8 +67,8 @@ void launch_repack_4_to_8(
  *   b[r] = 8 s4 at K = k_quad*16 + r*8 (r in 0..1)
  *
  * D (accumulator, 16x8 int32, 4 x int32 per thread):
- *   row = threadIdx.x / 2
- *   col_base = (threadIdx.x % 2) * 4   (0 or 4)
+ *   row = threadIdx.x % 16
+ *   col_base = (threadIdx.x / 16) * 4   (0 or 4)
  *   d[r] = acc[row][col_base + r]      (r in 0..3)
  *
  * x_packed: [M, K/8] int32, dense 8 s4 per word
@@ -105,8 +105,8 @@ __global__ void fused_int4_tc_per_token_kernel(
 
     for (int k_offset = 0; k_offset < K; k_offset += 64) {
         // --- Load A fragment (4 x uint32) ---
-        int a_row = lane / 2;
-        int a_k_half = lane % 2;
+        int a_row = lane % 16;
+        int a_k_half = lane / 16;
         uint32_t a[4];
         int x_idx = (m_start + a_row) * ldm_x + (k_offset + a_k_half * 32) / 8;
         a[0] = ((const uint32_t*)x_packed)[x_idx + 0];
@@ -135,8 +135,8 @@ __global__ void fused_int4_tc_per_token_kernel(
     // --- Store accumulator to shared memory ---
     __shared__ float tile[16][64];
 
-    int d_row = lane / 2;
-    int d_col_base = (lane % 2) * 4;
+    int d_row = lane % 16;
+    int d_col_base = (lane / 16) * 4;
     float* tile_row = &tile[d_row][warp_id * 8 + d_col_base];
     tile_row[0] = (float)d[0];
     tile_row[1] = (float)d[1];
@@ -146,11 +146,13 @@ __global__ void fused_int4_tc_per_token_kernel(
     __syncthreads();
 
     // --- Scale and store to output ---
-    if (t < 16 * 64) {
-        int row = m_start + t / 64;
-        int col = n_start + t % 64;
+    // 256 threads cover 16x64 = 1024 elements: 4 elements per thread
+    const int total_tile = 16 * 64;
+    for (int i = t; i < total_tile; i += blockDim.x) {
+        int row = m_start + i / 64;
+        int col = n_start + i % 64;
         if (row < M && col < N) {
-            float val = tile[t / 64][t % 64] * s_x[row] * w_scale[col];
+            float val = tile[i / 64][i % 64] * s_x[row] * w_scale[col];
             y[row * N + col] = __float2bfloat16(val);
         }
     }

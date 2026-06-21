@@ -39,7 +39,7 @@ def reference_forward(x_bf16, smooth, clip, w_q, w_scale):
     x_dq = x_q.float() * s_x[:, None]  # [M, K]
 
     # Matmul with dequantized weights
-    w_dq = w_q.float() * w_scale[None, :]  # [N, K]
+    w_dq = w_q.float() * w_scale[:, None]  # [N, K]
     y_ref = x_dq @ w_dq.T  # [M, N]
     return y_ref.bfloat16()
 

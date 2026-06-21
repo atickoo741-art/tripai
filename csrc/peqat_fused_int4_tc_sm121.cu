@@ -54,26 +54,27 @@ void launch_repack_4_to_8(
  * INT4 Tensor Core GEMM for SM 12.1 (Blackwell) using inline PTX.
  * Instruction: mma.sync.aligned.m16n8k64.row.col.s4.s4.s32
  *
- * Fragment layout (per warp of 32 threads):
+ * Fragment layout (per warp of 32 threads).
+ * Formulas from PTX ISA v9.3 §9.7.14.5, Figures 93-96.
  *
  * A (row-major, 16x64 s4, 4 x uint32 per thread):
- *   row = threadIdx.x % 16        (0..15)
- *   k_half = threadIdx.x / 16     (0=cols 0-31, 1=cols 32-63)
- *   a[r] = 8 s4 at K = k_half*32 + r*8 (r in 0..3)
+ *   groupID = lane >> 2, threadID_in_group = lane % 4
+ *   a[0]: row = groupID,      col = threadID*8 .. threadID*8+7       (K first half)
+ *   a[1]: row = groupID + 8,  col = threadID*8 .. threadID*8+7       (K first half)
+ *   a[2]: row = groupID,      col = threadID*8+32 .. threadID*8+7+32 (K second half)
+ *   a[3]: row = groupID + 8,  col = threadID*8+32 .. threadID*8+7+32 (K second half)
  *
  * B (col-major, 64x8 s4, 2 x uint32 per thread):
- *   n = threadIdx.x / 4            (0..7)
- *   k_quad = threadIdx.x % 4       (0..3, each covers 16 K)
- *   b[r] = 8 s4 at K = k_quad*16 + r*8 (r in 0..1)
+ *   groupID = lane >> 2, threadID_in_group = lane % 4
+ *   b[0]: col = groupID,  row(=K) = threadID*8 .. threadID*8+7       (K first half)
+ *   b[1]: col = groupID,  row(=K) = threadID*8+32 .. threadID*8+7+32 (K second half)
  *
  * D (accumulator, 16x8 int32, 4 x int32 per thread):
- *   row_a = lane / 4                   (0-7, for first 8 D rows)
- *   row_b = lane / 4 + 8              (8-15, for last 8 D rows)
- *   col_base = lane % 4               (0-3)
- *   d[0] = acc[row_a][col_base]
- *   d[1] = acc[row_a][col_base + 4]
- *   d[2] = acc[row_b][col_base]
- *   d[3] = acc[row_b][col_base + 4]
+ *   groupID = lane >> 2, threadID_in_group = lane % 4
+ *   d[0]: row = groupID,      col = threadID*2
+ *   d[1]: row = groupID,      col = threadID*2 + 1
+ *   d[2]: row = groupID + 8,  col = threadID*2
+ *   d[3]: row = groupID + 8,  col = threadID*2 + 1
  *
  * x_packed: [M, K/8] int32, dense 8 s4 per word
  * w_packed: [N, K/8] int32, dense 8 s4 per word
@@ -109,24 +110,30 @@ __global__ void fused_int4_tc_per_token_kernel(
 
     for (int k_offset = 0; k_offset < K; k_offset += 64) {
         // --- Load A fragment (4 x uint32) ---
-        // A mapping: lanes 0,3 → rows 0-7 half 0,1; lanes 1,2 → rows 8-15 half 0,1
-        int a_mod4 = lane % 4;
-        int a_row = lane / 4 + ((a_mod4 == 1 || a_mod4 == 2) ? 8 : 0);
-        int a_k_half = a_mod4 / 2;
+        // Per PTX ISA v9.3: groupID=lane/4, threadID=lane%4
+        // a[0]: row=groupID,   K=threadID*8..threadID*8+7   (first half)
+        // a[1]: row=groupID+8, K=threadID*8..threadID*8+7   (first half)
+        // a[2]: row=groupID,   K=threadID*8+32..threadID*8+7+32 (second half)
+        // a[3]: row=groupID+8, K=threadID*8+32..threadID*8+7+32 (second half)
+        int a_gid = lane / 4;
+        int a_tid = lane % 4;
         uint32_t a[4];
-        int x_idx = (m_start + a_row) * ldm_x + (k_offset + a_k_half * 32) / 8;
-        a[0] = ((const uint32_t*)x_packed)[x_idx + 0];
-        a[1] = ((const uint32_t*)x_packed)[x_idx + 1];
-        a[2] = ((const uint32_t*)x_packed)[x_idx + 2];
-        a[3] = ((const uint32_t*)x_packed)[x_idx + 3];
+        int x_off = k_offset / 8;
+        a[0] = ((const uint32_t*)x_packed)[(m_start + a_gid) * ldm_x + x_off + a_tid];
+        a[1] = ((const uint32_t*)x_packed)[(m_start + a_gid + 8) * ldm_x + x_off + a_tid];
+        a[2] = ((const uint32_t*)x_packed)[(m_start + a_gid) * ldm_x + x_off + a_tid + 4];
+        a[3] = ((const uint32_t*)x_packed)[(m_start + a_gid + 8) * ldm_x + x_off + a_tid + 4];
 
         // --- Load B fragment (2 x uint32) ---
-        int b_n = lane / 4;
-        int b_k_quad = lane % 4;
+        // Per PTX ISA v9.3: groupID=lane/4, threadID=lane%4
+        // b[0]: col=groupID, K=threadID*8..threadID*8+7     (first half)
+        // b[1]: col=groupID, K=threadID*8+32..threadID*8+7+32 (second half)
+        int b_gid = lane / 4;
+        int b_tid = lane % 4;
         uint32_t b[2];
-        int w_idx = (warp_n + b_n) * ldm_w + (k_offset + b_k_quad * 16) / 8;
-        b[0] = ((const uint32_t*)w_packed)[w_idx + 0];
-        b[1] = ((const uint32_t*)w_packed)[w_idx + 1];
+        int w_off = k_offset / 8;
+        b[0] = ((const uint32_t*)w_packed)[(warp_n + b_gid) * ldm_w + w_off + b_tid];
+        b[1] = ((const uint32_t*)w_packed)[(warp_n + b_gid) * ldm_w + w_off + b_tid + 4];
 
         // --- MMA ---
         asm volatile(

@@ -1,4 +1,4 @@
-"""Test weight repack from uint8 low_high to int32 TC-compatible format.
+"""Test weight repack from uint8 low_high to int32 TC-compatible format (8 s4 per int32).
 
 Tests:
   1. Round-trip: pack → repack → unpack matches original
@@ -28,14 +28,10 @@ def pack_int4_low_high(w_q):
 
 
 def repack_for_tc(packed_uint8, rows, cols):
-    """Convert uint8 low_high packed weights to int32 TC-compatible format.
+    """Pack 8 INT4 values per int32 (dense) for MMA consumption.
 
-    Args:
-        packed_uint8: uint8 tensor [N, K_packed] in low_high format
-        rows, cols: original weight shape
-
-    Returns:
-        int32 tensor [N, K/4] with 4 INT4 values packed per word
+    Each output int32:
+      bits [0,4,8,12,16,20,24,28] = 8 consecutive INT4 values
     """
     K_packed = packed_uint8.shape[1]
     K_eff = K_packed * 2
@@ -53,22 +49,28 @@ def repack_for_tc(packed_uint8, rows, cols):
 
     w_i32 = w_q.to(torch.int32) & 0xF
     K = cols
-    n_packed = K // 4
-    w_groups = w_i32[:, :n_packed * 4].reshape(rows, n_packed, 4)
-    packed = (w_groups[:, :, 0]
-              | (w_groups[:, :, 1] << 4)
-              | (w_groups[:, :, 2] << 8)
-              | (w_groups[:, :, 3] << 12))
+    K8 = K // 8
+    w_groups = w_i32[:, :K8 * 8].reshape(rows, K8, 8)
+    packed = (
+        w_groups[:, :, 0]
+        | (w_groups[:, :, 1] << 4)
+        | (w_groups[:, :, 2] << 8)
+        | (w_groups[:, :, 3] << 12)
+        | (w_groups[:, :, 4] << 16)
+        | (w_groups[:, :, 5] << 20)
+        | (w_groups[:, :, 6] << 24)
+        | (w_groups[:, :, 7] << 28)
+    )
     return packed
 
 
 def unpack_int4_tc(w_packed, rows):
-    """Unpack int32[N, K/4] back to individual INT4 values as int8[N, K]."""
+    """Unpack int32[N, K/8] (8 s4 per word) back to individual INT4 values."""
     n_packed = w_packed.shape[1]
-    K = n_packed * 4
+    K = n_packed * 8
     w_q = torch.zeros(rows, K, dtype=torch.int32)
-    for i in range(4):
-        w_q[:, i::4] = (w_packed[:, :] >> (i * 4)) & 0xF
+    for i in range(8):
+        w_q[:, i::8] = (w_packed[:, :] >> (i * 4)) & 0xF
     w_q = torch.where(w_q > 7, w_q - 16, w_q)
     return w_q.to(torch.int8)
 
@@ -90,7 +92,7 @@ def test_shapes():
         packed_i32 = repack_for_tc(packed_u8, rows, cols)
         w_unpacked = unpack_int4_tc(packed_i32, rows)
 
-        K_round = cols // 4 * 4
+        K_round = cols // 8 * 8
         if K_round > 0:
             w_cmp = w_unpacked[:, :K_round]
             w_ref = w_orig[:, :K_round]
@@ -100,7 +102,7 @@ def test_shapes():
         match = (w_cmp == w_ref).all().item()
         status = "PASS" if match else "FAIL"
         mismatch = ((w_cmp != w_ref).float().mean() * 100).item() if not match else 0.0
-        expected_shape = (rows, cols // 4) if cols >= 4 else (rows, 1)
+        expected_shape = (rows, cols // 8) if cols >= 8 else (rows, 1)
         print(f"  [{status}] {name}: shape={tuple(packed_i32.shape)} expected={expected_shape} mismatch={mismatch:.2f}%")
 
 
@@ -116,7 +118,7 @@ def test_round_trip_integrity():
 
 
 def test_export_format_parity():
-    """Verify repack produces same int32 bit pattern as reference."""
+    """Verify repack produces correct int32 bit pattern (8 s4 per word)."""
     rows, cols = 4, 16
     w = torch.tensor([
         [0, 1, 2, 3, 4, 5, 6, 7, -1, -2, -3, -4, -5, -6, -7, -8],
@@ -127,15 +129,22 @@ def test_export_format_parity():
 
     packed_u8 = pack_int4_low_high(w)
     packed_i32 = repack_for_tc(packed_u8, rows, cols)
-    w_back = unpack_int4_tc(packed_i32, rows)
 
+    # Manual verification: first row [0,1,2,3,4,5,6,7]
+    # Should pack as 0 | 1<<4 | 2<<8 | 3<<12 | 4<<16 | 5<<20 | 6<<24 | 7<<28
+    expected_first = 0 | 1 << 4 | 2 << 8 | 3 << 12 | 4 << 16 | 5 << 20 | 6 << 24 | 7 << 28
+    assert packed_i32[0, 0].item() == expected_first, (
+        f"First word mismatch: {packed_i32[0,0].item():08x} vs {expected_first:08x}"
+    )
+
+    w_back = unpack_int4_tc(packed_i32, rows)
     match = (w == w_back).all().item()
     status = "PASS" if match else "FAIL"
     print(f"  [{status}] export format parity")
 
 
 if __name__ == "__main__":
-    print("=== Weight Repack Test (uint8 → int32 TC) ===")
+    print("=== Weight Repack Test (uint8 → int32 TC, 8 s4/word) ===")
     print("\n--- Shape tests ---")
     test_shapes()
     print("\n--- Round-trip integrity ---")

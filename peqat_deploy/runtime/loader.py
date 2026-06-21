@@ -49,26 +49,59 @@ class CUDAQuantizedLinear(nn.Module):
     @staticmethod
     def _repack_for_tc(packed_uint8, rows, cols):
         K = cols
-        n_packed_words = K // 4
         w_q = CUDAQuantizedLinear._unpack_int4(packed_uint8, rows, cols)
         w_i32 = w_q.to(torch.int32) & 0xF
-        w_groups = w_i32[:, : n_packed_words * 4].reshape(rows, n_packed_words, 4)
+        K8 = K // 8
+        w_groups = w_i32[:, :K8 * 8].reshape(rows, K8, 8)
         packed = (
             w_groups[:, :, 0]
             | (w_groups[:, :, 1] << 4)
             | (w_groups[:, :, 2] << 8)
             | (w_groups[:, :, 3] << 12)
+            | (w_groups[:, :, 4] << 16)
+            | (w_groups[:, :, 5] << 20)
+            | (w_groups[:, :, 6] << 24)
+            | (w_groups[:, :, 7] << 28)
         )
         return packed.to(torch.int32)
 
     def _forward_tc(self, x_2d):
+        M, K = x_2d.shape
+        # Phase A: preprocess → quantize to INT4, pack 4 per int32
         x_packed, s_x = peqat_cuda.preprocess_per_token_forward(
             x_2d, self.smooth, self.clip
         )
-        y = peqat_cuda.fused_int4_tc_per_token_forward(
-            x_packed, self.w_packed_tc, self.w_scale.bfloat16(), s_x,
-            self.out_features, self.in_features,
+        # Repack 4→8: convert from gappy 4-per-int32 to dense 8-per-int32 for MMA
+        x_packed_8 = peqat_cuda.repack_4_to_8_forward(x_packed)
+
+        # Pad M to multiple of 16, N to multiple of 64 for TC m16n8k64 tiles
+        N = self.out_features
+        M_pad = (M + 15) // 16 * 16
+        N_pad = (N + 63) // 64 * 64
+        if M_pad > M or N_pad > N:
+            x_packed_8 = torch.cat([
+                x_packed_8,
+                torch.zeros(M_pad - M, K // 8, dtype=torch.int32, device=x_packed_8.device),
+            ], dim=0) if M_pad > M else x_packed_8
+            s_x = torch.cat([
+                s_x,
+                torch.ones(M_pad - M, device=s_x.device),
+            ], dim=0) if M_pad > M else s_x
+            w_scale = self.w_scale.bfloat16()
+            if N_pad > N:
+                w_scale = torch.cat([
+                    w_scale,
+                    torch.ones(N_pad - N, device=w_scale.device),
+                ], dim=0)
+        else:
+            w_scale = self.w_scale.bfloat16()
+
+        y_padded = peqat_cuda.fused_int4_tc_per_token_forward(
+            x_packed_8, self.w_packed_tc, w_scale.float(), s_x,
+            N_pad, K,
         )
+
+        y = y_padded[:M, :N].contiguous()
         return y
 
     def _forward_bf16(self, x_2d):

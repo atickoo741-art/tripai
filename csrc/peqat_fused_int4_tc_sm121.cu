@@ -66,7 +66,7 @@ void launch_repack_4_to_8(
  *   256 threads/block (8 warps)
  *   Shared memory: 16×64×4 = 4096 bytes
  */
-#include <cuda/wmma.hpp>
+#include <mma.h>
 
 namespace wmma = nvcuda::wmma;
 

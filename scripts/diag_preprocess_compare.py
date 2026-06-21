@@ -57,9 +57,12 @@ for k in range(0, K, 4):
 
 x_packed_8_ref = torch.zeros(M, K // 8, dtype=torch.int32, device="cuda")
 for i in range(K8):
-    lo = x_packed_4_ref[0, i * 2].item()
-    hi = x_packed_4_ref[0, i * 2 + 1].item()
-    x_packed_8_ref[0, i] = lo | (hi << 16)
+    lo = x_packed_4_ref[0, i * 2].item() & 0xFFFF
+    hi = x_packed_4_ref[0, i * 2 + 1].item() & 0xFFFF
+    val = (hi << 16) | lo
+    if val >= 0x80000000:
+        val -= 0x100000000
+    x_packed_8_ref[0, i] = val
 
 # Compare packed values
 packed_diff = (x_packed_8 != x_packed_8_ref).sum().item()

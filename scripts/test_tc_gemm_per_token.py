@@ -17,8 +17,12 @@ import peqat_cuda
 torch.manual_seed(42)
 
 
-def reference_forward(x_bf16, smooth, clip, w_q, w_scale):
-    """Compute reference matching kernel: float32 arithmetic throughout."""
+def reference_forward(x_bf16, smooth, clip, w_q, w_scale, s_x=None):
+    """Compute reference matching kernel: float32 arithmetic throughout.
+
+    If s_x is provided (from kernel preprocess), uses it directly to
+    avoid FP-non-associativity in the per-token max reduction.
+    """
     M, K = x_bf16.shape
     N = w_q.shape[0]
 
@@ -30,9 +34,10 @@ def reference_forward(x_bf16, smooth, clip, w_q, w_scale):
     x_scaled = x_f32 / smooth_f32
     x_clamped = x_scaled.clamp(-clip_f32, clip_f32)
 
-    # Per-token max scale
-    x_abs_max = x_clamped.abs().amax(dim=1)
-    s_x = (x_abs_max / 7.0).clamp(min=1e-8)
+    # Per-token max scale (use kernel's s_x if provided)
+    if s_x is None:
+        x_abs_max = x_clamped.abs().amax(dim=1)
+        s_x = (x_abs_max / 7.0).clamp(min=1e-8)
 
     # Quantize
     x_q = (x_clamped / s_x[:, None]).round().clamp(-8, 7).to(torch.int8)
@@ -111,11 +116,11 @@ def test_tc_gemm():
         packed_u8 = pack_int4_low_high(w)
         w_packed_tc = repack_for_tc(packed_u8, N, K).to(device="cuda")
 
-        # Compute reference
-        y_ref = reference_forward(x, smooth, clip, w, w_scale)
-
-        # TC path: preprocess → repack → TC GEMM
+        # TC preprocess first (to get kernel's s_x, avoiding FP-non-associativity)
         x_packed, s_x = peqat_cuda.preprocess_per_token_forward(x, smooth, clip)
+
+        # Compute reference using kernel's s_x
+        y_ref = reference_forward(x, smooth, clip, w, w_scale, s_x=s_x)
         x_packed_8 = peqat_cuda.repack_4_to_8_forward(x_packed)
 
         s_x_padded = s_x

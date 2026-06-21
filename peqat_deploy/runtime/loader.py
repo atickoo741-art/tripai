@@ -68,14 +68,10 @@ class CUDAQuantizedLinear(nn.Module):
 
     def _forward_tc(self, x_2d):
         M, K = x_2d.shape
-        # Phase A: preprocess → quantize to INT4, pack 4 per int32
-        x_packed, s_x = peqat_cuda.preprocess_per_token_forward(
+        x_packed_8, s_x = peqat_cuda.preprocess_per_token_forward(
             x_2d, self.smooth, self.clip
         )
-        # Repack 4→8: convert from gappy 4-per-int32 to dense 8-per-int32 for MMA
-        x_packed_8 = peqat_cuda.repack_4_to_8_forward(x_packed)
 
-        # Pad M to multiple of 16, N to multiple of 64 for TC m16n8k64 tiles
         N = self.out_features
         M_pad = (M + 15) // 16 * 16
         N_pad = (N + 63) // 64 * 64
@@ -107,10 +103,9 @@ class CUDAQuantizedLinear(nn.Module):
 
     def _forward_gemv(self, x_2d):
         M, K = x_2d.shape
-        x_packed, s_x = peqat_cuda.preprocess_per_token_forward(
+        x_packed_8, s_x = peqat_cuda.preprocess_per_token_forward(
             x_2d, self.smooth, self.clip
         )
-        x_packed_8 = peqat_cuda.repack_4_to_8_forward(x_packed)
 
         y = peqat_cuda.fused_int4_gemv_per_token_forward(
             x_packed_8, self.w_packed_tc, self.w_scale.float(), s_x,

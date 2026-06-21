@@ -258,9 +258,9 @@ std::vector<torch::Tensor> preprocess_per_token_forward(
 
     TORCH_CHECK(smooth.size(0) == K, "smooth dim[0] != K");
     TORCH_CHECK(clip.size(0) == K, "clip dim[0] != K");
-    TORCH_CHECK(K % 4 == 0, "K must be multiple of 4 for INT4 packing");
+    TORCH_CHECK(K % 8 == 0, "K must be multiple of 8 for INT4 packing");
 
-    int n_packed = K / 4;
+    int n_packed = K / 8;
     auto x_packed = torch::empty({M, n_packed}, torch::dtype(torch::kInt32).device(x.device()));
     auto s_x_out = torch::empty({M}, torch::dtype(torch::kFloat32).device(x.device()));
 

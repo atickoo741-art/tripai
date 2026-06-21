@@ -9,13 +9,13 @@
  * One block per token row. 256 threads.
  *
  * Phase 1 (reduction): compute per-token s_x[t] = max_k(|clamp(x/smooth)|) / 7
- * Phase 2 (pack):      quantize to INT4, pack 4 per int32
+ * Phase 2 (pack):      quantize to INT4, pack 8 per int32 (direct MMA-ready format)
  *
  * Input:  x[M,K] bf16, smooth[K] bf16, clip[K] bf16
- * Output: x_packed[M, K/4] int32, s_x[M] f32
+ * Output: x_packed[M, K/8] int32, s_x[M] f32
  *
- * Packing: word = q0 | (q1<<4) | (q2<<8) | (q3<<12)
- *          where q0 is at k_base+0, q3 at k_base+3 (little-endian K order)
+ * Packing: word = q0 | (q1<<4) | (q2<<8) | (q3<<12) | (q4<<16) | (q5<<20) | (q6<<24) | (q7<<28)
+ *          where q0 is at k_base+0, q7 at k_base+7 (little-endian K order)
  */
 __global__ void preprocess_per_token_kernel(
     const __nv_bfloat16* __restrict__ x,
@@ -78,8 +78,8 @@ __global__ void preprocess_per_token_kernel(
     }
     __syncthreads();
 
-    // --- Phase 2: Quantize and pack ---
-    int n_packed = K / 4;
+    // --- Phase 2: Quantize and pack 8 per int32 (direct MMA-ready format) ---
+    int n_packed = K / 8;
     int groups_per_thread = (n_packed + blockDim.x - 1) / blockDim.x;
     float s_x_val = s_x[row];
 
@@ -87,10 +87,10 @@ __global__ void preprocess_per_token_kernel(
         int group = tid * groups_per_thread + g;
         if (group >= n_packed) continue;
 
-        int k0 = group * 4;
+        int k0 = group * 8;
         int32_t word = 0;
 
-        for (int i = 0; i < 4; i++) {
+        for (int i = 0; i < 8; i++) {
             int k = k0 + i;
             if (k >= K) break;
 

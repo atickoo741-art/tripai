@@ -83,6 +83,16 @@ void launch_fused_int4_tc_per_token(
     cudaStream_t stream
 );
 
+void launch_fused_int4_gemv(
+    const int32_t* x_packed,
+    const int32_t* w_packed,
+    const float* w_scale,
+    const float* s_x,
+    __nv_bfloat16* y,
+    int N, int K,
+    cudaStream_t stream
+);
+
 void launch_fused_preprocess_gemm(
     const float* x,
     const uint8_t* packed,
@@ -661,6 +671,56 @@ torch::Tensor fused_int4_tc_per_token_forward(
     return y;
 }
 
+torch::Tensor fused_int4_gemv_per_token_forward(
+    torch::Tensor x_packed_8,
+    torch::Tensor w_packed_tc,
+    torch::Tensor w_scale,
+    torch::Tensor s_x,
+    int64_t out_features,
+    int64_t in_features
+) {
+    TORCH_CHECK(x_packed_8.device().is_cuda(), "x_packed_8 must be CUDA tensor");
+    TORCH_CHECK(w_packed_tc.device().is_cuda(), "w_packed_tc must be CUDA tensor");
+    TORCH_CHECK(w_scale.device().is_cuda(), "w_scale must be CUDA tensor");
+    TORCH_CHECK(s_x.device().is_cuda(), "s_x must be CUDA tensor");
+
+    TORCH_CHECK(x_packed_8.dim() == 2, "x_packed_8 must be 2D [1, K/8]");
+    TORCH_CHECK(x_packed_8.scalar_type() == torch::kInt32, "x_packed_8 must be int32");
+    TORCH_CHECK(x_packed_8.size(0) == 1, "fused_int4_gemv only supports M=1");
+
+    TORCH_CHECK(w_packed_tc.dim() == 2, "w_packed_tc must be 2D [N, K/8]");
+    TORCH_CHECK(w_packed_tc.scalar_type() == torch::kInt32, "w_packed_tc must be int32");
+
+    TORCH_CHECK(w_scale.dim() == 1, "w_scale must be 1D [N]");
+    TORCH_CHECK(w_scale.scalar_type() == torch::kFloat32, "w_scale must be float32");
+
+    TORCH_CHECK(s_x.dim() == 1, "s_x must be 1D [1]");
+    TORCH_CHECK(s_x.scalar_type() == torch::kFloat32, "s_x must be float32");
+
+    int N = out_features;
+    int K = in_features;
+
+    TORCH_CHECK(w_packed_tc.size(0) == N, "w_packed_tc dim[0] != out_features");
+    TORCH_CHECK(w_packed_tc.size(1) == K / 8, "w_packed_tc dim[1] != K/8");
+    TORCH_CHECK(w_scale.size(0) == N, "w_scale dim[0] != N");
+    TORCH_CHECK(s_x.size(0) == 1, "s_x dim[0] != 1");
+    TORCH_CHECK(K % 8 == 0, "K must be multiple of 8");
+
+    auto y = torch::empty({1, N}, torch::dtype(torch::kBFloat16).device(x_packed_8.device()));
+
+    launch_fused_int4_gemv(
+        x_packed_8.data_ptr<int32_t>(),
+        w_packed_tc.data_ptr<int32_t>(),
+        w_scale.data_ptr<float>(),
+        s_x.data_ptr<float>(),
+        reinterpret_cast<__nv_bfloat16*>(y.data_ptr<at::BFloat16>()),
+        N, K,
+        at::cuda::getCurrentCUDAStream()
+    );
+
+    return y;
+}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("preprocess_forward", &preprocess_forward,
           "PE-QAT activation preprocessing: x/smooth -> clamp(-clip,clip) -> quantize INT4 -> dequantize");
@@ -690,4 +750,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           "Repack INT4 from 4-per-int32 (gappy) to 8-per-int32 (dense) for MMA");
     m.def("fused_int4_tc_per_token_forward", &fused_int4_tc_per_token_forward,
           "SM 12.1 INT4 Tensor Core GEMM: per-token quantized INT4 x @ INT4 w -> bf16");
+    m.def("fused_int4_gemv_per_token_forward", &fused_int4_gemv_per_token_forward,
+          "SM 12.1 INT4 GEMV (M=1): per-token quantized INT4 x @ INT4 w -> bf16, no padding waste");
 }

@@ -98,49 +98,53 @@ __global__ void fused_int4_tc_per_token_kernel(
 
     int m_start = blockIdx.y * 16;
     int n_start = blockIdx.x * 64;
-    int warp_n = n_start + warp_id * 8;
 
     if (m_start >= M) return;
 
     int ldm_x = K / 8;
     int ldm_w = K / 8;
 
-    // Accumulator: 4 x int32 per thread (16x8 tile per warp)
     int32_t d[4] = {0, 0, 0, 0};
 
-    // Shared memory tile for A: 16 rows x 8 int32 = 128 int32
-    // One cooperative load per block per K-step replaces 8 redundant warp loads
-    __shared__ int32_t s_a[16][8 + 1]; // +1 padding to avoid bank conflicts
+    __shared__ int32_t s_a[16][8 + 1];
+    __shared__ int32_t s_b[64][8 + 1];
 
     for (int k_offset = 0; k_offset < K; k_offset += 64) {
         int x_off = k_offset / 8;
 
-        // --- Phase 1: Cooperative load A tile into shared memory ---
-        // 128 elements loaded by threads 0..127 (half the block)
+        // Phase 1: Cooperative load A tile into shared
         if (t < 128) {
-            int row = t / 8;
-            int k8 = t % 8;
-            s_a[row][k8] = ((const int32_t*)x_packed)[(m_start + row) * ldm_x + x_off + k8];
+            int row = t / 8, k8 = t % 8;
+            if (m_start + row < M)
+                s_a[row][k8] = __ldg(&x_packed[(m_start + row) * ldm_x + x_off + k8]);
         }
+
+        // Phase 2: Cooperative load B tile into shared
+        // 256 threads x 2 int32 = 512 int32 = 64 cols x 8 int32
+        int b_col = t / 4;
+        int b_k8 = (t % 4) * 2;
+        if (n_start + b_col < N) {
+            s_b[b_col][b_k8]     = __ldg(&w_packed[(n_start + b_col) * ldm_w + x_off + b_k8]);
+            s_b[b_col][b_k8 + 1] = __ldg(&w_packed[(n_start + b_col) * ldm_w + x_off + b_k8 + 1]);
+        }
+
         __syncthreads();
 
-        // --- Phase 2: Load A fragment from shared memory ---
-        int a_gid = lane / 4;
-        int a_tid = lane % 4;
+        // Phase 3: Load A fragment from shared
+        int a_gid = lane / 4, a_tid = lane % 4;
         uint32_t a[4];
         a[0] = (uint32_t)s_a[a_gid][a_tid];
         a[1] = (uint32_t)s_a[a_gid + 8][a_tid];
         a[2] = (uint32_t)s_a[a_gid][a_tid + 4];
         a[3] = (uint32_t)s_a[a_gid + 8][a_tid + 4];
 
-        // --- Phase 3: Load B fragment from global (unchanged) ---
-        int b_gid = lane / 4;
-        int b_tid = lane % 4;
+        // Phase 4: Load B fragment from shared
+        int b_gid = lane / 4, b_tid = lane % 4;
         uint32_t b[2];
-        b[0] = ((const uint32_t*)w_packed)[(warp_n + b_gid) * ldm_w + x_off + b_tid];
-        b[1] = ((const uint32_t*)w_packed)[(warp_n + b_gid) * ldm_w + x_off + b_tid + 4];
+        b[0] = (uint32_t)s_b[warp_id * 8 + b_gid][b_tid];
+        b[1] = (uint32_t)s_b[warp_id * 8 + b_gid][b_tid + 4];
 
-        // --- Phase 4: MMA ---
+        // Phase 5: MMA
         asm volatile(
             "mma.sync.aligned.m16n8k64.row.col.s32.s4.s4.s32 "
             "{%0, %1, %2, %3}, {%4, %5, %6, %7}, {%8, %9}, {%0, %1, %2, %3};\n"
@@ -148,12 +152,9 @@ __global__ void fused_int4_tc_per_token_kernel(
             : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]),
               "r"(b[0]), "r"(b[1])
         );
-
-        __syncthreads(); // ensure all warps done reading s_a before next load
     }
 
-    // --- Store accumulator to shared memory ---
-    __shared__ float tile[16][64 + 1]; // +1 padding to avoid 8-way bank conflicts
+    __shared__ float tile[16][64 + 1];
 
     int d_row_a = lane / 4;
     int d_col_pair = (lane % 4) * 2;
@@ -164,14 +165,14 @@ __global__ void fused_int4_tc_per_token_kernel(
 
     __syncthreads();
 
-    // --- Scale and store to output ---
-    // 256 threads cover 16x64 = 1024 elements: 4 elements per thread
     const int total_tile = 16 * 64;
     for (int i = t; i < total_tile; i += blockDim.x) {
-        int row = m_start + i / 64;
-        int col = n_start + i % 64;
+        int lr = i >> 6;
+        int lc = i & 63;
+        int row = m_start + lr;
+        int col = n_start + lc;
         if (row < M && col < N) {
-            float val = tile[i / 64][i % 64] * s_x[row] * w_scale[col];
+            float val = tile[lr][lc] * __ldg(&s_x[row]) * __ldg(&w_scale[col]);
             y[row * N + col] = __float2bfloat16(val);
         }
     }
@@ -188,6 +189,16 @@ void launch_fused_int4_tc_per_token(
     int K,
     cudaStream_t stream
 ) {
+    static bool attr_set = false;
+    if (!attr_set) {
+        cudaFuncSetAttribute(
+            fused_int4_tc_per_token_kernel,
+            cudaFuncAttributePreferredSharedMemoryCarveout,
+            cudaSharedmemCarveoutMaxL1
+        );
+        attr_set = true;
+    }
+
     dim3 block(256);
     dim3 grid((N + 63) / 64, (M + 15) / 16);
     fused_int4_tc_per_token_kernel<<<grid, block, 0, stream>>>(

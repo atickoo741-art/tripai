@@ -58,7 +58,7 @@ __global__ void fused_int4_gemv_kernel(
 
         for (int i = lane; i < K8; i += 32) {
             int32_t xw = s_x_packed[i];
-            int32_t ww = w_packed[(int64_t)n * K8 + i];
+            int32_t ww = __ldg(&w_packed[(int64_t)n * K8 + i]);
 
             for (int j = 0; j < 8; j++) {
                 int xv = ((int)(xw >> (j * 4))) & 0xF;

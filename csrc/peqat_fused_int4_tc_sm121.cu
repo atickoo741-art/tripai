@@ -82,6 +82,7 @@ void launch_repack_4_to_8(
  * s_x:      [M] float32
  * y:        [M, N] bfloat16
  */
+__launch_bounds__(256, 3)
 __global__ void fused_int4_tc_per_token_kernel(
     const int32_t* __restrict__ x_packed,
     const int32_t* __restrict__ w_packed,
@@ -103,6 +104,7 @@ __global__ void fused_int4_tc_per_token_kernel(
 
     int ldm_x = K / 8;
     int ldm_w = K / 8;
+    int warp_offset = warp_id * 8;
 
     int32_t d[4] = {0, 0, 0, 0};
 
@@ -112,25 +114,19 @@ __global__ void fused_int4_tc_per_token_kernel(
     for (int k_offset = 0; k_offset < K; k_offset += 64) {
         int x_off = k_offset / 8;
 
-        // Phase 1: Cooperative load A tile into shared
         if (t < 128) {
             int row = t / 8, k8 = t % 8;
-            if (m_start + row < M)
-                s_a[row][k8] = __ldg(&x_packed[(m_start + row) * ldm_x + x_off + k8]);
+            s_a[row][k8] = __ldg(&x_packed[(m_start + row) * ldm_x + x_off + k8]);
         }
 
-        // Phase 2: Cooperative load B tile into shared
-        // 256 threads x 2 int32 = 512 int32 = 64 cols x 8 int32
         int b_col = t / 4;
         int b_k8 = (t % 4) * 2;
-        if (n_start + b_col < N) {
-            s_b[b_col][b_k8]     = __ldg(&w_packed[(n_start + b_col) * ldm_w + x_off + b_k8]);
-            s_b[b_col][b_k8 + 1] = __ldg(&w_packed[(n_start + b_col) * ldm_w + x_off + b_k8 + 1]);
-        }
+        int w_base = (n_start + b_col) * ldm_w + x_off;
+        s_b[b_col][b_k8]     = __ldg(&w_packed[w_base + b_k8]);
+        s_b[b_col][b_k8 + 1] = __ldg(&w_packed[w_base + b_k8 + 1]);
 
         __syncthreads();
 
-        // Phase 3: Load A fragment from shared
         int a_gid = lane / 4, a_tid = lane % 4;
         uint32_t a[4];
         a[0] = (uint32_t)s_a[a_gid][a_tid];
@@ -138,13 +134,11 @@ __global__ void fused_int4_tc_per_token_kernel(
         a[2] = (uint32_t)s_a[a_gid][a_tid + 4];
         a[3] = (uint32_t)s_a[a_gid + 8][a_tid + 4];
 
-        // Phase 4: Load B fragment from shared
         int b_gid = lane / 4, b_tid = lane % 4;
         uint32_t b[2];
-        b[0] = (uint32_t)s_b[warp_id * 8 + b_gid][b_tid];
-        b[1] = (uint32_t)s_b[warp_id * 8 + b_gid][b_tid + 4];
+        b[0] = (uint32_t)s_b[warp_offset + b_gid][b_tid];
+        b[1] = (uint32_t)s_b[warp_offset + b_gid][b_tid + 4];
 
-        // Phase 5: MMA
         asm volatile(
             "mma.sync.aligned.m16n8k64.row.col.s32.s4.s4.s32 "
             "{%0, %1, %2, %3}, {%4, %5, %6, %7}, {%8, %9}, {%0, %1, %2, %3};\n"
@@ -152,6 +146,8 @@ __global__ void fused_int4_tc_per_token_kernel(
             : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]),
               "r"(b[0]), "r"(b[1])
         );
+
+        __syncthreads();
     }
 
     __shared__ float tile[16][64 + 1];

@@ -4,7 +4,8 @@ from torch.utils.cpp_extension import BuildExtension, CUDAExtension
 setup(
     name="peqat_cuda",
     ext_modules=[
-        CUDAExtension("peqat_cuda", [
+        CUDAExtension("peqat_cuda",
+            sources=[
             "bindings.cpp",
             "peqat_preprocess.cu",
             "peqat_preprocess_per_token.cu",
@@ -16,7 +17,9 @@ setup(
             "depr/peqat_fused_gemm.cu",
             "depr/peqat_fused_gemv.cu",
             "depr/peqat_fused_gemm_wmma.cu",
-        ]),
+        ],
+            extra_compile_args={"nvcc": ["-O3", "--ptxas-options=-v"]},
+        ),
     ],
     cmdclass={"build_ext": BuildExtension},
 )

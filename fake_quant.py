@@ -974,6 +974,51 @@ class Evaluation:
 # Hadamard PE-QAT: pure INT4 Tensor Core compatible quantization
 # ============================================================================
 
+try:
+    import peqat_cuda
+    _HAS_CUDA_BUTTERFLY = hasattr(peqat_cuda, "hadamard_butterfly_forward")
+except ImportError:
+    _HAS_CUDA_BUTTERFLY = False
+
+
+def _is_power_of_two(n):
+    return n > 0 and (n & (n - 1)) == 0
+
+
+class HadamardFunction(torch.autograd.Function):
+    """
+    Fused Hadamard butterfly with correct backward.
+
+    Forward: y = H @ x  (where H is normalized Walsh-Hadamard, sqrt(K) scaling)
+    Backward: same as forward (H is symmetric and orthogonal: H^T = H, H^T H = I)
+
+    Uses a fused CUDA kernel when available and K is power of 2.
+    Falls back to identity (no rotation) for non-power-of-2 dims or CPU.
+    """
+    @staticmethod
+    def forward(ctx, x):
+        if not x.is_cuda or x.dim() < 2:
+            return x
+
+        K = x.shape[-1]
+        if not _is_power_of_two(K) or not _HAS_CUDA_BUTTERFLY:
+            return x
+
+        ctx._is_pow2 = True
+        x_2d = x.reshape(-1, K)
+        y_2d = peqat_cuda.hadamard_butterfly_forward(x_2d)
+        return y_2d.reshape(x.shape)
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        if not hasattr(ctx, '_is_pow2') or not ctx._is_pow2:
+            return grad_output
+
+        K = grad_output.shape[-1]
+        g_2d = grad_output.reshape(-1, K)
+        return peqat_cuda.hadamard_butterfly_forward(g_2d).reshape(grad_output.shape)
+
+
 def fast_hadamard(x):
     """
     Walsh-Hadamard transform along the last dimension.
@@ -1092,15 +1137,19 @@ class HadamardPEQATLoRAModule(nn.Module):
         The H rotation on both inputs (along K) and weights (along K,
         which is the last dim = in_features) cancels exactly in full precision:
             H(x) @ H(W)^T = x @ H @ H^T @ W^T = x @ W^T    ✓
+        
+        Uses a fused CUDA kernel for the butterfly. For non-power-of-2 dims
+        (e.g. Llama intermediate_size=11008), the rotation is silently skipped
+        — quantization still applies, just without outlier diffusion on those dims.
         """
         merged_weight = self.get_merged_weight()
         
-        # Hadamard rotate input along in_features
-        x_rot = fast_hadamard(x)
+        # Fused Hadamard rotate input along in_features
+        x_rot = HadamardFunction.apply(x)
         
-        # Hadamard rotate merged weight along in_features (last dim)
+        # Fused Hadamard rotate merged weight along in_features (last dim)
         # W is [out_features, in_features], last dim = in = K
-        W_rot = fast_hadamard(merged_weight)
+        W_rot = HadamardFunction.apply(merged_weight)
         
         # Per-token quantization on rotated activations (no clip/smooth)
         quant_input = HadamardPerTokenActSTEQuant.apply(x_rot, self.num_bits)

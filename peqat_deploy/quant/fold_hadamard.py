@@ -19,6 +19,10 @@ def fast_hadamard(x):
     return x_flat.reshape(*rest, K) if rest else x_flat.reshape(K)
 
 
+def _is_power_of_two(n):
+    return n > 0 and (n & (n - 1)) == 0
+
+
 def fold_hadamard(merged_weights: dict) -> dict:
     """
     In-place: W' = H @ W along in_features dimension.
@@ -28,9 +32,18 @@ def fold_hadamard(merged_weights: dict) -> dict:
     
     After this step, weights are ready for per-row INT4 quantization.
     No smooth or clip parameters needed — H handles outlier diffusion.
+    
+    Skips non-power-of-2 dims (e.g. Llama intermediate_size=11008).
     """
+    skipped = 0
     for module_name, w in merged_weights.items():
+        K = w.shape[-1]
+        if not _is_power_of_two(K):
+            skipped += 1
+            continue
         with torch.no_grad():
             w.copy_(fast_hadamard(w))
     
+    if skipped:
+        print(f"  Skipped H rotation for {skipped} modules with non-power-of-2 in_features")
     return merged_weights

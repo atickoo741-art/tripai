@@ -10,6 +10,7 @@ setup(
             "peqat_preprocess.cu",
             "peqat_preprocess_per_token.cu",
             "peqat_hadamard_preprocess.cu",
+            "hadamard_butterfly.cu",
             "peqat_fused_int4_tc_sm121.cu",
             "peqat_fused_int4_gemv.cu",
             "peqat_gemm_bf16_wmma.cu",

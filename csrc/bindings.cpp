@@ -81,6 +81,13 @@ void launch_preprocess_hadamard(
     cudaStream_t stream
 );
 
+void launch_hadamard_butterfly(
+    const __nv_bfloat16* x,
+    __nv_bfloat16* y,
+    int M, int K,
+    cudaStream_t stream
+);
+
 void launch_fused_int4_tc_per_token(
     const int32_t* x_packed,
     const int32_t* w_packed,
@@ -757,6 +764,29 @@ std::vector<torch::Tensor> preprocess_hadamard_forward(
     return {x_packed, s_x_out};
 }
 
+torch::Tensor hadamard_butterfly_forward(
+    torch::Tensor x
+) {
+    TORCH_CHECK(x.device().is_cuda(), "x must be CUDA tensor");
+    TORCH_CHECK(x.dim() == 2, "x must be 2D [M, K]");
+    TORCH_CHECK(x.scalar_type() == torch::kBFloat16, "x must be bfloat16");
+
+    int M = x.size(0);
+    int K = x.size(1);
+    TORCH_CHECK(K > 0 && (K & (K - 1)) == 0, "K must be a power of 2, got ", K);
+
+    auto y = torch::empty_like(x);
+
+    launch_hadamard_butterfly(
+        reinterpret_cast<__nv_bfloat16*>(x.data_ptr<at::BFloat16>()),
+        reinterpret_cast<__nv_bfloat16*>(y.data_ptr<at::BFloat16>()),
+        M, K,
+        at::cuda::getCurrentCUDAStream()
+    );
+
+    return y;
+}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("preprocess_forward", &preprocess_forward,
           "PE-QAT activation preprocessing: x/smooth -> clamp(-clip,clip) -> quantize INT4 -> dequantize");
@@ -790,4 +820,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           "SM 12.1 INT4 GEMV (M=1): per-token quantized INT4 x @ INT4 w -> bf16, no padding waste");
     m.def("preprocess_hadamard_forward", &preprocess_hadamard_forward,
           "Hadamard PE-QAT preprocess: H(x) -> per-token max/7 -> pack 8xINT4 per int32. No smooth/clip.");
+    m.def("hadamard_butterfly_forward", &hadamard_butterfly_forward,
+          "Fused Walsh-Hadamard butterfly (training): H(x) normalized by sqrt(K). Single kernel, bf16 in/out. K must be power of 2.");
 }

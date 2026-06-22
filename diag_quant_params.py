@@ -120,7 +120,7 @@ def make_plots(params, out_dir="quant_diag"):
             s = np.concatenate([m["smooth_factor"] for m in proj_keys[p]])
             print(f"{p:<12} {c.mean():>12.4f} {c.std():>12.4f} {np.percentile(c,99):>12.4f} {s.mean():>12.4f} {s.std():>12.4f} {np.percentile(s,99):>12.4f}")
     total_trainable = sum(
-        p.numel() for m in params.values()
+        m[pname].size for m in params.values()
         for pname in ["activation_clip", "smooth_factor"]
         if pname in m
     )

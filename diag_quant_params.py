@@ -10,8 +10,8 @@ def load_params(path):
     for k, v in d.items():
         parts = k.split(".")
         # base_model.model.model.layers.N.{attn|mlp}.{proj}.qat_core.{param}
-        layer_idx = int(parts[3])
-        proj = parts[4]
+        layer_idx = int(parts[4])
+        proj = parts[6]
         param_name = parts[-1]
         key = (layer_idx, proj)
         by_module.setdefault(key, {})[param_name] = v.float().numpy()

@@ -1,3 +1,4 @@
+import math
 import torch
 from torch import nn
 from functools import partial
@@ -967,3 +968,180 @@ class Evaluation:
             nlls.append(neg_log_likelihood)
 
         return torch.exp(torch.stack(nlls).sum() / (n_samples * 2048))
+
+
+# ============================================================================
+# Hadamard PE-QAT: pure INT4 Tensor Core compatible quantization
+# ============================================================================
+
+def fast_hadamard(x):
+    """
+    Walsh-Hadamard transform along the last dimension.
+    Normalized: H @ H^T = I, so applying the same rotation to both
+    activations and weights leaves the matmul output unchanged.
+    
+    x: [M, K] or [B, S, K]
+    returns: [M, K] or [B, S, K] rotated, same dtype
+    """
+    K = x.shape[-1]
+    *rest, K = x.shape
+    x_flat = x.reshape(-1, K)
+    
+    h = 1
+    while h < K:
+        x_flat = x_flat.reshape(-1, h * 2)
+        a, b = x_flat[:, :h].clone(), x_flat[:, h:].clone()
+        x_flat[:, :h] = a + b
+        x_flat[:, h:] = a - b
+        h *= 2
+    
+    x_flat /= math.sqrt(K)
+    return x_flat.reshape(*rest, K) if rest else x_flat.reshape(K)
+
+
+class HadamardPerTokenActSTEQuant(torch.autograd.Function):
+    """
+    Per-token activation quantization on rotation-uniformized activations.
+    
+    No learned clip, no boundary gradient, no LSQ term.
+    Hadamard rotation diffuses outliers uniformly, so the per-token
+    scale works well without any per-channel clipping.
+    
+    Forward:
+        x: [M, K] or [B, S, K] — already rotated by H
+        num_bits: int (default 4)
+        Per-token dynamic scale: s_x[t] = max|x| / qmax, detached.
+    
+    Backward:
+        Full STE passthrough — no mask, no clip terms.
+    """
+    @staticmethod
+    def forward(ctx, x, num_bits=4):
+        qmax = (1 << (num_bits - 1)) - 1
+        qmin = -(1 << (num_bits - 1))
+        s_x = x.abs().amax(dim=-1, keepdim=True) / qmax
+        s_x = s_x.detach()
+        x_q = torch.clamp(torch.round(x / s_x), qmin, qmax)
+        x_dq = x_q * s_x
+        return x_dq
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        return grad_output, None
+
+
+class HadamardPEQATLoRAModule(nn.Module):
+    """
+    LoRA module with Hadamard rotation + per-token activation quantization.
+    
+    No learned clip or smooth parameters. The Hadamard rotation diffuses
+    outlier channels, making per-token dynamic quantization effective.
+    
+    Training-forward is numerically identical to full-precision matmul
+    because H @ H^T = I (the rotation cancels between activations and weights).
+    Quantization noise is the only source of accuracy loss.
+    """
+    
+    def __init__(self, original_lora_module, num_bits=4):
+        super().__init__()
+        
+        self.base_layer = original_lora_module.base_layer
+        if hasattr(self.base_layer, 'in_features') and hasattr(self.base_layer, 'out_features'):
+            self.in_features = self.base_layer.in_features
+            self.out_features = self.base_layer.out_features
+        else:
+            weight_shape = self.base_layer.weight.shape
+            self.in_features = weight_shape[0]
+            self.out_features = weight_shape[1]
+        
+        self.lora_A = original_lora_module.lora_A
+        self.lora_B = original_lora_module.lora_B
+        self.scaling = original_lora_module.scaling
+        
+        self.r = original_lora_module.r
+        self.lora_alpha = original_lora_module.lora_alpha
+        self.lora_dropout = original_lora_module.lora_dropout
+        self.active_adapter = original_lora_module.active_adapter
+        
+        if hasattr(original_lora_module, 'fan_in_fan_out'):
+            self.fan_in_fan_out = original_lora_module.fan_in_fan_out
+        if hasattr(original_lora_module, 'merged'):
+            self.merged = original_lora_module.merged
+        
+        self.num_bits = num_bits
+    
+    def get_merged_weight(self):
+        """W_merged = W_base + (B @ A) * scaling — gradient flows only through LoRA"""
+        base_weight = self.base_layer.weight.detach()
+        
+        if self.r['default'] > 0 and not getattr(self, 'merged', False):
+            lora_A = self.lora_A[self.active_adapter[0]].weight
+            lora_B = self.lora_B[self.active_adapter[0]].weight
+            scaling = self.scaling[self.active_adapter[0]]
+            lora_delta = (lora_B @ lora_A) * scaling
+            merged_weight = base_weight + lora_delta
+        else:
+            merged_weight = base_weight
+        
+        return merged_weight
+    
+    def forward(self, x):
+        """
+        Forward: H(x) → per-token quant → H(W) → per-row quant → F.linear
+        
+        The H rotation on both inputs (along K) and weights (along K,
+        which is the last dim = in_features) cancels exactly in full precision:
+            H(x) @ H(W)^T = x @ H @ H^T @ W^T = x @ W^T    ✓
+        """
+        merged_weight = self.get_merged_weight()
+        
+        # Hadamard rotate input along in_features
+        x_rot = fast_hadamard(x)
+        
+        # Hadamard rotate merged weight along in_features (last dim)
+        # W is [out_features, in_features], last dim = in = K
+        W_rot = fast_hadamard(merged_weight)
+        
+        # Per-token quantization on rotated activations (no clip/smooth)
+        quant_input = HadamardPerTokenActSTEQuant.apply(x_rot, self.num_bits)
+        
+        # Per-row symmetric weight quantization (unchanged)
+        quant_weight = WeightSTEQuant.apply(W_rot, self.num_bits)
+        
+        # Linear with bias
+        bias = self.base_layer.bias
+        output = F.linear(quant_input, quant_weight, bias)
+        
+        return output
+    
+    def __repr__(self):
+        return (f"HPEQATLoRAModule(in={self.in_features}, out={self.out_features}, "
+                f"r={self.r['default']}, num_bits={self.num_bits})")
+
+
+def hadamard_quantize_model(model, num_bits=4):
+    """
+    Replace all LoRA modules with HadamardPEQATLoRAModule.
+    Same pattern as quantize_model() but with no clip/smooth params.
+    """
+    modules_to_replace = []
+    
+    for name, module in model.named_modules():
+        if hasattr(module, 'lora_A') and hasattr(module, 'lora_B'):
+            modules_to_replace.append((name, module))
+    
+    print(f"Found {len(modules_to_replace)} LoRA modules to quantize (Hadamard PE-QAT)")
+    
+    for name, lora_module in modules_to_replace:
+        quantized_module = HadamardPEQATLoRAModule(
+            lora_module,
+            num_bits=num_bits,
+        )
+        
+        parent = model
+        attrs = name.split('.')
+        for attr in attrs[:-1]:
+            parent = getattr(parent, attr)
+        setattr(parent, attrs[-1], quantized_module)
+    
+    return model

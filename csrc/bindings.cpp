@@ -73,6 +73,14 @@ void launch_repack_4_to_8(
     cudaStream_t stream
 );
 
+void launch_preprocess_hadamard(
+    const __nv_bfloat16* x,
+    int32_t* x_packed,
+    float* s_x,
+    int M, int K,
+    cudaStream_t stream
+);
+
 void launch_fused_int4_tc_per_token(
     const int32_t* x_packed,
     const int32_t* w_packed,
@@ -721,6 +729,34 @@ torch::Tensor fused_int4_gemv_per_token_forward(
     return y;
 }
 
+// --- Hadamard preprocess (no smooth/clip params) ---
+
+std::vector<torch::Tensor> preprocess_hadamard_forward(
+    torch::Tensor x
+) {
+    TORCH_CHECK(x.device().is_cuda(), "x must be CUDA tensor");
+    TORCH_CHECK(x.dim() == 2, "x must be 2D [M, K]");
+    TORCH_CHECK(x.scalar_type() == torch::kBFloat16, "x must be bfloat16");
+
+    int M = x.size(0);
+    int K = x.size(1);
+    TORCH_CHECK(K % 8 == 0, "K must be multiple of 8 for INT4 packing");
+
+    int n_packed = K / 8;
+    auto x_packed = torch::empty({M, n_packed}, torch::dtype(torch::kInt32).device(x.device()));
+    auto s_x_out = torch::empty({M}, torch::dtype(torch::kFloat32).device(x.device()));
+
+    launch_preprocess_hadamard(
+        reinterpret_cast<__nv_bfloat16*>(x.data_ptr<at::BFloat16>()),
+        x_packed.data_ptr<int32_t>(),
+        s_x_out.data_ptr<float>(),
+        M, K,
+        at::cuda::getCurrentCUDAStream()
+    );
+
+    return {x_packed, s_x_out};
+}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("preprocess_forward", &preprocess_forward,
           "PE-QAT activation preprocessing: x/smooth -> clamp(-clip,clip) -> quantize INT4 -> dequantize");
@@ -752,4 +788,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           "SM 12.1 INT4 Tensor Core GEMM: per-token quantized INT4 x @ INT4 w -> bf16");
     m.def("fused_int4_gemv_per_token_forward", &fused_int4_gemv_per_token_forward,
           "SM 12.1 INT4 GEMV (M=1): per-token quantized INT4 x @ INT4 w -> bf16, no padding waste");
+    m.def("preprocess_hadamard_forward", &preprocess_hadamard_forward,
+          "Hadamard PE-QAT preprocess: H(x) -> per-token max/7 -> pack 8xINT4 per int32. No smooth/clip.");
 }

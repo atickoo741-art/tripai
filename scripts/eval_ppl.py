@@ -33,14 +33,21 @@ def main():
     parser.add_argument("--base_model", type=str, default="meta-llama/Llama-3.1-8B")
     parser.add_argument("--seq_len", type=int, default=2048)
     parser.add_argument("--n_samples", type=int, default=None)
+    parser.add_argument("--hadamard", action="store_true", help="Use Hadamard PE-QAT export format")
     parser.add_argument("--mode", type=str, choices=["auto", "export", "export-folded", "original"], default="auto",
                         help="'export' for deployed CUDA runtime, 'export-folded' for INT4 TC folded-weights validation, 'original' for fake-quant PyTorch, 'auto' to detect")
     args = parser.parse_args()
 
     device = "cuda"
 
+    if args.hadamard:
+        from peqat_deploy.runtime.loader import build_hadamard_cuda_model
+
     if args.mode == "export":
-        model, tokenizer = build_cuda_model(args.model_path, args.base_model, device)
+        if args.hadamard:
+            model, tokenizer = build_hadamard_cuda_model(args.model_path, args.base_model, device)
+        else:
+            model, tokenizer = build_cuda_model(args.model_path, args.base_model, device)
     elif args.mode == "export-folded":
         model, tokenizer = build_cuda_model(args.model_path, args.base_model, device, use_folded=True)
     elif args.mode == "original":
@@ -52,7 +59,10 @@ def main():
         is_original = os.path.isfile(os.path.join(args.model_path, "quantization_params.pth"))
         is_export  = os.path.isfile(os.path.join(args.model_path, "manifest.json"))
         if is_export:
-            model, tokenizer = build_cuda_model(args.model_path, args.base_model, device)
+            if args.hadamard:
+                model, tokenizer = build_hadamard_cuda_model(args.model_path, args.base_model, device)
+            else:
+                model, tokenizer = build_cuda_model(args.model_path, args.base_model, device)
         elif is_original:
             from fake_quant import load_peqat_model
             import torch

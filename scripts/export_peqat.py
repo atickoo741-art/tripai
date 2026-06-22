@@ -11,10 +11,11 @@ from peqat_deploy.config.loader import load_export_job
 from peqat_deploy.io.discover import discover_source_dir
 from peqat_deploy.io.hf_loader import load_base_model
 from peqat_deploy.io.peft_loader import load_adapter
-from peqat_deploy.io.save_artifacts import save_artifacts
+from peqat_deploy.io.save_artifacts import save_artifacts, save_hadamard_artifacts
 from peqat_deploy.quant.extract_quant_params import extract_quant_params
 from peqat_deploy.quant.fold_smoothing import fold_smoothing
-from peqat_deploy.quant.manifest import build_manifest
+from peqat_deploy.quant.fold_hadamard import fold_hadamard
+from peqat_deploy.quant.manifest import build_manifest, build_hadamard_manifest
 from peqat_deploy.quant.merge_lora import build_layer_map, merge_lora_weights
 from peqat_deploy.quant.pack_int4 import pack_int4
 from peqat_deploy.quant.quantize_weights import quantize_weights
@@ -71,10 +72,22 @@ def main():
         default="cpu",
         help="Device to use for model loading and merging",
     )
+    parser.add_argument(
+        "--hadamard",
+        action="store_true",
+        help="Export a Hadamard PE-QAT checkpoint (no clip/smooth params, applies H rotation to weights)",
+    )
     args = parser.parse_args()
 
+    if args.hadamard:
+        _run_hadamard_export(args)
+    else:
+        _run_standard_export(args)
+
+
+def _run_standard_export(args):
     print("=" * 60)
-    print("PE-QAT Export Pipeline")
+    print("PE-QAT Export Pipeline (standard)")
     print("=" * 60)
 
     num_main_steps = "8" if not args.fold_weights else "9"
@@ -185,6 +198,97 @@ def main():
         manifest=manifest,
         overwrite=job.overwrite or args.overwrite,
     )
+
+    print("\n" + "=" * 60)
+    print("Export complete!")
+    print("=" * 60)
+
+
+def _run_hadamard_export(args):
+    print("=" * 60)
+    print("PE-QAT Export Pipeline (Hadamard)")
+    print("=" * 60)
+
+    # Step 1: Discover source
+    print("\n[1/6] Discovering source directory...")
+    discovered = discover_source_dir(args.source_dir, args.checkpoint)
+    print(f"  Source: {discovered['source_dir']}")
+    if discovered["selected_checkpoint"]:
+        print(f"  Checkpoint: {os.path.basename(discovered['selected_checkpoint'])}")
+    else:
+        print(f"  Using final model at source dir")
+
+    # Step 2: Load config
+    print("\n[2/6] Loading export configuration...")
+    overrides = {}
+    if args.output_dir:
+        overrides["export_dir"] = args.output_dir
+    if args.dtype:
+        overrides["dtype"] = args.dtype
+    job = load_export_job(discovered, **overrides)
+    print(f"  Base model: {job.base_model_name}")
+    print(f"  Target modules: {job.target_modules}")
+    print(f"  Export dir: {job.export_dir}")
+
+    # Step 3: Load base model and adapter
+    print("\n[3/6] Loading base model and adapter...")
+    device = args.device
+    base_model, tokenizer = load_base_model(job.base_model_name, device=device)
+    print(f"  Base model loaded: {type(base_model).__name__}")
+
+    adapter_path = discovered["selected_checkpoint"] or discovered["source_dir"]
+    peft_model = load_adapter(base_model, adapter_path)
+    print(f"  Adapter loaded")
+
+    # Step 4: Merge LoRA weights
+    print("\n[4/6] Merging LoRA weights...")
+    merged_weights = merge_lora_weights(
+        peft_model,
+        job.target_modules,
+        job.lora_rank,
+        job.lora_alpha,
+    )
+    print(f"  Merged {len(merged_weights)} target modules")
+
+    del base_model
+    del peft_model
+    gc.collect()
+    print("  Freed base model and adapter from memory")
+
+    # Step 5: Fold Hadamard into weights (replaces smooth fold + extract quant params)
+    print("\n[5/6] Folding Hadamard rotation onto weights...")
+    print("  (No clip/smooth params to extract — H is fixed, no learned QAT params)")
+    hadamard_weights = fold_hadamard(merged_weights)
+
+    # Quantize and pack
+    print("  Quantizing weights to INT4...")
+    quantized, error_stats = quantize_weights(hadamard_weights)
+
+    print("  Packing INT4 weights...")
+    packed = pack_int4(quantized, smoothing_folded=False)
+
+    # Step 6: Save artifacts
+    print("\n[6/6] Saving export artifacts...")
+    layer_map = build_layer_map(merged_weights, job.export_dir)
+
+    manifest = build_hadamard_manifest(job, layer_map, packed)
+
+    save_hadamard_artifacts(
+        export_dir=job.export_dir,
+        export_job=job,
+        discovered=discovered,
+        merged_weights=merged_weights,
+        quantized=quantized,
+        packed=packed,
+        error_stats=error_stats,
+        layer_map=layer_map,
+        manifest=manifest,
+        overwrite=job.overwrite or args.overwrite,
+    )
+
+    print("\n" + "=" * 60)
+    print("Hadamard export complete!")
+    print("=" * 60)
 
     print("\n" + "=" * 60)
     print("Export complete!")

@@ -9,7 +9,7 @@ from peqat_deploy.runtime.loader import build_cuda_model
 @torch.no_grad()
 def evaluate(model, tokenizer, device="cuda", seq_len=2048, stride=2048, n_samples=None):
     model.eval()
-    dataset = load_dataset("wikitext", "wikitext-2-raw-v1", split="test")
+    dataset = load_dataset("wikitext/wikitext-2-raw-v1", split="test")
     enc = tokenizer("\n\n".join(dataset["text"]), return_tensors="pt").input_ids.to(device)
     n = n_samples if n_samples else enc.size(1) // seq_len
     nlls = []

@@ -388,7 +388,7 @@ def load_and_preprocess_wikitext2(model_name="gpt2"):
     print("Loading and preprocessing data...")
     
     # Load the dataset
-    dataset = load_dataset("wikitext", "wikitext-2-v1")
+    dataset = load_dataset("wikitext/wikitext-2-v1")
     
     # Filter out empty lines
     filtered_datasets = {}

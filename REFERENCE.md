@@ -253,22 +253,36 @@ peqat_cuda.fused_linear_forward(x_dq, packed_w, w_scale, rows, cols) -> y # new 
 - Keyed by `base_model.model.model.layers.N.{attn|mlp}.{proj}`
 - Float32 tensors of length K (input dimension)
 
-## Benchmark Results (Llama-3.1-8B on DGX Spark GB10)
+## Benchmark Results (DGX Spark GB10)
 
-### v1 Kernel (unpack+cuBLAS, no KV cache, seq_len 128)
+### Per-Token Activation Quantization (best results) — Llama-2-7B
+Checkpoint: `output_qat_lora_llama2_7b_per_tok_ac_05fa_001_export` (per-token activation quantization path).
+
+| Metric | FP16 | CUDA PEQAT | Ratio |
+|--------|------|------------|-------|
+| Prefill (seq 128) | 90.5ms | 112.3ms | 1.2× |
+| Prefill (seq 512) | — | 344.5ms | — |
+| Decode (prompt 128) | 76.4ms/tok | **28.2ms/tok** | **0.37×** (2.7× faster) |
+| Decode (prompt 512) | — | 32.4ms/tok | — |
+| GPU memory (alloc) | 13.29 GB | **6.89 GB** | **1.9× less** |
+| GPU memory (resv) | 13.32 GB | 7.63 GB | 1.7× less |
+
+Decode is **2.7× faster than FP16** — the per-token activation quantization path makes the small-M kernel efficient enough to beat cuBLAS FP16 at M=1. Prefill is close to FP16 (1.2× slower vs 4.4× previously).
+
+### Legacy: v1 Kernel (unpack+cuBLAS, no KV cache, seq_len 128) — Llama-3.1-8B
 | Metric | FP16 | CUDA PEQAT | Ratio |
 |--------|------|------------|-------|
 | Prefill | 99.7ms | 455.3ms | 4.6× |
 | Decode (no KV) | 106.2ms/tok | 467.7ms/tok | 4.4× |
 | GPU memory | 17.24 GB | 6.69 GB | 2.6× less |
 
-### v2 Fused Kernel (no KV cache, seq_len 128)
+### Legacy: v2 Fused Kernel (no KV cache, seq_len 128) — Llama-3.1-8B
 | Metric | FP16 | CUDA PEQAT | Ratio |
 |--------|------|------------|-------|
 | Prefill | 95.3ms | 417.4ms | 4.4× |
 | Decode (no KV) | 99.3ms/tok | 623.8ms/tok | 6.3× |
 
-### v2 Fused Kernel (WITH KV cache, prompt_len 128)
+### Legacy: v2 Fused Kernel (WITH KV cache, prompt_len 128) — Llama-3.1-8B
 | Metric | FP16 | CUDA PEQAT | Ratio |
 |--------|------|------------|-------|
 | Prefill | 95ms | 420ms | 4.4× |
@@ -277,10 +291,10 @@ peqat_cuda.fused_linear_forward(x_dq, packed_w, w_scale, rows, cols) -> y # new 
 | GPU memory | 15.8 GB | 5.4 GB | 2.9× less |
 
 ### Observations
-- KV cache dropped decode from 623ms → 148ms (4.2× improvement, small-M kernel now active)
-- Fused kernel is still 2× slower than cuBLAS for decode (M=1): small-M kernel overhead vs highly optimized cuBLAS small-M path
-- Prefill is 4.4× slower: tiled kernel's syncthreads+smem overhead exceeds the bandwidth savings vs cuBLAS at M=128+
-- Memory savings consistent: ~3× less GPU memory from INT4 packed weights
+- Per-token activation quantization decode (28.2ms/tok) is **2.7× faster than FP16 baseline** (76.4ms/tok) — the INT4 fused kernel with KV cache now outperforms cuBLAS FP16 at M=1
+- Prefill narrowed to 1.2× slower (112.3ms vs 90.5ms), down from 4.4× in the legacy path
+- Memory savings: 1.9× less GPU memory vs baseline (6.89 GB vs 13.29 GB allocated)
+- Legacy Llama-3.1-8B numbers included for reference — larger model shifts absolute latencies but confirms the per-token quantization path is the key improvement
 
 ## Known Issues
 

@@ -19,7 +19,7 @@ orig, _ = load_peqat_model(sys.argv[1].replace("_export", ""), "meta-llama/Llama
 orig.to(torch.bfloat16)
 
 # Get one batch of input
-dataset = load_dataset("wikitext", "wikitext-2-raw-v1", split="test")
+dataset = load_dataset("wikitext/wikitext-2-raw-v1", split="test")
 enc = tokenizer("\n\n".join(dataset["text"]), return_tensors="pt").input_ids.to(device)
 batch = enc[:, :2048]
 

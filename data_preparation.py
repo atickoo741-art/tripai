@@ -31,7 +31,7 @@ def load_wikitext2_sliding_window(model_name="gpt2", seq_len=2048, stride=512):
         tokenizer: The tokenizer used
     """
     print(f"Loading WikiText-2 with sliding window (seq_len={seq_len}, stride={stride})...")
-    raw_datasets = load_dataset("wikitext", "wikitext-2-raw-v1")
+    raw_datasets = load_dataset("wikitext/wikitext-2-raw-v1")
 
     print("Loading tokenizer...")
     tokenizer = AutoTokenizer.from_pretrained(model_name)

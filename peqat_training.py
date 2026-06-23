@@ -47,7 +47,7 @@ def custom_eval(peft_model, tokenizer, device, trainer_ppl):
     print("\n--- Evaluating with Proper Perplexity Metric (Test Set) ---")
     from datasets import load_dataset
     
-    test_dataset = load_dataset("wikitext", "wikitext-2-raw-v1", split="test")
+    test_dataset = load_dataset("Salesforce/wikitext", "wikitext-2-raw-v1", split="test")
     # proper_eval = Evaluation(tokenizer, test_dataset, device, num_samples=None)
     proper_eval = Evaluation(test_dataset, tokenizer, device, num_samples=None)
     
@@ -574,7 +574,7 @@ if __name__ == "__main__":
     # Now evaluate with YOUR evaluation class on the SAME split
     # print("\n--- Cross-checking with custom Evaluation class ---")
     # from datasets import load_dataset
-    # val_dataset = load_dataset("wikitext", "wikitext-2-raw-v1", split="validation")
+    # val_dataset = load_dataset("Salesforce/wikitext", "wikitext-2-raw-v1", split="validation")
     # custom_eval = Evaluation(tokenizer, val_dataset, device, num_samples=None, block_size=2048)
     # custom_ppl = custom_eval.evaluate(peft_model)
         # Now evaluate with proper sliding window on TEST set

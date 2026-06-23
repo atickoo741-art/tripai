@@ -2,12 +2,12 @@
 
 
 experiment:
-  name: "llama-2-13b-multi-checkpoints-alpaca"
-  notes: "llama 2 13b on alpaca with saving checkpoints every 300 steps"
-  tags: ["alpaca", "Llama2-13B"]
+  name: "llama2-7b-per-tok-act-quant"
+  notes: "llama 2 7b on alpaca with saving checkpoints every 300 steps"
+  tags: ["alpaca", "Llama2-7B", "per token"]
 # Model
 model:
-  name: "meta-llama/Llama-2-13b-hf"
+  name: "meta-llama/Llama-2-7b-hf"
   num_bits_weight: 4
   num_bits_activation: 4
   block_size: 2048

@@ -55,7 +55,7 @@ def ensure_dtype_consistency(model, target_dtype=torch.bfloat16):
 def custom_eval(peft_model, tokenizer, device, trainer_ppl):
     print("\n--- Evaluating with Proper Perplexity Metric (Test Set) ---")
     from datasets import load_dataset
-    test_dataset = load_dataset("wikitext/wikitext-2-raw-v1", split="test")
+    test_dataset = load_dataset("wikitext", "wikitext-2-raw-v1", split="test")
     proper_eval = Evaluation(test_dataset, tokenizer, device, num_samples=None)
     custom_ppl = proper_eval.evaluate(peft_model, seq_len=2048, stride=2048)
     print(f"\nTest Perplexity (Standard Protocol): {custom_ppl:.2f}")

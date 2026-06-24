@@ -70,7 +70,7 @@ def main():
         ).to("cuda")
         model.eval()
         fp16_mem = measure_memory(model)
-        run_suite(model, tokenizer, "fp16_baseline", os.path.join(output_dir, "fp16"), seq_lens=[128])
+        run_suite(model, tokenizer, "fp16_baseline", os.path.join(output_dir, "fp16"), seq_lens=[128, 512])
         del model, tokenizer
         force_free()
 

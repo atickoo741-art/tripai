@@ -1,5 +1,6 @@
 import json
 import os
+from inspect import signature
 
 import torch
 from peft import LoraConfig, get_peft_model
@@ -14,6 +15,8 @@ def load_adapter(model, adapter_dir: str):
     with open(adapter_config_path) as f:
         lora_config_dict = json.load(f)
 
+    accepted = set(signature(LoraConfig.__init__).parameters.keys())
+    lora_config_dict = {k: v for k, v in lora_config_dict.items() if k in accepted}
     lora_config = LoraConfig(**lora_config_dict)
     peft_model = get_peft_model(model, lora_config)
 

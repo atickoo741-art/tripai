@@ -82,7 +82,7 @@ void launch_repack_4_to_8(
  * s_x:      [M] float32
  * y:        [M, N] bfloat16
  */
-__launch_bounds__(256, 3)
+__launch_bounds__(256, 4)
 __global__ void fused_int4_tc_per_token_kernel(
     const int32_t* __restrict__ x_packed,
     const int32_t* __restrict__ w_packed,
@@ -109,7 +109,7 @@ __global__ void fused_int4_tc_per_token_kernel(
     int32_t d[4] = {0, 0, 0, 0};
 
     __shared__ int32_t s_a[16][8 + 1];
-    __shared__ int32_t s_b[64][8 + 1];
+    __shared__ int32_t s_b[64][8];
 
     for (int k_offset = 0; k_offset < K; k_offset += 64) {
         int x_off = k_offset / 8;
@@ -150,27 +150,28 @@ __global__ void fused_int4_tc_per_token_kernel(
         __syncthreads();
     }
 
-    __shared__ float tile[16][64 + 1];
+    int groupID = lane / 4;
+    int pair = (lane % 4) * 2;
+    int col = n_start + warp_id * 8 + pair;
+    int row_lo = m_start + groupID;
+    int row_hi = m_start + groupID + 8;
 
-    int d_row_a = lane / 4;
-    int d_col_pair = (lane % 4) * 2;
-    tile[d_row_a][warp_id * 8 + d_col_pair]          = (float)d[0];
-    tile[d_row_a][warp_id * 8 + d_col_pair + 1]      = (float)d[1];
-    tile[d_row_a + 8][warp_id * 8 + d_col_pair]      = (float)d[2];
-    tile[d_row_a + 8][warp_id * 8 + d_col_pair + 1]  = (float)d[3];
+    float s_lo = row_lo < M ? __ldg(&s_x[row_lo]) : 0.0f;
+    float s_hi = row_hi < M ? __ldg(&s_x[row_hi]) : 0.0f;
+    float w0 = col < N ? __ldg(&w_scale[col]) : 0.0f;
+    float w1 = col + 1 < N ? __ldg(&w_scale[col + 1]) : 0.0f;
 
-    __syncthreads();
-
-    const int total_tile = 16 * 64;
-    for (int i = t; i < total_tile; i += blockDim.x) {
-        int lr = i >> 6;
-        int lc = i & 63;
-        int row = m_start + lr;
-        int col = n_start + lc;
-        if (row < M && col < N) {
-            float val = tile[lr][lc] * __ldg(&s_x[row]) * __ldg(&w_scale[col]);
-            y[row * N + col] = __float2bfloat16(val);
-        }
+    if (row_lo < M) {
+        if (col < N)
+            y[row_lo * N + col] = __float2bfloat16((float)d[0] * s_lo * w0);
+        if (col + 1 < N)
+            y[row_lo * N + col + 1] = __float2bfloat16((float)d[1] * s_lo * w1);
+    }
+    if (row_hi < M) {
+        if (col < N)
+            y[row_hi * N + col] = __float2bfloat16((float)d[2] * s_hi * w0);
+        if (col + 1 < N)
+            y[row_hi * N + col + 1] = __float2bfloat16((float)d[3] * s_hi * w1);
     }
 }
 

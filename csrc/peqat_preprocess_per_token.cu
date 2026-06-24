@@ -35,15 +35,20 @@ __global__ void preprocess_per_token_kernel(
     // --- Phase 1: Per-token max reduction ---
     float local_max = 0.0f;
 
-    for (int k = tid; k < K; k += blockDim.x) {
-        float xv = __bfloat162float(x[row * K + k]);
-        float sv = __bfloat162float(smooth[k]);
-        float cv = __bfloat162float(clip[k]);
+    for (int k = tid * 2; k < K; k += blockDim.x * 2) {
+        __nv_bfloat162 xw = __ldg((const __nv_bfloat162*)&x[row * K + k]);
+        __nv_bfloat162 sw = __ldg((const __nv_bfloat162*)&smooth[k]);
+        __nv_bfloat162 cw = __ldg((const __nv_bfloat162*)&clip[k]);
 
-        float xs = xv / sv;
-        float xc = fminf(fmaxf(xs, -cv), cv);
-        float axc = fabsf(xc);
-        if (axc > local_max) local_max = axc;
+        float xv0 = __bfloat162float(xw.x), xv1 = __bfloat162float(xw.y);
+        float sv0 = __bfloat162float(sw.x), sv1 = __bfloat162float(sw.y);
+        float cv0 = __bfloat162float(cw.x), cv1 = __bfloat162float(cw.y);
+
+        float xs0 = xv0 / sv0, xs1 = xv1 / sv1;
+        float xc0 = fminf(fmaxf(xs0, -cv0), cv0);
+        float xc1 = fminf(fmaxf(xs1, -cv1), cv1);
+        if (fabsf(xc0) > local_max) local_max = fabsf(xc0);
+        if (fabsf(xc1) > local_max) local_max = fabsf(xc1);
     }
 
     // Warp shuffle reduction (first 32 threads)

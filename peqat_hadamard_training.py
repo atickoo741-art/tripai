@@ -28,7 +28,7 @@ from fake_quant import (
     Evaluation,
     find_available_dir,
 )
-from data_preparation import load_wikitext2_sliding_window
+from data_preparation import load_alpaca_instruct, load_wikitext2_sliding_window
 from config_loader import Config
 
 
@@ -68,7 +68,7 @@ def custom_eval(peft_model, tokenizer, device, trainer_ppl):
 
 
 if __name__ == "__main__":
-    config = Config("config_hadamard.yaml")
+    config = Config("config_hadamard_alpaca.yaml")
     print("=" * 60)
     print(f"Experiment: {config.get('experiment.name')}")
     print(f"Run ID: {config.run_id}")
@@ -158,8 +158,12 @@ if __name__ == "__main__":
     dataset_name = config.get('dataset.name', 'wikitext')
     print(f"\nDataset selected: {dataset_name}")
 
-    if dataset_name == "wikitext":
-        from data_preparation import load_wikitext2_sliding_window
+    if dataset_name == "alpaca":
+        datasets, _ = load_alpaca_instruct(
+            model_name=model_name,
+            max_length=config.get('model.block_size', 2048),
+        )
+    elif dataset_name == "wikitext":
         datasets, _ = load_wikitext2_sliding_window(
             model_name=model_name,
             seq_len=config.get('model.block_size'),
@@ -205,6 +209,8 @@ if __name__ == "__main__":
         gradient_checkpointing_kwargs={'use_reentrant': config.get('training.use_reentrant', False)},
         save_strategy=config.get('training.save_strategy'),
         eval_strategy=config.get('training.eval_strategy'),
+        save_steps=config.get('training.save_steps', None),
+        eval_steps=config.get('training.eval_steps', None),
         logging_steps=config.get('training.logging_steps', None),
         learning_rate=float(config.get('training.learning_rate')),
         warmup_ratio=float(config.get('training.warmup_ratio')),

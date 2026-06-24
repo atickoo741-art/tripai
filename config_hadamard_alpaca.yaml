@@ -1,0 +1,72 @@
+# config_hadamard_alpaca.yaml - Hadamard PE-QAT on Alpaca
+# No learned clip/smooth — Hadamard rotation diffuses outliers for per-token quant.
+# Single epoch, step-based saving (peak at ~100 steps from original PE-QAT Alpaca run).
+
+experiment:
+  name: "llama2-7b-hadamard-alpaca"
+  notes: "Hadamard rotation + per-token activation quant on Alpaca instruction tuning. Single epoch."
+  tags: ["Llama2-7B", "alpaca", "hadamard", "per-token", "int4-tc"]
+
+# Model
+model:
+  name: "meta-llama/Llama-2-7b-hf"
+  num_bits_weight: 4
+  num_bits_activation: 4
+  block_size: 2048
+
+# LoRA
+lora:
+  rank: 32
+  alpha: 64
+  dropout: 0.05
+  target_modules: ["q_proj", "k_proj", "v_proj", "o_proj",
+                   "gate_proj", "up_proj", "down_proj"]
+
+# Training
+training:
+  output_dir: "./output_qat_lora"
+  num_epochs: 1
+  batch_size: 16
+  gradient_accumulation_steps: 2
+  max_grad_norm: 5.0
+
+  gradient_checkpointing: true
+  load_best_model_at_end: true
+  metric_for_best_model: "eval_loss"
+  overwrite_output_dir: false
+
+  # Learning Rate Schedule
+  learning_rate: 1e-4
+  warmup_ratio: 0.15
+  lr_scheduler_type: "cosine"
+  min_lr_rate: 0.1
+  num_cycles: 3
+  use_reentrant: False
+
+  # Optimizer — single group (LoRA only, no clip/smooth multipliers)
+  optimizer:
+    weight_decay: 0.01
+    adam_beta1: 0.9
+    adam_beta2: 0.95
+    adam_eps: 1.0e-8
+
+  # Logging & saving — step-based to catch early peak
+  logging_steps: 10
+  save_strategy: "steps"
+  save_steps: 100
+  eval_strategy: "steps"
+  eval_steps: 100
+
+# Dataset
+dataset:
+  name: "alpaca"
+
+# System
+system:
+  seed: 42
+  bf16: true
+  tf32: true
+  fp16: false
+  dataloader_num_workers: 16
+  dataloader_prefetch_factor: 4
+  dataloader_pin_memory: true

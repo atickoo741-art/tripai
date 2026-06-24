@@ -33,6 +33,7 @@ class CUDAQuantizedLinear(nn.Module):
         self._has_tc_kernel = hasattr(peqat_cuda, "fused_int4_tc_per_token_forward")
         self._has_gemv_kernel = hasattr(peqat_cuda, "fused_int4_gemv_per_token_forward")
         self._has_preprocess_per_token = hasattr(peqat_cuda, "preprocess_per_token_forward")
+        self._has_fused_tc_kernel = hasattr(peqat_cuda, "fused_int4_tc_preprocess_forward")
 
     @staticmethod
     def _unpack_int4(packed_bytes, rows, cols):
@@ -113,6 +114,14 @@ class CUDAQuantizedLinear(nn.Module):
         )
         return y
 
+    def _forward_fused_tc(self, x_2d):
+        M, K = x_2d.shape
+        y = peqat_cuda.fused_int4_tc_preprocess_forward(
+            x_2d, self.smooth, self.clip, self.w_packed_tc, self.w_scale.float(),
+            self.out_features, K,
+        )
+        return y
+
     def _forward_bf16(self, x_2d):
         _, x_dq, _ = peqat_cuda.preprocess_forward_bf16(
             x_2d, self.smooth, self.clip
@@ -139,6 +148,8 @@ class CUDAQuantizedLinear(nn.Module):
 
         if self._has_gemv_kernel and self._has_preprocess_per_token and x_2d.size(0) == 1:
             y = self._forward_gemv(x_2d)
+        elif self._has_fused_tc_kernel and x_2d.size(0) > 1:
+            y = self._forward_fused_tc(x_2d)
         elif self._has_tc_kernel and self._has_preprocess_per_token:
             y = self._forward_tc(x_2d)
         else:

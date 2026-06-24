@@ -98,6 +98,17 @@ void launch_fused_int4_tc_per_token(
     cudaStream_t stream
 );
 
+void launch_fused_preprocess_tc_per_token(
+    const __nv_bfloat16* x,
+    const __nv_bfloat16* smooth,
+    const __nv_bfloat16* clip,
+    const int32_t* w_packed,
+    const float* w_scale,
+    __nv_bfloat16* y,
+    int M, int N, int K,
+    cudaStream_t stream
+);
+
 void launch_fused_int4_gemv(
     const int32_t* x_packed,
     const int32_t* w_packed,
@@ -736,6 +747,60 @@ torch::Tensor fused_int4_gemv_per_token_forward(
     return y;
 }
 
+torch::Tensor fused_int4_tc_preprocess_forward(
+    torch::Tensor x,
+    torch::Tensor smooth,
+    torch::Tensor clip,
+    torch::Tensor w_packed_tc,
+    torch::Tensor w_scale,
+    int64_t out_features,
+    int64_t in_features
+) {
+    TORCH_CHECK(x.device().is_cuda(), "x must be CUDA tensor");
+    TORCH_CHECK(smooth.device().is_cuda(), "smooth must be CUDA tensor");
+    TORCH_CHECK(clip.device().is_cuda(), "clip must be CUDA tensor");
+    TORCH_CHECK(w_packed_tc.device().is_cuda(), "w_packed_tc must be CUDA tensor");
+    TORCH_CHECK(w_scale.device().is_cuda(), "w_scale must be CUDA tensor");
+
+    TORCH_CHECK(x.dim() == 2, "x must be 2D [M, K]");
+    TORCH_CHECK(x.scalar_type() == torch::kBFloat16, "x must be bfloat16");
+    TORCH_CHECK(smooth.dim() == 1, "smooth must be 1D [K]");
+    TORCH_CHECK(smooth.scalar_type() == torch::kBFloat16, "smooth must be bfloat16");
+    TORCH_CHECK(clip.dim() == 1, "clip must be 1D [K]");
+    TORCH_CHECK(clip.scalar_type() == torch::kBFloat16, "clip must be bfloat16");
+
+    TORCH_CHECK(w_packed_tc.dim() == 2, "w_packed_tc must be 2D [N, K/8]");
+    TORCH_CHECK(w_packed_tc.scalar_type() == torch::kInt32, "w_packed_tc must be int32");
+    TORCH_CHECK(w_scale.dim() == 1, "w_scale must be 1D [N]");
+    TORCH_CHECK(w_scale.scalar_type() == torch::kFloat32, "w_scale must be float32");
+
+    int M = x.size(0);
+    int K = x.size(1);
+    int N = out_features;
+
+    TORCH_CHECK(smooth.size(0) == K, "smooth dim[0] != K");
+    TORCH_CHECK(clip.size(0) == K, "clip dim[0] != K");
+    TORCH_CHECK(w_packed_tc.size(0) == N, "w_packed_tc dim[0] != out_features");
+    TORCH_CHECK(w_packed_tc.size(1) == K / 8, "w_packed_tc dim[1] != K/8");
+    TORCH_CHECK(w_scale.size(0) == N, "w_scale dim[0] != N");
+    TORCH_CHECK(K % 64 == 0, "K must be multiple of 64 for INT4 TC");
+
+    auto y = torch::empty({M, N}, torch::dtype(torch::kBFloat16).device(x.device()));
+
+    launch_fused_preprocess_tc_per_token(
+        reinterpret_cast<__nv_bfloat16*>(x.data_ptr<at::BFloat16>()),
+        reinterpret_cast<__nv_bfloat16*>(smooth.data_ptr<at::BFloat16>()),
+        reinterpret_cast<__nv_bfloat16*>(clip.data_ptr<at::BFloat16>()),
+        w_packed_tc.data_ptr<int32_t>(),
+        w_scale.data_ptr<float>(),
+        reinterpret_cast<__nv_bfloat16*>(y.data_ptr<at::BFloat16>()),
+        M, N, K,
+        at::cuda::getCurrentCUDAStream()
+    );
+
+    return y;
+}
+
 // --- Hadamard preprocess (no smooth/clip params) ---
 
 std::vector<torch::Tensor> preprocess_hadamard_forward(
@@ -818,6 +883,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           "SM 12.1 INT4 Tensor Core GEMM: per-token quantized INT4 x @ INT4 w -> bf16");
     m.def("fused_int4_gemv_per_token_forward", &fused_int4_gemv_per_token_forward,
           "SM 12.1 INT4 GEMV (M=1): per-token quantized INT4 x @ INT4 w -> bf16, no padding waste");
+    m.def("fused_int4_tc_preprocess_forward", &fused_int4_tc_preprocess_forward,
+          "Fused preprocess+TC: x/smooth/clip -> per-token max -> quant -> pack -> mma.sync -> bf16. One kernel.");
     m.def("preprocess_hadamard_forward", &preprocess_hadamard_forward,
           "Hadamard PE-QAT preprocess: H(x) -> per-token max/7 -> pack 8xINT4 per int32. No smooth/clip.");
     m.def("hadamard_butterfly_forward", &hadamard_butterfly_forward,

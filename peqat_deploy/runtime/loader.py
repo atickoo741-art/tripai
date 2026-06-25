@@ -34,6 +34,23 @@ class CUDAQuantizedLinear(nn.Module):
         self._has_gemv_kernel = hasattr(peqat_cuda, "fused_int4_gemv_per_token_forward")
         self._has_preprocess_per_token = hasattr(peqat_cuda, "preprocess_per_token_forward")
 
+        # CUDA Graph state
+        self._graph = None
+        self._graph_in = None
+        self._graph_out = None
+        self._graph_packed = None
+        self._graph_s_x = None
+        self._graph_M = 0
+
+        # Pre-pad w_scale to float32 once (stable pointer for CUDA Graphs)
+        N_pad = (self.out_features + 63) // 64 * 64
+        if N_pad > self.out_features:
+            w_pad = torch.ones(N_pad - self.out_features, device=self.w_scale.device)
+            self.w_scale_f32 = torch.cat([self.w_scale.float(), w_pad], dim=0)
+        else:
+            self.w_scale_f32 = self.w_scale.float()
+        self.register_buffer("w_scale_f32", self.w_scale_f32)
+
     @staticmethod
     def _unpack_int4(packed_bytes, rows, cols):
         packed = packed_bytes[: (rows * cols + 1) // 2]
@@ -68,38 +85,31 @@ class CUDAQuantizedLinear(nn.Module):
 
     def _forward_tc(self, x_2d):
         M, K = x_2d.shape
-        x_packed_8, s_x = peqat_cuda.preprocess_per_token_forward(
-            x_2d, self.smooth, self.clip
-        )
-
         N = self.out_features
-        M_pad = (M + 15) // 16 * 16
+
+        if self._graph is not None and M == self._graph_M:
+            self._graph_in[:M].copy_(x_2d)
+            self._graph.replay()
+            return self._graph_out[:M, :N].contiguous()
+
         N_pad = (N + 63) // 64 * 64
-        if M_pad > M or N_pad > N:
-            x_packed_8 = torch.cat([
-                x_packed_8,
-                torch.zeros(M_pad - M, K // 8, dtype=torch.int32, device=x_packed_8.device),
-            ], dim=0) if M_pad > M else x_packed_8
-            s_x = torch.cat([
-                s_x,
-                torch.ones(M_pad - M, device=s_x.device),
-            ], dim=0) if M_pad > M else s_x
-            w_scale = self.w_scale.bfloat16()
-            if N_pad > N:
-                w_scale = torch.cat([
-                    w_scale,
-                    torch.ones(N_pad - N, device=w_scale.device),
-                ], dim=0)
-        else:
-            w_scale = self.w_scale.bfloat16()
+        M_pad = (M + 15) // 16 * 16
 
-        y_padded = peqat_cuda.fused_int4_tc_per_token_forward(
-            x_packed_8, self.w_packed_tc, w_scale.float(), s_x,
-            N_pad, K,
-        )
+        self._graph_in = torch.empty(M_pad, K, dtype=torch.bfloat16, device=x_2d.device)
+        self._graph_in[:M].copy_(x_2d)
+        self._graph_M = M
 
-        y = y_padded[:M, :N].contiguous()
-        return y
+        self._graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(self._graph):
+            self._graph_packed, self._graph_s_x = \
+                peqat_cuda.preprocess_per_token_forward(
+                    self._graph_in[:M], self.smooth, self.clip)
+            self._graph_out = \
+                peqat_cuda.fused_int4_tc_per_token_forward(
+                    self._graph_packed, self.w_packed_tc, self.w_scale_f32,
+                    self._graph_s_x, N_pad, K)
+
+        return self._graph_out[:M, :N].contiguous()
 
     def _forward_gemv(self, x_2d):
         M, K = x_2d.shape

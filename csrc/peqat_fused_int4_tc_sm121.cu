@@ -87,7 +87,7 @@ void launch_repack_4_to_8(
  * s_x:      [M] float32
  * y:        [M, N] bfloat16
  */
-__launch_bounds__(256, 4)
+__launch_bounds__(256, 3)
 __global__ void fused_int4_tc_per_token_kernel(
     const int32_t* __restrict__ x_packed,
     const int32_t* __restrict__ w_packed,

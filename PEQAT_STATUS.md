@@ -23,13 +23,13 @@ constrained per-token activation quantization format.
 
 ## Inference Speed (DGX Spark / GB10, SM 12.1)
 
-| Metric | FP16 | Per-tok PE-QAT | Hadamard PE-QAT |
-|---|---|---|---|
-| Prefill 128 (ms/tok) | 0.71 | 1.48 | _pending_ |
-| Prefill 512 (ms/tok) | 0.30 | 1.32 | _pending_ |
-| Decode 128 (ms/tok) | 76.7 | **28.1** (2.75x) | _pending_ |
-| Decode 512 (ms/tok) | 79.8 | **35.2** (2.25x) | _pending_ |
-| GPU memory | 15.5 GB | **6.9 GB** (2.25x) | _pending_ |
+| Metric | FP16 | Per-tok PE-QAT (v2) | Hadamard PE-QAT |
+|---|---|---|---|---|
+| Prefill 128 (ms/tok) | 0.66 | **0.79** (1.2x) | **0.80** (1.2x) |
+| Prefill 512 (ms/tok) | 0.29 | **0.66** (2.3x) | **0.66** (2.3x) |
+| Decode 128 (ms/tok) | 79.4 | **27.4** (2.9x) | **27.3** (2.9x) |
+| Decode 512 (ms/tok) | 82.5 | **32.0** (2.6x) | **32.2** (2.6x) |
+| GPU memory | 15.9 GB | **7.6 GB** (2.1x) | **7.6 GB** (2.1x) |
 
 ## Technical Contributions
 

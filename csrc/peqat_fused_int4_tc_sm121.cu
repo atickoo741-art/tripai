@@ -54,8 +54,9 @@ void launch_repack_4_to_8(
  * INT4 Tensor Core GEMM for SM 12.1 (Blackwell) using inline PTX.
  * Instruction: mma.sync.aligned.m16n8k64.row.col.s4.s4.s32
  *
- * M_TILE = 32, N_TILE = 64. Each block computes a 32x64 output tile.
- * Each warp runs 2 MMA ops per K-iteration: rows 0..15 and rows 16..31.
+ * M_TILE = 64, N_TILE = 64. Each block computes a 64x64 output tile.
+ * 8 warps arranged 4x2 (MxN). Each warp produces 16x32 output via 4
+ * consecutive MMA calls in N, reusing A fragments across all 4 calls.
  *
  * Per-MMA fragment layout (per warp of 32 threads, same for both MMAs):
  * Formulas from PTX ISA v9.3 §9.7.14.5, Figures 93-96.
@@ -71,6 +72,7 @@ void launch_repack_4_to_8(
  *   groupID = lane >> 2, threadID_in_group = lane % 4
  *   b[0]: col = groupID,  row(=K) = threadID*8 .. threadID*8+7       (K first half)
  *   b[1]: col = groupID,  row(=K) = threadID*8+32 .. threadID*8+7+32 (K second half)
+ * 4 N-tiles loaded per warp, each tile is 8 columns, covering 32 N-cols total.
  *
  * D (accumulator, 16x8 int32, 4 x int32 per thread):
  *   groupID = lane >> 2, threadID_in_group = lane % 4
@@ -85,7 +87,7 @@ void launch_repack_4_to_8(
  * s_x:      [M] float32
  * y:        [M, N] bfloat16
  */
-__launch_bounds__(256, 8)
+__launch_bounds__(256, 4)
 __global__ void fused_int4_tc_per_token_kernel(
     const int32_t* __restrict__ x_packed,
     const int32_t* __restrict__ w_packed,
@@ -100,18 +102,19 @@ __global__ void fused_int4_tc_per_token_kernel(
     int warp_id = t / 32;
     int lane = t % 32;
 
-    int m_start = blockIdx.y * 32;
+    int m_start = blockIdx.y * 64;
     int n_start = blockIdx.x * 64;
 
     if (m_start >= M) return;
 
     int ldm_x = K / 8;
     int ldm_w = K / 8;
-    int warp_offset = warp_id * 8;
+    int m_group = warp_id / 2;
+    int n_group = warp_id % 2;
 
-    int32_t d[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+    int32_t d[16] = {0,0,0,0, 0,0,0,0, 0,0,0,0, 0,0,0,0};
 
-    __shared__ int32_t s_a[32][8 + 1];
+    __shared__ int32_t s_a[64][8 + 1];
     __shared__ int32_t s_b[64][8];
 
     for (int k_offset = 0; k_offset < K; k_offset += 64) {
@@ -124,6 +127,10 @@ __global__ void fused_int4_tc_per_token_kernel(
                     s_a[row][k8] = __ldg(&x_packed[(m_start + row) * ldm_x + x_off + k8]);
                 else
                     s_a[row][k8] = 0;
+                if (m_start + row + 32 < M)
+                    s_a[row + 32][k8] = __ldg(&x_packed[(m_start + row + 32) * ldm_x + x_off + k8]);
+                else
+                    s_a[row + 32][k8] = 0;
             }
 
             int b_col = t / 4;
@@ -139,36 +146,62 @@ __global__ void fused_int4_tc_per_token_kernel(
             int a_gid = lane / 4, a_tid = lane % 4;
             int b_gid = lane / 4, b_tid = lane % 4;
 
-            uint32_t b[2];
-            b[0] = (uint32_t)s_b[warp_offset + b_gid][b_tid];
-            b[1] = (uint32_t)s_b[warp_offset + b_gid][b_tid + 4];
+            int a_base = m_group * 16;
 
-            uint32_t a1[4];
-            a1[0] = (uint32_t)s_a[a_gid][a_tid];
-            a1[1] = (uint32_t)s_a[a_gid + 8][a_tid];
-            a1[2] = (uint32_t)s_a[a_gid][a_tid + 4];
-            a1[3] = (uint32_t)s_a[a_gid + 8][a_tid + 4];
+            uint32_t a[4];
+            a[0] = (uint32_t)s_a[a_base + a_gid][a_tid];
+            a[1] = (uint32_t)s_a[a_base + a_gid + 8][a_tid];
+            a[2] = (uint32_t)s_a[a_base + a_gid][a_tid + 4];
+            a[3] = (uint32_t)s_a[a_base + a_gid + 8][a_tid + 4];
+
+            int b_base = n_group * 32;
+
+            uint32_t b0[2];
+            b0[0] = (uint32_t)s_b[b_base + b_gid][b_tid];
+            b0[1] = (uint32_t)s_b[b_base + b_gid][b_tid + 4];
+
+            uint32_t b1[2];
+            b1[0] = (uint32_t)s_b[b_base + 8 + b_gid][b_tid];
+            b1[1] = (uint32_t)s_b[b_base + 8 + b_gid][b_tid + 4];
+
+            uint32_t b2[2];
+            b2[0] = (uint32_t)s_b[b_base + 16 + b_gid][b_tid];
+            b2[1] = (uint32_t)s_b[b_base + 16 + b_gid][b_tid + 4];
+
+            uint32_t b3[2];
+            b3[0] = (uint32_t)s_b[b_base + 24 + b_gid][b_tid];
+            b3[1] = (uint32_t)s_b[b_base + 24 + b_gid][b_tid + 4];
 
             asm volatile(
                 "mma.sync.aligned.m16n8k64.row.col.s32.s4.s4.s32 "
                 "{%0, %1, %2, %3}, {%4, %5, %6, %7}, {%8, %9}, {%0, %1, %2, %3};\n"
                 : "+r"(d[0]), "+r"(d[1]), "+r"(d[2]), "+r"(d[3])
-                : "r"(a1[0]), "r"(a1[1]), "r"(a1[2]), "r"(a1[3]),
-                  "r"(b[0]), "r"(b[1])
+                : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]),
+                  "r"(b0[0]), "r"(b0[1])
             );
-
-            uint32_t a2[4];
-            a2[0] = (uint32_t)s_a[a_gid + 16][a_tid];
-            a2[1] = (uint32_t)s_a[a_gid + 24][a_tid];
-            a2[2] = (uint32_t)s_a[a_gid + 16][a_tid + 4];
-            a2[3] = (uint32_t)s_a[a_gid + 24][a_tid + 4];
 
             asm volatile(
                 "mma.sync.aligned.m16n8k64.row.col.s32.s4.s4.s32 "
                 "{%0, %1, %2, %3}, {%4, %5, %6, %7}, {%8, %9}, {%0, %1, %2, %3};\n"
                 : "+r"(d[4]), "+r"(d[5]), "+r"(d[6]), "+r"(d[7])
-                : "r"(a2[0]), "r"(a2[1]), "r"(a2[2]), "r"(a2[3]),
-                  "r"(b[0]), "r"(b[1])
+                : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]),
+                  "r"(b1[0]), "r"(b1[1])
+            );
+
+            asm volatile(
+                "mma.sync.aligned.m16n8k64.row.col.s32.s4.s4.s32 "
+                "{%0, %1, %2, %3}, {%4, %5, %6, %7}, {%8, %9}, {%0, %1, %2, %3};\n"
+                : "+r"(d[8]), "+r"(d[9]), "+r"(d[10]), "+r"(d[11])
+                : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]),
+                  "r"(b2[0]), "r"(b2[1])
+            );
+
+            asm volatile(
+                "mma.sync.aligned.m16n8k64.row.col.s32.s4.s4.s32 "
+                "{%0, %1, %2, %3}, {%4, %5, %6, %7}, {%8, %9}, {%0, %1, %2, %3};\n"
+                : "+r"(d[12]), "+r"(d[13]), "+r"(d[14]), "+r"(d[15])
+                : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]),
+                  "r"(b3[0]), "r"(b3[1])
             );
         }
 
@@ -177,42 +210,35 @@ __global__ void fused_int4_tc_per_token_kernel(
 
     int groupID = lane / 4;
     int pair = (lane % 4) * 2;
-    int col = n_start + warp_id * 8 + pair;
-    int row_0 = m_start + groupID;
-    int row_1 = m_start + groupID + 8;
-    int row_2 = m_start + groupID + 16;
-    int row_3 = m_start + groupID + 24;
 
-    float s_0 = row_0 < M ? __ldg(&s_x[row_0]) : 0.0f;
-    float s_1 = row_1 < M ? __ldg(&s_x[row_1]) : 0.0f;
-    float s_2 = row_2 < M ? __ldg(&s_x[row_2]) : 0.0f;
-    float s_3 = row_3 < M ? __ldg(&s_x[row_3]) : 0.0f;
-    float w0 = col < N ? __ldg(&w_scale[col]) : 0.0f;
-    float w1 = col + 1 < N ? __ldg(&w_scale[col + 1]) : 0.0f;
+    int row_lo = m_start + m_group * 16 + groupID;
+    int row_hi = row_lo + 8;
 
-    if (row_0 < M) {
-        if (col < N)
-            y[row_0 * N + col] = __float2bfloat16((float)d[0] * s_0 * w0);
-        if (col + 1 < N)
-            y[row_0 * N + col + 1] = __float2bfloat16((float)d[1] * s_0 * w1);
-    }
-    if (row_1 < M) {
-        if (col < N)
-            y[row_1 * N + col] = __float2bfloat16((float)d[2] * s_1 * w0);
-        if (col + 1 < N)
-            y[row_1 * N + col + 1] = __float2bfloat16((float)d[3] * s_1 * w1);
-    }
-    if (row_2 < M) {
-        if (col < N)
-            y[row_2 * N + col] = __float2bfloat16((float)d[4] * s_2 * w0);
-        if (col + 1 < N)
-            y[row_2 * N + col + 1] = __float2bfloat16((float)d[5] * s_2 * w1);
-    }
-    if (row_3 < M) {
-        if (col < N)
-            y[row_3 * N + col] = __float2bfloat16((float)d[6] * s_3 * w0);
-        if (col + 1 < N)
-            y[row_3 * N + col + 1] = __float2bfloat16((float)d[7] * s_3 * w1);
+    float s_lo = row_lo < M ? __ldg(&s_x[row_lo]) : 0.0f;
+    float s_hi = row_hi < M ? __ldg(&s_x[row_hi]) : 0.0f;
+
+    int tile_n0 = n_start + n_group * 32;
+
+    for (int tile = 0; tile < 4; tile++) {
+        int col0 = tile_n0 + tile * 8 + pair;
+        int col1 = col0 + 1;
+
+        float w0 = col0 < N ? __ldg(&w_scale[col0]) : 0.0f;
+        float w1 = col1 < N ? __ldg(&w_scale[col1]) : 0.0f;
+        int d_off = tile * 4;
+
+        if (row_lo < M) {
+            if (col0 < N)
+                y[row_lo * N + col0] = __float2bfloat16((float)d[d_off + 0] * s_lo * w0);
+            if (col1 < N)
+                y[row_lo * N + col1] = __float2bfloat16((float)d[d_off + 1] * s_lo * w1);
+        }
+        if (row_hi < M) {
+            if (col0 < N)
+                y[row_hi * N + col0] = __float2bfloat16((float)d[d_off + 2] * s_hi * w0);
+            if (col1 < N)
+                y[row_hi * N + col1] = __float2bfloat16((float)d[d_off + 3] * s_hi * w1);
+        }
     }
 }
 
@@ -228,7 +254,7 @@ void launch_fused_int4_tc_per_token(
     cudaStream_t stream
 ) {
     dim3 block(256);
-    dim3 grid((N + 63) / 64, (M + 31) / 32);
+    dim3 grid((N + 63) / 64, (M + 63) / 64);
     fused_int4_tc_per_token_kernel<<<grid, block, 0, stream>>>(
         x_packed, w_packed, w_scale, s_x, y, M, N, K
     );

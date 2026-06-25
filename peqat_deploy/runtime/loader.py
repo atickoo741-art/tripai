@@ -49,7 +49,6 @@ class CUDAQuantizedLinear(nn.Module):
             self.w_scale_f32 = torch.cat([self.w_scale.float(), w_pad], dim=0)
         else:
             self.w_scale_f32 = self.w_scale.float()
-        self.register_buffer("w_scale_f32", self.w_scale_f32)
 
     @staticmethod
     def _unpack_int4(packed_bytes, rows, cols):

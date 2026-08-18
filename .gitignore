@@ -1,17 +1,28 @@
-'EOF'
+# Python
+__pycache__/
+*.pyc
+*.egg-info/
+*.log
+
+# Virtualenv
 qatenv/
+.venv/
+
+# Training / model artifacts (never commit)
 output_*/
-qat_lora_model_*/
+qat_lora_model*/
 qat_lora_model/
+baseline_lora_adapters/*.safetensors
 *.pt
 *.safetensors
 *.bin
-__pycache__/
-.cache/
+*.pth
 data/
-EOF
-test_fusing.py
-full_commits.txt
-cleaned_commits.txt
-.gitignore
-commits.json
+.cache/
+
+# OS
+.DS_Store
+
+# Paper drafts (kept out of version control)
+Template/
+IEEE-conference-template-062824/

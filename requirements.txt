@@ -87,7 +87,7 @@ pandocfilters==1.5.1
 parso==0.8.5
 pathvalidate==3.3.1
 peft==0.18.0
--e git+ssh://git@github.com/shresthmishra1/Parameter-Efficient-QAT-for-W4A4.git@858c5789675f87c94fab71fd7df4e7a2495825ba#egg=peqat_cuda&subdirectory=csrc
+-e git+ssh://git@github.com/shresthmishra1/PE-QAT.git@v1.0#egg=peqat_cuda&subdirectory=csrc
 pexpect==4.9.0
 pickleshare==0.7.5
 pillow==12.0.0

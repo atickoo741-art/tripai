@@ -41,22 +41,26 @@ def reference_preprocess_per_token(x, smooth, clip):
     x_scaled = x_c / s_x.unsqueeze(1)
     x_q = torch.clamp(torch.round(x_scaled), qmin, qmax).to(torch.int32)
 
-    n_packed = K // 4
+    # Same layout as the kernel: 8 consecutive K values per int32,
+    # value k0+i in bits 4i..4i+3.
+    n_packed = K // 8
+    groups = (x_q & 0xF).reshape(M, n_packed, 8)
     x_packed = torch.zeros(M, n_packed, dtype=torch.int32)
-    for i in range(4):
-        x_packed |= ((x_q[:, i::4] & 0xF) << (i * 4))
+    for i in range(8):
+        x_packed |= groups[:, :, i] << (i * 4)
 
     return x_packed, s_x
 
 
 def unpack_int4(x_packed, M, K):
-    """Unpack int32[M, K/4] to individual INT4 values as int8[M, K]."""
-    n_packed = K // 4
-    x_q = torch.zeros(M, K, dtype=torch.int32, device=x_packed.device)
-    for i in range(4):
-        x_q[:, i::4] = (x_packed[:, :n_packed] >> (i * 4)) & 0xF
+    """Unpack int32[M, K/8] (8 consecutive INT4 per word) to int8[M, K]."""
+    n_packed = K // 8
+    words = x_packed[:, :n_packed].to(torch.int64) & 0xFFFFFFFF
+    x_q = torch.zeros(M, n_packed, 8, dtype=torch.int64, device=x_packed.device)
+    for i in range(8):
+        x_q[:, :, i] = (words >> (i * 4)) & 0xF
     x_q = torch.where(x_q > 7, x_q - 16, x_q)
-    return x_q.to(torch.int8)
+    return x_q.reshape(M, K).to(torch.int8)
 
 
 def test_shapes():

@@ -1,10 +1,16 @@
 """Test INT4 Tensor Core GEMM (Phase C) on SM 12.1.
 
 End-to-end test:
-  1. preprocess_per_token_forward (M tokens, K features)
-  2. repack_4_to_8_forward
-  3. fused_int4_tc_per_token_forward
-  4. Compare against bf16 reference matmul
+  1. preprocess_per_token_forward (M tokens, K features); it already packs
+     8 INT4 per int32, the layout the GEMM reads
+  2. fused_int4_tc_per_token_forward
+  3. Compare against bf16 reference matmul
+
+repack_4_to_8_forward is tested on its own below. It must not be applied to
+preprocess output: that output is already dense, and repacking it halves the
+row width, so the GEMM would read K/8 words per row from a K/16-wide tensor.
+
+The exact suite is tests/test_prefill_kernels.py.
 """
 
 import torch
@@ -121,7 +127,7 @@ def test_tc_gemm():
 
         # Compute reference using kernel's s_x
         y_ref = reference_forward(x, smooth, clip, w, w_scale, s_x=s_x)
-        x_packed_8 = peqat_cuda.repack_4_to_8_forward(x_packed)
+        x_packed_8 = x_packed  # already [M, K/8], 8 INT4 per int32
 
         s_x_padded = s_x
         x_8_padded = x_packed_8

@@ -285,9 +285,15 @@ torch::Tensor fused_int4_tc_per_token_forward(
 
     TORCH_CHECK(w_packed_tc.size(0) == N, "w_packed_tc dim[0] != out_features");
     TORCH_CHECK(w_packed_tc.size(1) == K / 8, "w_packed_tc dim[1] != K/8");
+    TORCH_CHECK(x_packed_8.size(1) == K / 8,
+                "x_packed_8 dim[1] != K/8 (8 INT4 per int32; do not repack preprocess output)");
     TORCH_CHECK(w_scale.size(0) == N, "w_scale dim[0] != N");
     TORCH_CHECK(s_x.size(0) == M, "s_x dim[0] != M");
     TORCH_CHECK(K % 64 == 0, "K must be multiple of 64 for INT4 TC");
+    // The kernel's B-tile loads are not bounds-checked in N.
+    TORCH_CHECK(N % 64 == 0, "out_features must be a multiple of 64 for INT4 TC");
+    TORCH_CHECK(x_packed_8.is_contiguous() && w_packed_tc.is_contiguous(),
+                "x_packed_8 and w_packed_tc must be contiguous");
 
     auto y = torch::empty({M, N}, torch::dtype(torch::kBFloat16).device(x_packed_8.device()));
 
@@ -338,6 +344,11 @@ torch::Tensor fused_int4_gemv_per_token_forward(
     TORCH_CHECK(w_scale.size(0) == N, "w_scale dim[0] != N");
     TORCH_CHECK(s_x.size(0) == 1, "s_x dim[0] != 1");
     TORCH_CHECK(K % 8 == 0, "K must be multiple of 8");
+    TORCH_CHECK(x_packed_8.size(1) == K / 8, "x_packed_8 dim[1] != K/8");
+    // The kernel stages x in a fixed __shared__ int32_t[2048].
+    TORCH_CHECK(K / 8 <= 2048, "fused_int4_gemv supports K <= 16384");
+    TORCH_CHECK(x_packed_8.is_contiguous() && w_packed_tc.is_contiguous(),
+                "x_packed_8 and w_packed_tc must be contiguous");
 
     auto y = torch::empty({1, N}, torch::dtype(torch::kBFloat16).device(x_packed_8.device()));
 
